@@ -2,6 +2,14 @@
 
 Kilobat is a macOS command-line tool for network monitoring and diagnostics, including Wi-Fi, DNS, connectivity, and local traffic. It also provides an MCP server for agent clients. The native Kilobat app is a separate product: https://kilobat.app.
 
+## Install with Homebrew
+
+```sh
+brew install seifip/kilobat/kilobat
+```
+
+This builds from source and requires Xcode 16 or newer.
+
 ## Build
 
 Requires macOS 14 or later and Swift 6.
