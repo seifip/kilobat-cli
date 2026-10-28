@@ -22,6 +22,8 @@ swift test
 
 Run `kilobat --help` for commands and `kilobat mcp --help` for agent integration. Commands that change system settings may require confirmation and administrator authorization.
 
+macOS shows Wi-Fi network names only to apps with Location permission. When the Kilobat app is running, the CLI reads names, filter status and per-network budgets from it; without the app, Wi-Fi signal, channels and everything else still work, but network names read as hidden.
+
 ## License
 
 Kilobat CLI and the source in this repository are licensed under the GNU General Public License version 3.0 only; see [LICENSE](LICENSE). Kilobat's name and artwork are not licensed for use as trademarks. The separate Kilobat desktop app is distributed under its own terms.

@@ -12,12 +12,13 @@ enum DiagnosticsCLI {
             else { print(DiagnosticStore.report(snapshot)) }
         case "scan":
             guard args.dropFirst().allSatisfy({ $0 == "--json" }) else { throw CLIError("Use scan [--json].") }
-            let networks = try await DiagnosticProbe().scan()
+            let networks = try await WiFiCLI.nearbyNetworks()
             if args.contains("--json") { try printJSON(networks) }
             else {
                 print("Nearby Wi-Fi networks · macOS Location permission may be required\n")
                 for network in networks { print("\(KilobatCLI.pad(network.ssid, 30)) \(network.rssi) dBm · Ch \(network.channel) · \(network.band) · \(network.widthMHz) MHz") }
                 if networks.isEmpty { print("No networks returned. Enable Wi-Fi scanning in the Kilobat app.") }
+                else if networks.allSatisfy({ $0.ssid == "Hidden network" }) { print("\nNames are hidden: macOS shows them only to apps with Location permission. Open the Kilobat app and run this again.") }
             }
         case "radar":
             guard args.dropFirst().allSatisfy({ ["--watch", "--json"].contains($0) }) else { throw CLIError("Use radar [--watch] [--json].") }
@@ -66,10 +67,12 @@ enum DiagnosticsCLI {
                 print("Bufferbloat: \(result.bufferbloat)")
                 if let latency = result.addedLatency { print(String(format: "Added latency: %.1f ms", latency)) }
                 else { print("Insufficient sustained load or ping replies for a reliable bufferbloat comparison.") }
+                print("Video calls: \(result.videoReadiness)   Streaming: \(result.streamingReadiness)")
+                for warning in result.callCautionReasons { print("  ! \(warning)") }
                 print("\(TrafficFormat.bytes(UInt64(result.transferredBytes))) transferred to/from Cloudflare")
             }
         case "dns":
-            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|flush]. Changes require administrator approval.") }
+            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|flush]. Changes require administrator approval.") }
             if args.count == 2 && args[1] == "flush" {
                 try await NetworkTools.flushDNS(); print("✓ DNS cache flushed."); return
             }
@@ -85,17 +88,18 @@ enum DiagnosticsCLI {
                                     routerLatencyMs: snapshot.router?.average, internetLatencyMs: snapshot.internet.average, internetJitterMs: snapshot.internet.jitter))
     }
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
-        try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency))
+        try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
+                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, callWarnings: result.callCautionReasons))
     }
     static func setDNS(_ name: String) async throws -> (DNSProvider, String) {
         guard let provider = DNSProvider.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }), let service = await DiagnosticProbe().snapshot().networkService else {
-            throw CLIError("Choose automatic, cloudflare, or google on an active network service.")
+            throw CLIError("Choose automatic, cloudflare, google or quad9 on an active network service.")
         }
         try await DNSService.set(provider, service: service)
         return (provider, service)
     }
     static func encode<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(value)
     }
     private static func printJSON<T: Encodable>(_ value: T) throws { print(String(decoding: try encode(value), as: UTF8.self)) }
@@ -118,5 +122,9 @@ enum DiagnosticsCLI {
         let measurements: SpeedTestResult
         let bufferbloat: String
         let addedLatencyMs: Double?
+        let voiceCalls: String
+        let videoCalls: String
+        let streaming: String
+        let callWarnings: [String]
     }
 }

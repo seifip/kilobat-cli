@@ -1,9 +1,9 @@
 import Foundation
 
 public enum DNSProvider: String, CaseIterable, Sendable {
-    case automatic = "Automatic", cloudflare = "Cloudflare", google = "Google"
+    case automatic = "Automatic", cloudflare = "Cloudflare", google = "Google", quad9 = "Quad9"
     public var addresses: [String] {
-        switch self { case .automatic: ["Empty"]; case .cloudflare: ["1.1.1.1", "1.0.0.1"]; case .google: ["8.8.8.8", "8.8.4.4"] }
+        switch self { case .automatic: ["Empty"]; case .cloudflare: ["1.1.1.1", "1.0.0.1"]; case .google: ["8.8.8.8", "8.8.4.4"]; case .quad9: ["9.9.9.9", "149.112.112.112"] }
     }
 }
 public enum DNSService {

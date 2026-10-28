@@ -19,14 +19,17 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "networks", "health-history"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
+        // A piped report gets the compact JSON summary unless a format was chosen; raw samples can run to megabytes.
+        if Terminal.piped, command == "report", !args.contains("--json"), !args.contains("--csv") { args += ["--summary", "--json"] }
         switch command {
         case "blocklist", "domain-exception", "remember-network", "scope": try await PolicyCLI.run(args)
         case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history": try await ExpertCLI.run(args)
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
+        case "wifi", "channels", "networks", "health-history", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
         case "--help", "-h", "help": print(help)
         case "completion":
             guard args.count <= 2 else { throw CLIError("Use completion [zsh|bash|fish].") }
@@ -40,7 +43,7 @@ struct KilobatCLI {
             let path = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
             guard path.contains("/Cellar/") else {
                 print("This copy was not installed with Homebrew.")
-                print("Download the latest CLI from https://kilobat.app, or install with: brew install kilobat/tap/kilobat")
+                print("Download the latest CLI from https://kilobat.app, or install with: brew install seifip/kilobat/kilobat")
                 return
             }
             let brew = Process(); brew.executableURL = URL(fileURLWithPath: "/usr/bin/env"); brew.arguments = ["brew", "upgrade", "kilobat"]
@@ -67,22 +70,34 @@ struct KilobatCLI {
                 print("✓ \(profile.rawValue) profile selected. UI updates on the next sample.")
                 print("  Rules are saved; enforcement requires the open app and its active signed filter.")
             }
-        case "allow", "block":
-            guard (args.count == 2 || (args.count == 4 && args[2] == "--minutes")), (args[1].contains(".") || args[1].hasPrefix("process:")), !args[1].contains(" ") else { throw CLIError("Use \(command) <bundle-id>, e.g. com.example.App. Process rules use process:<name>.") }
+        case "allow", "block", "reset":
+            let options = try ruleOptions(args, command: command)
+            guard let id = options.id else { throw CLIError("Use \(command) <bundle-id|process:name> [--profile name]\(command == "reset" ? "" : " [--minutes 1…1440]").") }
             let store = TrafficStore(startMonitoring: false)
-            try saveAppRule(args[1], allowed: command == "allow", minutes: args.count == 4 ? Int(args[3]) ?? 0 : nil, in: store)
-            print("✓ Saved \(command) rule for \(args[1]) in \(store.preferences.profile.rawValue).")
+            let profile = options.profile ?? store.preferences.profile
+            if command == "reset" {
+                guard options.minutes == nil else { throw CLIError("reset takes no --minutes.") }
+                print(store.removeRule(id, in: profile)
+                    ? "✓ Removed the rule for \(id) in \(profile.rawValue). It now follows the default: \(store.preferences.defaultAllow ? "allow" : "block")."
+                    : "No rule for \(id) in \(profile.rawValue).")
+                return
+            }
+            try saveAppRule(id, allowed: command == "allow", minutes: options.minutes, profile: profile, in: store)
+            print("✓ Saved \(command) rule for \(id) in \(profile.rawValue)\(options.minutes.map { " for \($0) minutes" } ?? "").")
             print("  Enforcement requires the open app and its active signed filter.")
         case "rules":
-            guard args.dropFirst().allSatisfy({ $0 == "--json" }) else { throw CLIError("Use rules [--json].") }
+            let options = try ruleOptions(args, command: command)
+            guard options.id == nil, options.minutes == nil else { throw CLIError("Use rules [--profile name] [--json].") }
             let store = TrafficStore(startMonitoring: false)
-            if args.contains("--json") { print(String(decoding: try rulesJSON(store), as: UTF8.self)); return }
-            print("\(store.preferences.profile.rawValue) · saved access rules")
-            let rules = store.preferences.rules[store.preferences.profile.rawValue] ?? [:]
-            if rules.isEmpty { print("No explicit rules. New apps: \(store.preferences.defaultAllow ? "allow" : "block").") }
+            let profile = options.profile ?? store.preferences.profile
+            if args.contains("--json") { print(String(decoding: try rulesJSON(store, profile: profile, app: await WiFiCLI.connection()), as: UTF8.self)); return }
+            print("\(profile.rawValue)\(profile == store.preferences.profile ? " (active)" : "") · saved access rules")
+            if profile == .unrestricted { print("Unrestricted allows every app; its rules apply only after switching to Travel or Work."); return }
+            let rules = store.preferences.rules[profile.rawValue] ?? [:]
+            print("Apps without a rule: \(store.preferences.defaultAllow ? "allow" : "block")")
             for (id, allowed) in rules.sorted(by: { $0.key < $1.key }) { print("\(allowed ? "allow" : "block")  \(id)") }
-            for (key, rule) in (store.preferences.temporaryRules ?? [:]).filter({ $0.key.hasPrefix(store.preferences.profile.rawValue + "|") && $0.value.expires > Date() }).sorted(by: { $0.key < $1.key }) {
-                print("\(rule.allowed ? "allow" : "block")  \(key) · expires \(rule.expires.formatted())")
+            for (key, rule) in (store.preferences.temporaryRules ?? [:]).filter({ $0.key.hasPrefix(profile.rawValue + "|") && $0.value.expires > Date() }).sorted(by: { $0.key < $1.key }) {
+                print("\(rule.allowed ? "allow" : "block")  \(key.dropFirst(profile.rawValue.count + 1)) · until \(rule.expires.formatted(date: .omitted, time: .shortened))")
             }
             print("Saved rules · check the app for live filter status")
         case "limit":
@@ -101,6 +116,8 @@ struct KilobatCLI {
                 days = value; index += 2
             }
             let store = TrafficStore(startMonitoring: false)
+            let since = Calendar.current.date(byAdding: .day, value: 1 - days, to: Calendar.current.startOfDay(for: Date())) ?? .distantPast
+            let usage = store.usage.filter { $0.date >= since }
             if args.contains("--summary") {
                 let summary = UsageSummary(store.usage, days: days)
                 if args.contains("--json") { print(String(decoding: try DiagnosticsCLI.encode(summary), as: UTF8.self)); return }
@@ -109,15 +126,20 @@ struct KilobatCLI {
                 return
             }
             if args.contains("--json") {
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-                print(String(decoding: try encoder.encode(store.usage), as: UTF8.self))
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]; encoder.dateEncodingStrategy = .iso8601
+                print(String(decoding: try encoder.encode(usage), as: UTF8.self))
             } else if args.contains("--csv") {
-                print("timestamp,download_bytes,upload_bytes")
-                for entry in store.usage { print("\(ISO8601DateFormatter().string(from: entry.date)),\(entry.received),\(entry.sent)") }
+                // One row per app per sample, so a spreadsheet can pivot by app; the totals row has an empty app.
+                print("timestamp,app,download_bytes,upload_bytes,bytes")
+                for entry in usage {
+                    let time = ISO8601DateFormatter().string(from: entry.date)
+                    print("\(time),,\(entry.received),\(entry.sent),\(entry.total)")
+                    for (app, bytes) in entry.apps.sorted(by: { $0.key < $1.key }) where bytes > 0 { print("\(time),\(csv(app)),,,\(bytes)") }
+                }
             } else {
-                print("Kilobat · last 30 days (recorded while the UI is running)")
-                print("↓ \(TrafficFormat.bytes(store.usage.reduce(0) { $0 + $1.received }))  ↑ \(TrafficFormat.bytes(store.usage.reduce(0) { $0 + $1.sent }))")
-                print("\(store.usage.count) samples · data stays on this Mac")
+                print("Kilobat · last \(days) days (recorded while the app is running)")
+                print("↓ \(TrafficFormat.bytes(usage.reduce(0) { $0 + $1.received }))  ↑ \(TrafficFormat.bytes(usage.reduce(0) { $0 + $1.sent }))")
+                print("\(usage.count) samples · data stays on this Mac · --summary for top apps")
             }
         case "open":
             let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
@@ -129,13 +151,22 @@ struct KilobatCLI {
             print("✓ macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
             print("\(FileManager.default.isExecutableFile(atPath: "/usr/bin/nettop") ? "✓" : "✕") Apple nettop traffic monitoring")
             print("✓ Shared local preferences and usage history")
-            print("○ Filter activation cannot be verified by this CLI. Check the app’s filtering status.")
-            print("  Enable the provisioned extension from the app’s settings.")
+            guard let app = await WiFiCLI.connection() else {
+                print("○ The Kilobat app is not running. History, Wi-Fi names and blocking need it: kilobat open")
+                return
+            }
+            print("✓ Kilobat app running\((app["ssid"] as? String).map { " · on \($0)" } ?? "")")
+            switch app["filteringActive"] as? Bool {
+            case true?: print("✓ Network filter active: rules and budgets are enforced")
+            case false?: print("○ Network filter off: rules are saved but not enforced. Turn it on in Kilobat › Profiles.")
+            default: print("○ Filter status unavailable")
+            }
+            print((app["pro"] as? Bool) == true ? "✓ Kilobat Pro" : "○ Kilobat Free: blocking, budgets and history need Pro in the app")
         default: throw CLIError("Unknown command '\(command)'. Run kilobat --help.")
         }
     }
 
-    static let version = "0.1.0"
+    static let version = "0.2.0"
 
     /// Starts monitoring and waits up to 8 s for the first per-app sample.
     @MainActor static func sampledStore() async -> TrafficStore {
@@ -151,14 +182,15 @@ struct KilobatCLI {
     @MainActor static func status(watch: Bool, json: Bool) async {
         let store = await sampledStore()
         defer { store.shutdown() }
+        let app = json ? await WiFiCLI.connection() : nil
         if watch && !json && Terminal.interactive { await liveMonitor(store) }
         else if watch {
             while true {
-                if json { outputJSON(store) } else { print(dashboard(store).joined(separator: "\n") + "\n") }
+                if json { outputJSON(store, app: app) } else { print(dashboard(store).joined(separator: "\n") + "\n") }
                 fflush(stdout)
                 try? await Task.sleep(for: .seconds(1))
             }
-        } else if json { outputJSON(store) }
+        } else if json { outputJSON(store, app: app) }
         else { print(dashboard(store).joined(separator: "\n")) }
         if let error = store.error { FileHandle.standardError.write(Data("\(error)\n".utf8)) }
     }
@@ -223,6 +255,9 @@ struct KilobatCLI {
         lines.append(Terminal.dim("  Rules are saved locally. Filtering requires the network extension."))
         return lines
     }
+    /// The Mac app's preferences domain, where it keeps settings the CLI shares (device names, alerts, menu bar).
+    static var appDefaults: UserDefaults { UserDefaults(suiteName: "co.seifi.kilobat") ?? .standard }
+    static func csv(_ value: String) -> String { value.contains(where: { ",\"\n".contains($0) }) ? "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\"" : value }
     static func pad(_ text: String, _ length: Int) -> String {
         let clipped = text.count > length - 1 ? String(text.prefix(length - 2)) + "…" : text
         return clipped + String(repeating: " ", count: max(1, length - clipped.count))
@@ -233,33 +268,63 @@ struct KilobatCLI {
         let maximum = max(1, values.max() ?? 1)
         return String(values.map { bars[min(7, Int($0 / maximum * 7))] })
     }
-    @MainActor static func outputJSON(_ store: TrafficStore) {
-        if let encoded = try? statusJSON(store) { print(String(decoding: encoded, as: UTF8.self)) }
+    @MainActor static func outputJSON(_ store: TrafficStore, app: [String: Any]?) {
+        if let encoded = try? statusJSON(store, app: app) { print(String(decoding: encoded, as: UTF8.self)) }
     }
-    @MainActor static func statusJSON(_ store: TrafficStore) throws -> Data {
-        let data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.expensive, "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, "apps": store.filteredApps.map { ["id": $0.id, "name": $0.name, "downloadBytesPerSecond": $0.downloadRate, "uploadBytesPerSecond": $0.uploadRate, "sessionBytes": $0.total, "allowedRule": store.isAllowed($0.id)] as [String: Any] }]
-        return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys])
+    @MainActor static func statusJSON(_ store: TrafficStore, app: [String: Any]? = nil) throws -> Data {
+        var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.expensive, "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, "apps": store.filteredApps.map { ["id": $0.id, "name": $0.name, "downloadBytesPerSecond": $0.downloadRate, "uploadBytesPerSecond": $0.uploadRate, "sessionBytes": $0.total, "allowedRule": store.isAllowed($0.id), "processIDs": $0.processIDs] as [String: Any] }]
+        if let app { data.merge(appFields(app)) { _, new in new } }
+        return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
-    @MainActor static func rulesJSON(_ store: TrafficStore) throws -> Data {
-        let profile = store.preferences.profile.rawValue
+    /// What only the running app knows: filter state, Wi-Fi name and this network's budget use.
+    static func appFields(_ app: [String: Any]) -> [String: Any] {
+        var fields: [String: Any] = ["filteringActive": app["filteringActive"] ?? NSNull(), "ssid": app["ssid"] ?? NSNull()]
+        if let budget = app["budgetGB"] { fields["sessionBudgetGB"] = budget }
+        if let used = app["budgetUsed"] { fields["budgetUsed"] = used }
+        if let bytes = app["sessionBytes"] { fields["networkSessionBytes"] = bytes }
+        return fields
+    }
+    @MainActor static func rulesJSON(_ store: TrafficStore, profile selected: NetworkProfile? = nil, app: [String: Any]? = nil) throws -> Data {
+        let selected = selected ?? store.preferences.profile, profile = selected.rawValue
         let rules = (store.preferences.rules[profile] ?? [:]).sorted { $0.key < $1.key }.map { ["id": $0.key, "allowed": $0.value] as [String: Any] }
         let temporary = (store.preferences.temporaryRules ?? [:]).filter { $0.key.hasPrefix(profile + "|") && $0.value.expires > Date() }.sorted { $0.key < $1.key }
             .map { ["id": String($0.key.dropFirst(profile.count + 1)), "allowed": $0.value.allowed, "expires": ISO8601DateFormatter().string(from: $0.value.expires)] as [String: Any] }
-        let data: [String: Any] = ["profile": profile.lowercased(), "defaultAllow": store.preferences.profile == .unrestricted || store.preferences.defaultAllow, "rules": rules, "temporaryRules": temporary, "sessionBudgetGB": store.preferences.limitGB, "filteringActive": NSNull()]
-        return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys])
+        let data: [String: Any] = ["profile": profile.lowercased(), "active": selected == store.preferences.profile, "defaultAllow": selected == .unrestricted || store.preferences.defaultAllow, "rules": rules, "temporaryRules": temporary, "sessionBudgetGB": store.preferences.limitGB, "filteringActive": app?["filteringActive"] ?? NSNull()]
+        return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     @MainActor @discardableResult static func selectProfile(_ name: String, in store: TrafficStore) throws -> NetworkProfile {
         guard let profile = NetworkProfile.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }) else { throw CLIError("Choose travel, work, or unrestricted.") }
         store.preferences.profile = profile
         return profile
     }
-    @MainActor static func saveAppRule(_ id: String, allowed: Bool, minutes: Int?, in store: TrafficStore) throws {
+    @MainActor static func saveAppRule(_ id: String, allowed: Bool, minutes: Int?, profile: NetworkProfile? = nil, in store: TrafficStore) throws {
         guard id.contains(".") || id.hasPrefix("process:"), !id.contains(" ") else { throw CLIError("Use a bundle ID such as com.example.App, or process:<name> for a process rule.") }
-        guard store.preferences.profile != .unrestricted else { throw CLIError("Unrestricted allows every app. Select travel or work first.") }
+        let profile = profile ?? store.preferences.profile
+        guard profile != .unrestricted else { throw CLIError("Unrestricted allows every app. Pass --profile travel or work, or select one first.") }
         if let minutes {
             guard (1...1440).contains(minutes) else { throw CLIError("Temporary rule duration must be 1…1440 minutes.") }
-            store.setTemporary(id, allowed: allowed, minutes: minutes)
-        } else { store.setAllowed(id, allowed) }
+            store.setTemporary(id, allowed: allowed, minutes: minutes, in: profile)
+        } else { store.setAllowed(id, allowed, in: profile) }
+    }
+    /// Shared parsing for allow, block, reset and rules: an optional app ID, --profile and --minutes.
+    static func ruleOptions(_ args: [String], command: String) throws -> (id: String?, profile: NetworkProfile?, minutes: Int?) {
+        var id: String?, profile: NetworkProfile?, minutes: Int?, index = 1
+        while index < args.count {
+            switch args[index] {
+            case "--json": index += 1
+            case "--profile":
+                guard index + 1 < args.count, let value = NetworkProfile.allCases.first(where: { $0.rawValue.lowercased() == args[index + 1].lowercased() }) else { throw CLIError("--profile takes travel, work or unrestricted.") }
+                profile = value; index += 2
+            case "--minutes":
+                guard index + 1 < args.count, let value = Int(args[index + 1]) else { throw CLIError("--minutes takes a number from 1 to 1440.") }
+                minutes = value; index += 2
+            case let value where id == nil && !value.hasPrefix("-"):
+                guard value.contains(".") || value.hasPrefix("process:"), !value.contains(" ") else { throw CLIError("Use a bundle ID such as com.example.App, or process:<name> for a process rule.") }
+                id = value; index += 1
+            default: throw CLIError("Unexpected '\(args[index])'. Run kilobat \(command) --help.")
+            }
+        }
+        return (id, profile, minutes)
     }
 
     static let menuItems: [(key: Character, title: String, detail: String, command: [String])] = [
@@ -331,12 +396,20 @@ struct KilobatCLI {
         ("signature", "Inspect process signing"), ("bonjour", "Browse Bonjour services"), ("discover", "Host discovery"),
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
         ("scan-history", "Saved scans"), ("route-history", "Saved routes"), ("outages", "Outage records"),
-        ("speed-history", "Speed test records"),
+        ("speed-history", "Speed test records"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
+        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"),
+        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("quit", "Quit a process"),
     ]
     static let commandValues: [String: [String]] = [
-        "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["--csv", "--json", "--summary", "--days"], "rules": ["--json"],
-        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "speedtest": ["--json", "--budget-mb"],
-        "dns": ["automatic", "cloudflare", "google", "flush"], "completion": ["zsh", "bash", "fish"],
+        "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["--csv", "--json", "--summary", "--days"],
+        "rules": ["--json", "--profile"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
+        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb"],
+        "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
+        "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
+        "networks": ["forget", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on"], "quit": ["--force"],
+        "settings": ["new-apps", "auto-travel", "scope", "alerts", "outage-trace", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers"],
+        "destinations": ["--pid", "--json"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse"],
+        "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
         "blocklist": ["status", "import", "clear"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
     ]
 
@@ -359,7 +432,7 @@ struct KilobatCLI {
                 esac
               fi
             }
-            compdef _kilobat kilobat
+            compdef _kilobat kilobat kb
             """
         case "bash":
             let cases = commandValues.sorted { $0.key < $1.key }.map { "    \($0.key)) COMPREPLY=($(compgen -W \"\($0.value.joined(separator: " "))\" -- \"$cur\")) ;;" }.joined(separator: "\n")
@@ -374,12 +447,12 @@ struct KilobatCLI {
                 *) COMPREPLY=($(compgen -f -- "$cur")) ;;
               esac
             }
-            complete -F _kilobat kilobat
+            complete -F _kilobat kilobat kb
             """
         case "fish":
             let top = commands.map { "complete -c kilobat -f -n __fish_use_subcommand -a \($0.name) -d '\($0.detail)'" }
             let values = commandValues.sorted { $0.key < $1.key }.map { "complete -c kilobat -f -n '__fish_seen_subcommand_from \($0.key)' -a '\($0.value.joined(separator: " "))'" }
-            return (top + values).joined(separator: "\n")
+            return (top + values + ["complete -c kb -w kilobat"]).joined(separator: "\n")
         default: throw CLIError("Unsupported shell '\(shell)'. Use zsh, bash or fish.")
         }
     }
@@ -389,8 +462,10 @@ struct KilobatCLI {
         var matched: [String] = [], capturing = false
         for line in help.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let head = trimmed.split(separator: " ").first.map(String.init) ?? ""
-            if line.hasPrefix("  "), head.split(whereSeparator: { $0 == "|" || $0 == "/" }).contains(where: { $0 == topic }) {
+            // "spots / scan-history / route-history  …" documents three commands; "allow|block <app>" two.
+            let usage = trimmed.components(separatedBy: "  ").first ?? ""
+            let heads = usage.components(separatedBy: " / ").compactMap { $0.split(separator: " ").first }.flatMap { $0.split(separator: "|") }
+            if line.hasPrefix("  "), heads.contains(where: { $0 == topic }) {
                 matched.append(line); capturing = true
             } else if capturing, trimmed.hasPrefix("[") { matched.append(line) }
             else { capturing = false }
@@ -403,6 +478,7 @@ struct KilobatCLI {
     kilobat · your network, out of the dark
 
     Usage: kilobat [command] [options]
+           kb [command] [options]      kb is a short alias for kilobat
            kilobat <command> --help
 
       (no command)          Interactive menu: ↑↓ move, Enter open, q quit
@@ -412,28 +488,46 @@ struct KilobatCLI {
              [--json]       Snapshot, or a JSONL stream with --watch
       report [--csv|--json]  Export locally recorded usage history
         [--summary]         Daily totals and top apps instead of raw samples
-        [--days 1…30]       Limit the summary window (30 days default)
+        [--days 1…30]       Limit the window (30 days default)
+      health-history [--hours 1…720] [--json]  Router, internet and DNS checks over time
+      networks [--json]     Networks seen, with remembered profile and budget
+      networks forget <name>  Drop a network's remembered profile and budget
 
     Diagnose
       diagnose [--json]     Wi-Fi, router, internet, DNS and portal checks
       radar [--watch]       Signal score and best-spot finder (4 Hz)
             [--json]        Machine-readable samples
       scan [--json]         Nearby networks and channel widths
-      speedtest [--json]    Cloudflare speed and loaded-latency test
+      channels [--json]     Congestion per channel and the least crowded one
+      speedtest [--json]    Speed, loaded latency, call and streaming verdicts
         [--budget-mb 1…80]  Maximum data use (80 MB default)
-      dns [provider]        Read DNS, set automatic/cloudflare/google, or flush
+      dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
+
+    Wi-Fi
+      wifi [status] [--json]  Current network, signal, channel and link rate
+      wifi on|off|restart   Turn Wi-Fi on or off, or restart it
+      wifi disconnect       Leave the current network; Wi-Fi stays on
+      wifi join <name>      Join a saved network, or a new one
+        [--password-stdin]  Read the password from standard input
+      wifi known [--json]   Saved networks in order of preference
+      wifi password <name>  Show a saved password (macOS asks first)
+      wifi share <name>     Password and a QR code to scan with a phone
+      low-latency on        Pause AirDrop/AWDL for calls and games (15 min max)
 
     Control
       profile [name]        List or select travel, work, unrestricted
-      allow <bundle-id>     Save an allow rule in the current profile
-      block <bundle-id>     Save a block rule in the current profile
+      allow|block <bundle-id>  Save an allow or block rule
         [--minutes 1…1440]  Make the rule temporary
-      rules [--json]        Review current profile's rules
+        [--profile name]    Use another profile than the active one
+      reset <bundle-id>     Remove an app's rule [--profile name]
+      rules [--json]        Review a profile's rules [--profile name]
       limit [GB]            Read or set the session budget
+      settings [name [value]]  Read or change Kilobat's settings
+      quit <PID> [--force]  Quit a process, e.g. one using the network
 
     Setup
       open                  Open the native Mac app
-      doctor                Check monitoring and filtering readiness
+      doctor                Check the app, filter and monitoring
       completion [shell]    Print a zsh, bash or fish completion script
       mcp                   MCP server for AI agents over stdio
       update                Update a Homebrew install
@@ -446,6 +540,7 @@ struct KilobatCLI {
       remove-connection-rule <UUID>       Remove a destination rule
       destinations [--pid PID] [--json]   Observed process sockets
       devices [--bonjour] [--json]        Local neighbor cache / services
+      devices name <MAC> <name>           Name a device; an empty name removes it
       interfaces [--json]                 Separate physical / VPN counters
       trace <host>                        Bounded 12-hop route probe
       dns-benchmark                       Resolver timings as JSON
@@ -455,18 +550,21 @@ struct KilobatCLI {
       domain-exception <app> <domain>     Save a domain exception
       remember-network                    Remember current profile and budget
       scope external|wifi|wired           Set process monitoring scope
-      http-check <URL>                    DNS/connect/TLS/first-byte timing
+      http-check <URL> [--json]           DNS/connect/TLS/first-byte timing
       router-counters <control-URL>       Read whole-router UPnP counters
       signature <PID>                     Inspect process signing
       bonjour <_service._tcp>             Browse service instances
       discover <private-IP-or-subnet>     Explicit host discovery (requires nmap)
       capture <interface> <file.pcap>     Explicit bounded packet capture
       wake <MAC-address>                  Send a local Wake-on-LAN packet
-      spots / scan-history / route-history  Saved Wi-Fi and route observations (JSON)
-      outages / speed-history             Persisted records (JSON)
+      spots [save <name>|remove <id>]     Saved Wi-Fi spots (JSON)
+      scan-history / route-history        Saved scans and routes (JSON)
+      outages / speed-history [--days N]  Persisted records (JSON)
 
     Live screens: q quit · s sort · f filter · / search.
     Output switches to JSON automatically when piped. NO_COLOR disables colors.
+    Wi-Fi names and filter status come from the running app, which has
+    the Location permission macOS requires.
     Monitor mode: live traffic works without root. Access rules are saved
     but require a signed, activated Network Extension to block traffic.
     CLI and UI share profiles and rules. History is recorded by the UI.

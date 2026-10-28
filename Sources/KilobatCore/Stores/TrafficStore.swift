@@ -78,14 +78,22 @@ public final class TrafficStore {
         if let temporary = preferences.temporaryRules?[preferences.profile.rawValue + "|" + id], temporary.expires > Date() { return temporary.allowed }
         return preferences.rules[preferences.profile.rawValue]?[id] ?? preferences.defaultAllow
     }
-    public func setAllowed(_ id: String, _ allowed: Bool) {
-        preferences.temporaryRules?.removeValue(forKey: preferences.profile.rawValue + "|" + id)
-        preferences.rules[preferences.profile.rawValue, default: [:]][id] = allowed
+    public func setAllowed(_ id: String, _ allowed: Bool, in profile: NetworkProfile? = nil) {
+        let profile = (profile ?? preferences.profile).rawValue
+        preferences.temporaryRules?.removeValue(forKey: profile + "|" + id)
+        preferences.rules[profile, default: [:]][id] = allowed
     }
-    public func setTemporary(_ id: String, allowed: Bool, minutes: Int = 15) {
+    public func setTemporary(_ id: String, allowed: Bool, minutes: Int = 15, in profile: NetworkProfile? = nil) {
         if preferences.temporaryRules == nil { preferences.temporaryRules = [:] }
-        let ruleKey = preferences.profile.rawValue + "|" + id
+        let ruleKey = (profile ?? preferences.profile).rawValue + "|" + id
         preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60))
+    }
+    /// Drops saved and temporary rules so the app falls back to the profile default. Returns false if there was none.
+    @discardableResult public func removeRule(_ id: String, in profile: NetworkProfile? = nil) -> Bool {
+        let profile = (profile ?? preferences.profile).rawValue
+        let temporary = preferences.temporaryRules?.removeValue(forKey: profile + "|" + id) != nil
+        let saved = preferences.rules[profile]?.removeValue(forKey: id) != nil
+        return temporary || saved
     }
     public func switchNetwork(_ snapshot: DiagnosticSnapshot) {
         guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; return }

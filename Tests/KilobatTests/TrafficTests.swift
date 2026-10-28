@@ -13,6 +13,22 @@ struct TrafficTests {
         #expect(NettopMonitor.parseRow("broken,abc,123,") == nil)
     }
 
+    @Test @MainActor func testRulesTargetAnotherProfileAndCanBeRemoved() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TrafficStore(directory: directory, startMonitoring: false)
+        store.preferences.profile = .work
+        store.setAllowed("com.example.App", true, in: .travel)
+        store.setTemporary("com.example.App", allowed: false, minutes: 5, in: .travel)
+        #expect(store.preferences.rules["Travel"]?["com.example.App"] == true)
+        #expect(store.preferences.rules["Work"]?["com.example.App"] == nil)
+        #expect(store.preferences.temporaryRules?["Travel|com.example.App"]?.allowed == false)
+        #expect(store.removeRule("com.example.App", in: .travel))
+        #expect(store.preferences.rules["Travel"]?["com.example.App"] == nil)
+        #expect(store.preferences.temporaryRules?["Travel|com.example.App"] == nil)
+        #expect(!store.removeRule("com.example.App", in: .travel))
+    }
+
     @Test @MainActor func testLifetimeTrafficIsNotCountedAndRatesUseElapsedTime() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
