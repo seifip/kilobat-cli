@@ -49,12 +49,17 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var speedBytes = 0
     public var speedRunning = false
     public var speedProgress = "Ready when you are."
-    public var speed: SpeedTestResult?
+    /// The result shown while idle; nil during a run so live progress shows instead.
+    public var speed: SpeedTestResult? { speedRunning ? nil : lastSpeed }
+    /// The latest completed test. A cancelled or failed run never clears it.
+    public private(set) var lastSpeed: SpeedTestResult?
     public var error: String?
     public var notice: String?
     public var reportNotice: String?
     private var reportNoticeTask: Task<Void, Never>?
     public var locationAllowed = false
+    /// macOS asks once; after that only System Settings can change the answer.
+    public var locationAsked = false
     public var sleeping = false
     public var changingDNS = false
     public var flushingDNS = false
@@ -68,7 +73,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
 
     public override init() {
         super.init()
-        speed = journal.speedTests.last?.result
+        lastSpeed = journal.speedTests.last?.result
         nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil
         scheduleNetwork.start { [weak self] connected, metered, _ in
             Task { @MainActor in self?.scheduleConnected = connected; self?.scheduleMetered = metered }
@@ -84,7 +89,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             }
         }
         location.delegate = self
-        locationAllowed = location.authorizationStatus == .authorizedAlways
+        updateLocation(location.authorizationStatus)
         notifications.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refreshVisibility() }
         })
@@ -116,9 +121,14 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         if score >= 65 { return "Getting warmer. Keep going." }
         return "Keep going. Try closer to the router."
     }
-    public func requestLocation() { location.requestWhenInUseAuthorization() }
-    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        locationAllowed = manager.authorizationStatus == .authorizedAlways
+    public func requestLocation() {
+        if location.authorizationStatus == .notDetermined { location.requestWhenInUseAuthorization() }
+        else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocationServices")!) }
+    }
+    public func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) { updateLocation(manager.authorizationStatus) }
+    private func updateLocation(_ status: CLAuthorizationStatus) {
+        locationAllowed = status == .authorizedAlways
+        locationAsked = status != .notDetermined
     }
     private func startRadio() {
         guard radioTask == nil else { return }
@@ -166,7 +176,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
         snapshot = sample; onSnapshot?(sample)
         if !sleeping {
-            journal.ingest(sample, secondary: other, httpReachable: fallback)
+            journal.ingest(sample, secondary: other, httpReachable: fallback, interval: Double(max(60, checkInterval)))
             if automaticTrace, let incident = journal.events.last(where: { $0.kind == "Unreachable" && $0.end == nil }), tracedIncident != incident.id {
                 tracedIncident = incident.id
                 Task { [weak self] in
@@ -186,7 +196,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public func runSpeedTest() {
         guard !speedRunning else { return }
-        speedRunning = true; speed = nil
+        speedRunning = true
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
         speedDownHistory = []; speedUpHistory = []; speedStarted = Date(); speedBytes = 0
         let testedNetwork = snapshot
@@ -194,7 +204,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             guard let self else { return }
             defer { self.speedRunning = false }
             do {
-                self.speed = try await SpeedTest.run(updates: { [weak self] update in
+                let result = try await SpeedTest.run(updates: { [weak self] update in
                     Task { @MainActor in
                         guard let self, self.speedRunning else { return }
                         self.speedPhase = update.phase; self.speedFraction = update.fraction; self.speedBytes = update.bytes
@@ -204,7 +214,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                         }
                     }
                 }, progress: { [weak self] text in Task { @MainActor in self?.speedProgress = text } })
-                if let speed = self.speed { self.journal.add(speed, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey) }
+                self.lastSpeed = result
+                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = "Test complete."
             } catch is CancellationError { self.speedProgress = "Test cancelled." }

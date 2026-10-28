@@ -20,6 +20,15 @@ public final class NettopMonitor: @unchecked Sendable {
     public func start(scope: String = "external", onSample: @escaping @Sendable (TrafficSnapshot) -> Void,
                onError: @escaping @Sendable (String) -> Void) {
         stop()
+        let id = UUID()
+        lock.withLock { generation = id }
+        launch(id, scope: scope, failures: 0, onSample: onSample, onError: onError)
+    }
+
+    /// nettop can exit on its own (sleep, interface churn). Relaunch while this generation is current,
+    /// backing off up to a minute when launches keep failing without producing samples.
+    private func launch(_ id: UUID, scope: String, failures: Int, onSample: @escaping @Sendable (TrafficSnapshot) -> Void,
+                        onError: @escaping @Sendable (String) -> Void) {
         let process = Process()
         // A PTY keeps nettop line-buffered; direct pipes coalesce samples and distort rates.
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
@@ -28,19 +37,26 @@ public final class NettopMonitor: @unchecked Sendable {
         process.standardInput = Pipe()
         process.standardOutput = output
         process.standardError = Pipe()
-        let id = UUID()
+        let retry: @Sendable (Bool) -> Void = { [weak self] sampled in
+            guard let self, self.current(id) else { return }
+            let next = sampled ? 0 : failures + 1
+            if next == 3 { onError("Network monitoring stopped. Retrying…") }
+            self.queue.asyncAfter(deadline: .now() + min(60, pow(2, Double(next)))) { [weak self] in
+                self?.launch(id, scope: scope, failures: next, onSample: onSample, onError: onError)
+            }
+        }
         lock.lock()
-        generation = id
+        guard generation == id else { lock.unlock(); return }
         task = process
         do { try process.run() } catch {
-            task = nil; lock.unlock(); onError(error.localizedDescription); return
+            task = nil; lock.unlock(); if failures == 0 { onError(error.localizedDescription) }; retry(false); return
         }
         lock.unlock()
         // Every launch owns its parser state. A stopped reader cannot leak rows into
         // a new interface scope or publish an error after intentional cancellation.
         queue.async { [weak self] in
             guard let self else { return }
-            var buffer = "", rows: [ProcessTraffic] = [], sawHeader = false
+            var buffer = "", rows: [ProcessTraffic] = [], sawHeader = false, sampled = false
             while process.isRunning && self.current(id) {
                 let data = output.fileHandleForReading.availableData
                 guard !data.isEmpty, self.current(id) else { break }
@@ -49,13 +65,13 @@ public final class NettopMonitor: @unchecked Sendable {
                     let line = String(buffer[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
                     buffer.removeSubrange(...newline)
                     if line.contains(",bytes_in,bytes_out,") {
-                        if sawHeader && self.current(id) { onSample(TrafficSnapshot(timestamp: Date(), processes: rows)) }
+                        if sawHeader && self.current(id) { onSample(TrafficSnapshot(timestamp: Date(), processes: rows)); sampled = true }
                         rows = []; sawHeader = true
                     } else if let row = Self.parseRow(line) { rows.append(row) }
                 }
             }
             process.waitUntilExit()
-            if self.current(id) && process.terminationStatus != 0 { onError("Network monitoring stopped. Reopen Kilobat to reconnect.") }
+            retry(sampled)
         }
     }
 

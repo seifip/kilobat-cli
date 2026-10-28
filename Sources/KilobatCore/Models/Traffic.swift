@@ -72,16 +72,20 @@ public struct SavedPreferences: Codable, Equatable {
     public var blockedDomains: [String]? = nil
     public var blocklistName: String? = nil
     public var domainExceptions: [String: [String]]? = nil
+    /// The profile to restore when the metered network that switched to Travel goes away.
+    public var autoProfileFrom: String? = nil
     public var profile: NetworkProfile = .travel
     public var rules: [String: [String: Bool]] = [:]
     public var limitGB: Double = 5
     public var autoHotspot: Bool = true
     public var defaultAllow: Bool = false
+    /// How long usage history is kept; nil means a year.
+    public var historyDays: Int? = nil
 }
 
 public enum TrafficFormat {
     public static func bytes(_ value: UInt64) -> String {
-        if value == 0 { return "0 B" }
+        if value < 1000 { return "\(value) B" } // ByteCountFormatter spells these out as "617 bytes"
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .decimal)
     }
     public static func rate(_ value: Double) -> String { guard value.isFinite, value >= 0, value < Double(UInt64.max) else { return "—" }; return bytes(UInt64(value)) + "/s" }

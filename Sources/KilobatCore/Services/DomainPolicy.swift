@@ -9,20 +9,24 @@ public enum DomainPolicy {
             let clean = (line.split(separator: "#", omittingEmptySubsequences: false).first ?? "").trimmingCharacters(in: .whitespaces)
             if clean.isEmpty { continue }
             if clean.contains("|") || clean.hasPrefix("!") || clean.hasPrefix("[") { throw invalid("Use a plain domains or hosts list; Adblock syntax is not supported.") }
-            var words = clean.split(whereSeparator: \.isWhitespace).map(String.init)
-            if let first = words.first, ["0.0.0.0", "127.0.0.1", "::1", "::"].contains(first) { words.removeFirst() }
+            // Hosts files map addresses to names; only the names after them can be domains.
+            let words = clean.split(whereSeparator: \.isWhitespace).map(String.init).drop(while: isAddress)
             for word in words {
                 let domain = word.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
                 if ["localhost", "localhost.localdomain", "broadcasthost", "ip6-localhost", "ip6-loopback"].contains(domain) { continue }
                 let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
                 guard domain.count <= 253, labels.count > 1,
-                      domain.contains(where: { $0.isLetter }), labels.allSatisfy({ !$0.isEmpty && $0.count <= 63 && $0.first != "-" && $0.last != "-" && $0.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 } }) else { throw invalid("Invalid domain in list: \(word)") }
+                      domain.contains(where: { $0.isLetter }), labels.allSatisfy({ !$0.isEmpty && $0.count <= 63 && $0.first != "-" && $0.last != "-" && $0.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 } }) else { continue }
                 domains.insert(domain)
                 guard domains.count <= 10000 else { throw invalid("Use at most 10,000 domains.") }
             }
         }
         guard !domains.isEmpty else { throw invalid("No domains found in list.") }
         return domains.sorted()
+    }
+
+    static func isAddress(_ word: String) -> Bool {
+        word.contains(":") || (!word.isEmpty && word.allSatisfy { $0.isNumber || $0 == "." })
     }
 
     public static func matches(_ host: String, domain: String) -> Bool {

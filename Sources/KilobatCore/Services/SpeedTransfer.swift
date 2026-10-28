@@ -9,6 +9,8 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private var upload = false
     private var update: (@Sendable (Int) -> Void)?
     private var session: URLSession!
+    private var task: URLSessionTask?
+    private var cancelled = false
 
     override init() {
         super.init()
@@ -18,19 +20,23 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
         config.timeoutIntervalForResource = 12
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
-    func close() { session.invalidateAndCancel() }
+    func close() { lock.withLock { cancelled = true }; session.invalidateAndCancel() }
+    /// Tasks are created under the lock that cancellation takes, so none can start on an invalidated session.
+    func cancel() { lock.withLock { cancelled = true; return task }?.cancel() }
     func request(_ request: URLRequest, body: Data?, update: @escaping @Sendable (Int) -> Void) async throws -> Int {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                lock.withLock {
+                let task: URLSessionTask? = lock.withLock {
+                    guard !cancelled else { return nil }
                     self.continuation = continuation; bytes = 0; status = 0
                     upload = body != nil; self.update = update
+                    task = body.map { session.uploadTask(with: request, from: $0) } ?? session.dataTask(with: request)
+                    return task
                 }
-                if let body { session.uploadTask(with: request, from: body).resume() }
-                else { session.dataTask(with: request).resume() }
-                if Task.isCancelled { session.invalidateAndCancel() }
+                guard let task else { return continuation.resume(throwing: CancellationError()) }
+                task.resume()
             }
-        } onCancel: { self.session.invalidateAndCancel() }
+        } onCancel: { cancel() }
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
@@ -52,7 +58,7 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let result = lock.withLock { () -> (CheckedContinuation<Int, Error>?, Int, Int) in
             let result = (continuation, bytes, status)
-            continuation = nil; update = nil
+            continuation = nil; update = nil; if self.task === task { self.task = nil }
             return result
         }
         if let error { result.0?.resume(throwing: error) }

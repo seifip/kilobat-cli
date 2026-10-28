@@ -7,6 +7,7 @@ import KilobatCore
         switch args.first {
         case "blocklist":
             guard args.count >= 2 else { throw CLIError("Use blocklist <status|import path|clear>.") }
+            guard args.count == 2 || args[1] == "import" else { throw CLIError("Use blocklist <status|import path|clear>.") }
             switch args[1] {
             case "status": print("\(store.preferences.blockedDomains?.count ?? 0) domains · \(store.preferences.blocklistName ?? "No list")")
             case "clear": store.preferences.blockedDomains = nil; store.preferences.blocklistName = nil; print("List removed.")

@@ -10,7 +10,9 @@ import KilobatCore
         let json = args.contains("--json"), rest = args.filter { $0 != "--json" }
         switch rest.first {
         case "wifi": try await wifi(Array(rest.dropFirst()), json: json)
-        case "channels": try await channels(json: json)
+        case "channels":
+            guard rest.count == 1 else { throw CLIError("Use channels [--json].") }
+            try await channels(json: json)
         case "networks": try networks(Array(rest.dropFirst()), json: json)
         case "health-history": try healthHistory(Array(rest.dropFirst()), json: json)
         case "settings": try settings(Array(rest.dropFirst()), json: json)
@@ -75,7 +77,7 @@ import KilobatCore
         let radio = await DiagnosticProbe().radio()
         // macOS shows Wi-Fi names only to apps with Location permission; the running app has it.
         var ssid = radio.ssid
-        if ssid == nil { ssid = await connection()?["ssid"] as? String }
+        if ssid == nil { ssid = await appSSID() }
         return ["powered": powered, "ssid": ssid ?? NSNull(), "interface": radio.interface ?? NSNull(), "rssi": radio.rssi ?? NSNull(),
                 "noise": radio.noise ?? NSNull(), "signalNoiseRatio": radio.snr ?? NSNull(), "channel": radio.channel ?? NSNull(), "band": radio.band ?? NSNull(),
                 "transmitMbps": radio.transmitMbps ?? NSNull(), "score": radio.score ?? NSNull()]
@@ -142,16 +144,19 @@ import KilobatCore
         let radio = await DiagnosticProbe().radio()
         let networks = try await nearbyNetworks()
         let band = radio.band ?? "2.4 GHz"
-        let candidates = band == "2.4 GHz" ? [1, 6, 11] : Array(Set(networks.filter { $0.band == band }.map(\.channel))).sorted()
+        // The band's standard non-DFS channels count even when empty, so a free one can be recommended.
+        let standard = ["2.4 GHz": [1, 6, 11], "5 GHz": [36, 40, 44, 48, 149, 153, 157, 161, 165]][band] ?? []
+        let occupied = band == "2.4 GHz" ? [] : networks.filter { $0.band == band && $0.channel > 0 }.map(\.channel) + [radio.channel].compactMap { $0 }
+        let candidates = Array(Set(standard + occupied)).sorted()
         let rows = candidates.map { (channel: $0, congestion: DiagnosticProbe.congestion(channel: $0, band: band, networks: networks)) }
         return ["band": band, "current": radio.channel ?? NSNull(), "recommended": rows.min { $0.congestion < $1.congestion }?.channel ?? NSNull(), "networksSeen": networks.count,
-                "channels": rows.map { ["channel": $0.channel, "congestion": ($0.congestion * 10).rounded() / 10] }]
+                "channels": rows.map { ["channel": $0.channel, "congestion": tenths($0.congestion)] }]
     }
     static func channels(json: Bool) async throws {
         let advice = try await channelAdvice()
         if json { try printObject(advice); return }
         let band = advice["band"] as? String ?? "", current = advice["current"] as? Int, best = advice["recommended"] as? Int
-        let rows = (advice["channels"] as? [[String: Any]] ?? []).map { (channel: $0["channel"] as? Int ?? 0, congestion: $0["congestion"] as? Double ?? 0) }
+        let rows = (advice["channels"] as? [[String: Any]] ?? []).map { (channel: $0["channel"] as? Int ?? 0, congestion: ($0["congestion"] as? NSNumber)?.doubleValue ?? 0) }
         guard !rows.isEmpty else { print("No nearby networks to compare on \(band)."); return }
         print("\(band) · you are on channel \(current.map(String.init) ?? "—") · \(advice["networksSeen"] as? Int ?? 0) networks seen")
         for row in rows { print("  Ch \(KilobatCLI.pad(String(row.channel), 5))\(String(format: "%6.0f", row.congestion))\(row.channel == best ? "  ← least crowded" : "")\(row.channel == current ? "  (current)" : "")") }
@@ -167,6 +172,8 @@ import KilobatCore
         return try await DiagnosticProbe().scan()
     }
 
+    /// The Wi-Fi name as the running app sees it; macOS hides it from the CLI without Location permission.
+    static func appSSID() async -> String? { await connection()?["ssid"] as? String }
     static func connection(timeout: Duration = .seconds(3)) async -> [String: Any]? {
         guard let data = await AppRelay.ask("connection", timeout: timeout) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -220,7 +227,7 @@ import KilobatCore
         let rows = healthRows(hours: hours)
         if json { try printObject(rows); return }
         guard !rows.isEmpty else { print("No health samples in the last \(hours) hours. The Kilobat app records them while it runs."); return }
-        func ms(_ value: Any?) -> String { (value as? Double).map { String(format: "%5.0f", $0) } ?? "    —" }
+        func ms(_ value: Any?) -> String { (value as? NSNumber).map { String(format: "%5.0f", $0.doubleValue) } ?? "    —" }
         print("Time    Health     Router Internet Jitter   DNS  Network")
         for row in rows.suffix(60) {
             let time = (row["date"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }?.formatted(date: .omitted, time: .shortened) ?? ""
@@ -231,7 +238,7 @@ import KilobatCore
 
     static func healthRows(hours: Int) -> [[String: Any]] {
         let since = Date().addingTimeInterval(-Double(hours) * 3600)
-        func round(_ value: Double?) -> Any { value.map { ($0 * 10).rounded() / 10 } ?? NSNull() }
+        func round(_ value: Double?) -> Any { value.map(tenths) ?? NSNull() }
         return NetworkJournal().samples.filter { $0.date >= since }.map { sample in
             ["date": ISO8601DateFormatter().string(from: sample.date), "network": sample.networkName, "health": sample.health.rawValue,
              "rssi": sample.radio.rssi ?? NSNull(), "routerMs": round(sample.router?.average), "internetMs": round(sample.internet.average),
@@ -336,6 +343,8 @@ import KilobatCore
         print("✓ \(force ? "Force quit" : "Asked to quit") \(process.name) (\(pid)).")
     }
 
+    /// Rounded to 0.1 as a decimal, so JSON shows 6.9 rather than 6.9000000000000004.
+    static func tenths(_ value: Double) -> Any { value.isFinite ? NSDecimalNumber(value: Int((value * 10).rounded())).multiplying(byPowerOf10: -1) : NSNull() }
     static func printObject(_ value: Any) throws {
         print(String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
     }

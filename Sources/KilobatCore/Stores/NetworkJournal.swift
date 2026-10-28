@@ -49,7 +49,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         // A previous process may have stopped mid-incident. Do not count unobserved time.
         for i in events.indices where events[i].end == nil { events[i].end = events[i].start; events[i].detail += " · monitoring interrupted" }
     }
-    private func read<T: Decodable>(_ name: String) -> T? { try? JSONDecoder().decode(T.self, from: Data(contentsOf: directory.appendingPathComponent(name))) }
+    private func read<T: Decodable>(_ name: String) -> T? { StoredJSON.read(directory.appendingPathComponent(name)) }
     private func save<T: Encodable>(_ value: T, _ name: String) {
         do { try JSONEncoder().encode(value).write(to: directory.appendingPathComponent(name), options: .atomic); persistenceError = nil }
         catch { persistenceError = error.localizedDescription }
@@ -63,8 +63,9 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
             events[index].end = date; events[index].detail += " · " + reason; save(events, "events.json")
         }
     }
-    public func ingest(_ sample: DiagnosticSnapshot, secondary: PingResult, httpReachable: Bool?, date: Date = Date()) {
-        if let previous = lastDate, date.timeIntervalSince(previous) > 180 { suspend(at: previous) }
+    /// `interval` is the expected time between checks; a gap well beyond it means monitoring was paused.
+    public func ingest(_ sample: DiagnosticSnapshot, secondary: PingResult, httpReachable: Bool?, interval: TimeInterval = 60, date: Date = Date()) {
+        if let previous = lastDate, date.timeIntervalSince(previous) > max(180, 3 * interval + 30) { suspend(at: previous) }
         let sameNetwork = lastNetwork == sample.networkKey
         if !sameNetwork {
             finish(at: lastDate ?? date, reason: "Network changed")

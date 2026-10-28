@@ -6,6 +6,8 @@ import Darwin
 enum Terminal {
     nonisolated(unsafe) private static var saved = termios()
     nonisolated(unsafe) private static var active = false
+    nonisolated(unsafe) private static var inputFlags: Int32 = -1
+    nonisolated(unsafe) private static var resized = false
 
     enum Key: Equatable { case up, down, left, right, enter, escape, tab, backspace, char(Character) }
 
@@ -30,21 +32,39 @@ enum Terminal {
         raw.c_lflag &= ~tcflag_t(ICANON | ECHO)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
         active = true
-        emit("\u{1b}[?1049h\u{1b}[?25l\u{1b}[H\u{1b}[2J")
+        // Autowrap off: lines wider than the window are cut instead of wrapping and scrolling.
+        emit("\u{1b}[?1049h\u{1b}[?25l\u{1b}[?7l\u{1b}[H\u{1b}[2J")
         signal(SIGINT) { _ in Terminal.leave(); exit(130) }
         signal(SIGTERM) { _ in Terminal.leave(); exit(143) }
+        signal(SIGWINCH) { _ in Terminal.resized = true }
     }
 
     static func leave() {
         guard active else { return }
         active = false
-        emit("\u{1b}[?25h\u{1b}[?1049l")
+        signal(SIGWINCH, SIG_DFL)
+        emit("\u{1b}[?7h\u{1b}[?25h\u{1b}[?1049l")
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved)
     }
 
-    /// Repaints in place: home the cursor, overwrite each line, clear what is left.
+    /// Non-blocking stdin for line-mode watch screens, restored by `restoreInput`, Ctrl+C or SIGTERM.
+    static func nonblockingInput() {
+        guard inputFlags < 0 else { return }
+        inputFlags = fcntl(STDIN_FILENO, F_GETFL)
+        _ = fcntl(STDIN_FILENO, F_SETFL, inputFlags | O_NONBLOCK)
+        signal(SIGINT) { _ in Terminal.restoreInput(); exit(130) }
+        signal(SIGTERM) { _ in Terminal.restoreInput(); exit(143) }
+    }
+
+    static func restoreInput() {
+        guard inputFlags >= 0 else { return }
+        _ = fcntl(STDIN_FILENO, F_SETFL, inputFlags)
+        inputFlags = -1
+    }
+
+    /// Repaints in place: home the cursor, overwrite each line, clear what is left. Rows past the window are dropped.
     static func draw(_ lines: [String]) {
-        emit("\u{1b}[H" + lines.map { $0 + "\u{1b}[K" }.joined(separator: "\n") + "\n\u{1b}[J")
+        emit("\u{1b}[H" + lines.prefix(height).map { $0 + "\u{1b}[K" }.joined(separator: "\n") + "\u{1b}[J")
     }
 
     /// Returns a pending keypress without blocking. Reads one key at a time, so
@@ -82,6 +102,7 @@ enum Terminal {
         let deadline = Date().addingTimeInterval(seconds)
         repeat {
             if let key = key() { return key }
+            if resized { resized = false; return nil }
             try? await Task.sleep(for: .milliseconds(40))
         } while Date() < deadline
         return nil
@@ -90,6 +111,10 @@ enum Terminal {
     static var width: Int {
         var size = winsize()
         return ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_col > 0 ? Int(size.ws_col) : 80
+    }
+    static var height: Int {
+        var size = winsize()
+        return ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0 && size.ws_row > 0 ? Int(size.ws_row) : 24
     }
 
     private static func emit(_ text: String) {

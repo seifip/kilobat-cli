@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Observation
 
 @MainActor @Observable
@@ -18,7 +19,7 @@ public final class TrafficStore {
     public var search = ""
     public var filter = "All apps"
     public var selectedApp: String?
-    public var preferences: SavedPreferences { didSet { savePreferences() } }
+    public var preferences: SavedPreferences { didSet { if preferences != oldValue && !reloading { savePreferences() } } }
     public var usage: [UsageEntry] = []
     public var networkKey = "unknown"
     public var networkName = "Current session"
@@ -36,16 +37,19 @@ public final class TrafficStore {
     private let network = NetworkStatus()
     private let recordHistory: Bool
     private var lastPreferencesData: Data?
+    private var reloading = false
+    private var metered: Bool?
     private let directory: URL
 
+    /// `recordHistory: false` makes a read-only sampling store: it never records usage or changes preferences.
     public init(directory: URL? = nil, startMonitoring: Bool = true, recordHistory: Bool = true) {
         self.recordHistory = recordHistory
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")
         try? FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
-        preferences = (try? JSONDecoder().decode(SavedPreferences.self, from: Data(contentsOf: self.directory.appendingPathComponent("preferences.json")))) ?? SavedPreferences()
+        preferences = StoredJSON.read(self.directory.appendingPathComponent("preferences.json")) ?? SavedPreferences()
         lastPreferencesData = try? Data(contentsOf: self.directory.appendingPathComponent("preferences.json"))
-        usage = (try? JSONDecoder().decode([UsageEntry].self, from: Data(contentsOf: self.directory.appendingPathComponent("usage.json")))) ?? []
-        networkSessions = (try? JSONDecoder().decode([String: NetworkSession].self, from: Data(contentsOf: self.directory.appendingPathComponent("network-sessions.json")))) ?? [:]
+        usage = Self.compact(StoredJSON.read(self.directory.appendingPathComponent("usage.json")) ?? [])
+        networkSessions = StoredJSON.read(self.directory.appendingPathComponent("network-sessions.json")) ?? [:]
         if startMonitoring {
             startCollector(scope: preferences.trafficScope ?? "external")
             network.start { [weak self] connected, expensive, kind in
@@ -54,10 +58,26 @@ public final class TrafficStore {
                     self.connected = connected
                     self.expensive = expensive
                     self.networkKind = kind
-                    if expensive && self.preferences.autoHotspot { self.preferences.profile = .travel }
+                    self.meteredChanged(expensive)
                 }
             }
         }
+    }
+
+    /// Travel is applied when a metered network appears, not on every path update, and the
+    /// previous profile returns afterwards unless the user picked another one meanwhile.
+    func meteredChanged(_ expensive: Bool) {
+        defer { metered = expensive }
+        guard recordHistory, expensive != metered else { return }
+        var next = preferences
+        if expensive {
+            guard next.autoHotspot, next.profile != .travel else { return }
+            next.autoProfileFrom = next.profile.rawValue; next.profile = .travel
+        } else if let previous = next.autoProfileFrom {
+            if next.profile == .travel, let profile = NetworkProfile(rawValue: previous) { next.profile = profile }
+            next.autoProfileFrom = nil
+        }
+        preferences = next
     }
 
     public var total: UInt64 { received + sent }
@@ -75,8 +95,9 @@ public final class TrafficStore {
 
     public func isAllowed(_ id: String) -> Bool {
         if preferences.profile == .unrestricted { return true }
-        if let temporary = preferences.temporaryRules?[preferences.profile.rawValue + "|" + id], temporary.expires > Date() { return temporary.allowed }
-        return preferences.rules[preferences.profile.rawValue]?[id] ?? preferences.defaultAllow
+        let profile = preferences.profile.rawValue, keys = ProcessRuleKey.keys(id)
+        if let temporary = keys.lazy.compactMap({ self.preferences.temporaryRules?[profile + "|" + $0] }).first(where: { $0.expires > Date() }) { return temporary.allowed }
+        return keys.lazy.compactMap { self.preferences.rules[profile]?[$0] }.first ?? preferences.defaultAllow
     }
     public func setAllowed(_ id: String, _ allowed: Bool, in profile: NetworkProfile? = nil) {
         let profile = (profile ?? preferences.profile).rawValue
@@ -91,9 +112,12 @@ public final class TrafficStore {
     /// Drops saved and temporary rules so the app falls back to the profile default. Returns false if there was none.
     @discardableResult public func removeRule(_ id: String, in profile: NetworkProfile? = nil) -> Bool {
         let profile = (profile ?? preferences.profile).rawValue
-        let temporary = preferences.temporaryRules?.removeValue(forKey: profile + "|" + id) != nil
-        let saved = preferences.rules[profile]?.removeValue(forKey: id) != nil
-        return temporary || saved
+        var removed = false
+        for key in ProcessRuleKey.keys(id) {
+            if preferences.temporaryRules?.removeValue(forKey: profile + "|" + key) != nil { removed = true }
+            if preferences.rules[profile]?.removeValue(forKey: key) != nil { removed = true }
+        }
+        return removed
     }
     public func switchNetwork(_ snapshot: DiagnosticSnapshot) {
         guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; return }
@@ -146,11 +170,19 @@ public final class TrafficStore {
     public func identity(_ process: ProcessTraffic) -> (String, String, String?) {
         if let identity = identities[process.pid] { return identity }
         let app = NSRunningApplication(processIdentifier: process.pid)
-        let name = app?.bundleIdentifier != nil ? app?.localizedName ?? process.process : process.process
-        let id = app?.bundleIdentifier ?? "process:\(process.process)"
+        // nettop truncates names to 15 characters; the filter matches the full executable name.
+        let executable = app?.bundleIdentifier == nil ? Self.executableName(pid: process.pid) ?? process.process : process.process
+        let name = app?.bundleIdentifier != nil ? app?.localizedName ?? process.process : executable
+        let id = app?.bundleIdentifier ?? "process:\(executable)"
         let value = (id, name, app?.bundleURL?.path)
         identities[process.pid] = value
         return value
+    }
+    static func executableName(pid: Int32) -> String? {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
+        let name = URL(fileURLWithPath: String(cString: path)).lastPathComponent
+        return name.isEmpty ? nil : name
     }
     public func consume(_ snapshot: TrafficSnapshot) {
         let generation = sampleGeneration
@@ -200,8 +232,8 @@ public final class TrafficStore {
     public func flush() {
         guard recordHistory, pendingReceived + pendingSent > 0 else { return }
         usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey))
-        let cutoff = Date().addingTimeInterval(-30 * 86_400)
-        usage = usage.filter { $0.date >= cutoff }
+        let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
+        usage = Self.compact(usage.filter { $0.date >= cutoff })
         persist(usage, as: "usage.json")
         networkSessions[networkKey] = NetworkSession(name: networkName, received: received, sent: sent)
         persist(networkSessions, as: "network-sessions.json")
@@ -213,7 +245,7 @@ public final class TrafficStore {
               let saved = try? JSONDecoder().decode(SavedPreferences.self, from: data) else { return }
         let scopeChanged = preferences.trafficScope != saved.trafficScope
         lastPreferencesData = data
-        preferences = saved
+        reloading = true; preferences = saved; reloading = false
         if scopeChanged { setScope(saved.trafficScope ?? "external") }
     }
     public func savePreferences() {
@@ -221,6 +253,25 @@ public final class TrafficStore {
         lastPreferencesData = try? Data(contentsOf: directory.appendingPathComponent("preferences.json"))
     }
     public func shutdown() { flush(); monitor.stop() }
+    /// Samples older than a day merge into hourly buckets per network, and older than 30 days into daily ones,
+    /// so a year of history stays small enough to rewrite on every flush. Entries keep the same shape for existing readers.
+    static func compact(_ usage: [UsageEntry], now: Date = Date(), calendar: Calendar = .current) -> [UsageEntry] {
+        let recent = now.addingTimeInterval(-86_400), old = now.addingTimeInterval(-30 * 86_400)
+        var buckets: [String: [UsageEntry]] = [:]
+        var kept: [UsageEntry] = []
+        func bucket(_ date: Date) -> Date? { calendar.dateInterval(of: date < old ? .day : .hour, for: date)?.start }
+        for entry in usage {
+            guard entry.date < recent, let start = bucket(entry.date) else { kept.append(entry); continue }
+            buckets["\(start.timeIntervalSince1970)|\(entry.networkKey ?? "")", default: []].append(entry)
+        }
+        let merged = buckets.values.map { entries -> UsageEntry in
+            let start = bucket(entries[0].date) ?? entries[0].date
+            if entries.count == 1 && entries[0].date == start { return entries[0] }
+            return UsageEntry(date: start, received: entries.reduce(0) { $0 + $1.received }, sent: entries.reduce(0) { $0 + $1.sent },
+                              apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey)
+        }
+        return (merged + kept).sorted { $0.date < $1.date }
+    }
     private func persist<T: Encodable>(_ value: T, as name: String) {
         do { try JSONEncoder().encode(value).write(to: directory.appendingPathComponent(name), options: .atomic) }
         catch { self.error = "Could not save local data: \(error.localizedDescription)" }
@@ -235,5 +286,18 @@ public final class TrafficStore {
         let csv = "timestamp,download_bytes,upload_bytes\n" + usage.map { "\(formatter.string(from: $0.date)),\($0.received),\($0.sent)" }.joined(separator: "\n")
         do { try csv.write(to: url, atomically: true, encoding: .utf8) }
         catch { self.error = error.localizedDescription }
+    }
+}
+
+/// Unreadable files are moved aside as `<name>.corrupt` so the next save cannot destroy them.
+enum StoredJSON {
+    static func read<T: Decodable>(_ url: URL) -> T? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        do { return try JSONDecoder().decode(T.self, from: data) } catch {
+            let aside = url.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: aside)
+            try? FileManager.default.moveItem(at: url, to: aside)
+            return nil
+        }
     }
 }

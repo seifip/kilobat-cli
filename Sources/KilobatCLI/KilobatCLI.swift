@@ -15,11 +15,11 @@ struct KilobatCLI {
     @MainActor static func run(_ arguments: [String]) async throws {
         var args = arguments
         let command = args.first ?? (Terminal.interactive ? "menu" : "status")
-        if args.count >= 2, args.first == "help" || ["--help", "-h"].contains(args.last!) {
+        if args.count >= 2, args.first == "help" || args.dropFirst().contains(where: { ["--help", "-h"].contains($0) }) {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "networks", "health-history"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -40,6 +40,7 @@ struct KilobatCLI {
                 FileHandle.standardError.write(Data("\n# Enable it with:\n#   \(setup)\n".utf8))
             }
         case "update":
+            try allow(args, [])
             let path = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
             guard path.contains("/Cellar/") else {
                 print("This copy was not installed with Homebrew.")
@@ -49,15 +50,15 @@ struct KilobatCLI {
             let brew = Process(); brew.executableURL = URL(fileURLWithPath: "/usr/bin/env"); brew.arguments = ["brew", "upgrade", "kilobat"]
             try brew.run(); brew.waitUntilExit()
             if brew.terminationStatus != 0 { throw CLIError("brew upgrade kilobat failed.") }
-        case "--version", "version": print("Kilobat \(version)")
+        case "--version", "version": try allow(args, []); print("Kilobat \(version)")
         case "mcp":
             guard args.count == 1 else { throw CLIError("Use mcp with no arguments. It speaks the Model Context Protocol on stdin/stdout.") }
             await MCPCLI.serve()
-        case "menu": await menu()
+        case "menu": try allow(args, []); await menu()
         case "status", "watch":
             let valid = Set(["--watch", "--json"])
             guard args.dropFirst().allSatisfy({ valid.contains($0) }) else { throw CLIError("Use status [--watch] [--json].") }
-            await status(watch: command == "watch" || args.contains("--watch"), json: args.contains("--json"))
+            try await status(watch: command == "watch" || args.contains("--watch"), json: args.contains("--json"))
         case "profile":
             let store = TrafficStore(startMonitoring: false)
             guard args.count <= 2 else { throw CLIError("Use profile [travel|work|unrestricted].") }
@@ -112,7 +113,7 @@ struct KilobatCLI {
             var days = 30, index = 1
             while index < args.count {
                 if ["--json", "--csv", "--summary"].contains(args[index]) { index += 1; continue }
-                guard args[index] == "--days", index + 1 < args.count, let value = Int(args[index + 1]), (1...30).contains(value) else { throw CLIError("Use report [--json|--csv] [--summary] [--days 1…30].") }
+                guard args[index] == "--days", index + 1 < args.count, let value = Int(args[index + 1]), (1...365).contains(value) else { throw CLIError("Use report [--json|--csv] [--summary] [--days 1…365].") }
                 days = value; index += 2
             }
             let store = TrafficStore(startMonitoring: false)
@@ -142,12 +143,14 @@ struct KilobatCLI {
                 print("\(usage.count) samples · data stays on this Mac · --summary for top apps")
             }
         case "open":
+            try allow(args, [])
             let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
             let candidates = [URL(fileURLWithPath: "/Applications/Kilobat.app"), executable.deletingLastPathComponent().appendingPathComponent("Kilobat.app"), executable.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("dist/Kilobat.app")]
             guard let app = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else { throw CLIError("App bundle not found. Run script/build_and_run.sh first.") }
             let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/open"); process.arguments = [app.path]; try process.run(); process.waitUntilExit()
             if process.terminationStatus != 0 { throw CLIError("Could not open the app.") }
         case "doctor":
+            try allow(args, [])
             print("✓ macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
             print("\(FileManager.default.isExecutableFile(atPath: "/usr/bin/nettop") ? "✓" : "✕") Apple nettop traffic monitoring")
             print("✓ Shared local preferences and usage history")
@@ -166,7 +169,16 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.2.0"
+    static let version = "0.3.0"
+
+    /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
+    static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
+        var index = 1
+        while index < args.count {
+            guard flags.contains(args[index]) else { throw CLIError("Unexpected '\(args[index])'. Run kilobat \(args[0]) --help.") }
+            index += valued.contains(args[index]) ? 2 : 1
+        }
+    }
 
     /// Starts monitoring and waits up to 8 s for the first per-app sample.
     @MainActor static func sampledStore() async -> TrafficStore {
@@ -179,30 +191,34 @@ struct KilobatCLI {
         return store
     }
 
-    @MainActor static func status(watch: Bool, json: Bool) async {
+    @MainActor static func status(watch: Bool, json: Bool) async throws {
         let store = await sampledStore()
         defer { store.shutdown() }
-        let app = json ? await WiFiCLI.connection() : nil
-        if watch && !json && Terminal.interactive { await liveMonitor(store) }
+        if let error = store.error { throw CLIError("Traffic monitoring failed: \(error)") }
+        // The app's network usage and filter state change slowly; refresh them every 10 s.
+        var app = await WiFiCLI.connection(), fetched = Date()
+        if watch && !json && Terminal.interactive { await liveMonitor(store, app: app) }
         else if watch {
             while true {
-                if json { outputJSON(store, app: app) } else { print(dashboard(store).joined(separator: "\n") + "\n") }
+                if Date().timeIntervalSince(fetched) >= 10 { app = await WiFiCLI.connection(); fetched = Date() }
+                if json { outputJSON(store, app: app) } else { print(dashboard(store, app: app).joined(separator: "\n") + "\n") }
                 fflush(stdout)
                 try? await Task.sleep(for: .seconds(1))
             }
         } else if json { outputJSON(store, app: app) }
-        else { print(dashboard(store).joined(separator: "\n")) }
-        if let error = store.error { FileHandle.standardError.write(Data("\(error)\n".utf8)) }
+        else { print(dashboard(store, app: app).joined(separator: "\n")) }
     }
 
     /// Full-screen live monitor with single-key controls, in the style of `mo status`.
-    @MainActor static func liveMonitor(_ store: TrafficStore) async {
+    @MainActor static func liveMonitor(_ store: TrafficStore, app: [String: Any]?) async {
         Terminal.enter()
         defer { Terminal.leave() }
         let filters = ["All apps", "Active", "Allowed", "Blocked"]
-        var bySession = false, searching = false
+        var bySession = false, searching = false, app = app, fetched = Date()
         while true {
-            var lines = dashboard(store, bySession: bySession)
+            if Date().timeIntervalSince(fetched) >= 10 { app = await WiFiCLI.connection(); fetched = Date() }
+            // Everything but the app rows takes 18 lines; the rows shrink to fit the window.
+            var lines = dashboard(store, app: app, bySession: bySession, rows: max(1, Terminal.height - 18))
             lines.append("")
             if searching {
                 lines.append("  " + Terminal.violet("/") + " " + store.search + Terminal.violet("▏") + Terminal.dim("   Enter keep · Esc clear"))
@@ -232,21 +248,28 @@ struct KilobatCLI {
         }
     }
 
-    @MainActor static func dashboard(_ store: TrafficStore, bySession: Bool = false) -> [String] {
+    /// `app` is the running app's relay answer; without it the session line shows only what this command sampled.
+    @MainActor static func dashboard(_ store: TrafficStore, app: [String: Any]? = nil, bySession: Bool = false, rows: Int = 12) -> [String] {
         let violet = Terminal.violet, blue = Terminal.blue
         var lines = ["", violet("  ◉  kilobat"), "  \(store.networkKind) · \(store.expensive ? "Metered" : "Unmetered") · \(store.preferences.profile.rawValue) · Filtering status: see app", ""]
         lines.append(Terminal.dim("  ↓ DOWNLOAD                         ↑ UPLOAD"))
         lines.append("  \(blue(pad(TrafficFormat.rate(store.download), 35)))\(violet(TrafficFormat.rate(store.upload)))")
         lines.append("  \(blue(pad(spark(store.downloadHistory), 35)))\(violet(spark(store.uploadHistory)))")
         lines.append("")
-        lines.append("  SESSION  \(TrafficFormat.bytes(store.total)) / \(store.preferences.limitGB) GB")
-        let progress = Int(store.limitFraction * 42)
-        lines.append("  " + violet(String(repeating: "━", count: progress)) + Terminal.dim(String(repeating: "─", count: 42 - progress)))
+        if let bytes = (app?["sessionBytes"] as? NSNumber)?.uint64Value, let used = (app?["budgetUsed"] as? NSNumber)?.doubleValue {
+            let budget = (app?["budgetGB"] as? NSNumber)?.doubleValue ?? store.preferences.limitGB
+            lines.append("  SESSION  \(TrafficFormat.bytes(bytes)) / \(budget.formatted()) GB")
+            let progress = Int(min(1, max(0, used)) * 42)
+            lines.append("  " + violet(String(repeating: "━", count: progress)) + Terminal.dim(String(repeating: "─", count: 42 - progress)))
+        } else {
+            lines.append("  SAMPLED  \(TrafficFormat.bytes(store.total)) since this command started")
+            lines.append(Terminal.dim("  Open Kilobat for this network's session use against the \(store.preferences.limitGB.formatted()) GB budget"))
+        }
         lines.append("")
         lines.append(Terminal.dim("  \(pad("APPLICATION", 29))\(pad(bySession ? "LIVE" : "LIVE ↓", 14))\(pad(bySession ? "SESSION ↓" : "SESSION", 12))RULE"))
         lines.append(Terminal.dim("  " + String(repeating: "─", count: 65)))
         let apps = bySession ? store.filteredApps.sorted { $0.total > $1.total } : store.filteredApps
-        for app in apps.prefix(12) {
+        for app in apps.prefix(rows) {
             lines.append("  \(pad(app.name, 29))\(pad(TrafficFormat.rate(app.rate), 14))\(pad(TrafficFormat.bytes(app.total), 12))\(store.isAllowed(app.id) ? blue("allow") : violet("block"))")
         }
         if !store.ready { lines.append("  Listening for connections…") }
@@ -272,7 +295,8 @@ struct KilobatCLI {
         if let encoded = try? statusJSON(store, app: app) { print(String(decoding: encoded, as: UTF8.self)) }
     }
     @MainActor static func statusJSON(_ store: TrafficStore, app: [String: Any]? = nil) throws -> Data {
-        var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.expensive, "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, "apps": store.filteredApps.map { ["id": $0.id, "name": $0.name, "downloadBytesPerSecond": $0.downloadRate, "uploadBytesPerSecond": $0.uploadRate, "sessionBytes": $0.total, "allowedRule": store.isAllowed($0.id), "processIDs": $0.processIDs] as [String: Any] }]
+        // sessionBytes counts only this command's sampling window (sampleSeconds); networkSessionBytes is the app's figure.
+        var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "sampleSeconds": WiFiCLI.tenths(Date().timeIntervalSince(store.startedAt)), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.expensive, "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, "apps": store.filteredApps.map { ["id": $0.id, "name": $0.name, "downloadBytesPerSecond": $0.downloadRate, "uploadBytesPerSecond": $0.uploadRate, "sessionBytes": $0.total, "allowedRule": store.isAllowed($0.id), "processIDs": $0.processIDs] as [String: Any] }]
         if let app { data.merge(appFields(app)) { _, new in new } }
         return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
@@ -481,14 +505,15 @@ struct KilobatCLI {
            kb [command] [options]      kb is a short alias for kilobat
            kilobat <command> --help
 
-      (no command)          Interactive menu: ↑↓ move, Enter open, q quit
+      menu                  Interactive menu, also with no command: ↑↓ move, Enter open, q quit
 
     Monitor
       status [--watch]      Live per-app traffic and session budget
              [--json]       Snapshot, or a JSONL stream with --watch
+      watch [--json]        Same as status --watch
       report [--csv|--json]  Export locally recorded usage history
         [--summary]         Daily totals and top apps instead of raw samples
-        [--days 1…30]       Limit the window (30 days default)
+        [--days 1…365]      Limit the window (30 days default; the app keeps up to a year)
       health-history [--hours 1…720] [--json]  Router, internet and DNS checks over time
       networks [--json]     Networks seen, with remembered profile and budget
       networks forget <name>  Drop a network's remembered profile and budget
@@ -531,7 +556,8 @@ struct KilobatCLI {
       completion [shell]    Print a zsh, bash or fish completion script
       mcp                   MCP server for AI agents over stdio
       update                Update a Homebrew install
-      --version             Print version
+      version|--version     Print version
+      help [command]        Show this help, or one command's usage
 
     Expert tools
       blocked-history                     Archived blocked-flow metadata (JSON)

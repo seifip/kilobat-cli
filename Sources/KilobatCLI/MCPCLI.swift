@@ -18,13 +18,36 @@ import KilobatCore
         if isatty(STDIN_FILENO) == 1 {
             FileHandle.standardError.write(Data("Kilobat MCP server on stdio. Add it to an MCP client as: kilobat mcp\n".utf8))
         }
+        let tools = tools, schemas = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.inputSchema) })
         let server = MCPServer(name: "kilobat", title: "Kilobat", version: KilobatCLI.version, instructions: instructions, tools: tools) { data in
             FileHandle.standardOutput.write(data + Data("\n".utf8))
         }
-        do { for try await line in FileHandle.standardInput.bytes.lines { server.receive(Data(line.utf8)) } }
+        do {
+            for try await line in FileHandle.standardInput.bytes.lines {
+                if let reply = preflight(Data(line.utf8), schemas: schemas) { FileHandle.standardOutput.write(reply + Data("\n".utf8)) }
+                else { server.receive(Data(line.utf8)) }
+            }
+        }
         catch { FileHandle.standardError.write(Data("kilobat mcp: \(error.localizedDescription)\n".utf8)) }
         await server.drain()
     }
+
+    /// Rejects what MCPServer would otherwise accept: a request id that is not a string or number (MCP forbids null),
+    /// and tool arguments outside the tool's schema, such as unknown keys or `true` where a number is expected.
+    static func preflight(_ line: Data, schemas: [String: [String: Any]]) -> Data? {
+        guard let request = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], let method = request["method"] as? String, let id = request["id"] else { return nil }
+        func failure(_ code: Int, _ message: String) -> Data? { try? object(["jsonrpc": "2.0", "id": code == -32600 ? NSNull() : id, "error": ["code": code, "message": message]]) }
+        guard id is String || (id is NSNumber && !isBoolean(id)) else { return failure(-32600, "Invalid Request: id must be a string or number.") }
+        guard method == "tools/call", let params = request["params"] as? [String: Any], let name = params["name"] as? String,
+              let properties = schemas[name]?["properties"] as? [String: [String: Any]], let arguments = params["arguments"] as? [String: Any] else { return nil }
+        for (key, value) in arguments.sorted(by: { $0.key < $1.key }) where !(value is NSNull) {
+            guard let type = properties[key]?["type"] as? String else { return failure(-32602, "Unknown argument '\(key)' for \(name).") }
+            let valid = type == "string" ? value is String : (value is NSNumber && !isBoolean(value))
+            if !valid { return failure(-32602, "Argument '\(key)' must be \(type == "string" ? "a string" : "a number").") }
+        }
+        return nil
+    }
+    static func isBoolean(_ value: Any) -> Bool { CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() }
 
     static let readOnly = MCPToolAnnotations(readOnly: true)
     static let change = MCPToolAnnotations(readOnly: false, destructive: true, idempotent: true)
@@ -42,17 +65,18 @@ import KilobatCore
         MCPTool(name: "diagnose_network", title: "Diagnose connection",
                 description: "Checks Wi-Fi signal, the local router, internet latency, DNS and captive portals in a few seconds. Returns `health` (good, degraded, poor, unknown), plain-language `advice`, `signalScore` (0–100), `signalNoiseRatio` (dB), `routerLatencyMs`, `internetLatencyMs`, `internetJitterMs` and raw `measurements`: radio RSSI/noise/channel/band, router and internet ping average, jitter and loss, DNS lookup milliseconds, resolvers and captivePortal. Start here for slow or flaky internet. Same JSON as `kilobat diagnose --json`.",
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
-            .json(try DiagnosticsCLI.diagnoseJSON(await DiagnosticProbe().snapshot()))
+            let snapshot = await DiagnosticProbe().snapshot()
+            return .json(try DiagnosticsCLI.diagnoseJSON(snapshot, ssid: snapshot.radio.ssid == nil ? await WiFiCLI.appSSID() : nil))
         },
         MCPTool(name: "scan_wifi", title: "Nearby Wi-Fi networks",
                 description: "Lists nearby Wi-Fi networks with SSID, RSSI and noise (dBm), channel, band and channel width, to spot crowded channels or a stronger access point. Names come from the running Kilobat app, which has Location permission; without it SSIDs read \"Hidden network\". An empty list means scanning is unavailable. Same JSON as `kilobat scan --json`.",
                 annotations: readOnly) { _, _ in
-            .json(try DiagnosticsCLI.encode(try await WiFiCLI.nearbyNetworks()))
+            .json(try DiagnosticsCLI.scanJSON(try await WiFiCLI.nearbyNetworks()))
         },
         MCPTool(name: "run_speedtest", title: "Speed and bufferbloat test",
                 description: "Measures download and upload Mbps against Cloudflare plus latency under load (`bufferbloat`: Low, Moderate, High or Inconclusive; `addedLatencyMs`). Also returns `voiceCalls`, `videoCalls` and `streaming` verdicts (the highest quality the bandwidth supports, and whether it may stutter) and `callWarnings` explaining any caution. Takes up to about 30 seconds and transfers up to `budget_mb` of data (80 MB by default). On a metered or hotspot connection, ask the user first and pass a small budget such as 10. Same JSON as `kilobat speedtest --json`.",
                 inputSchema: schema(["budget_mb": ["type": "integer", "minimum": 1, "maximum": 80, "default": 80, "description": "Maximum data to transfer, in megabytes."]]),
-                annotations: MCPToolAnnotations(readOnly: true, idempotent: false, openWorld: true)) { arguments, context in
+                annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: false, openWorld: true)) { arguments, context in
             let budget = try integer(arguments, "budget_mb", in: 1...80) ?? 80
             let (messages, relay) = AsyncStream.makeStream(of: String.self)
             let forward = Task { for await message in messages { context.progress(message) } }
@@ -63,9 +87,9 @@ import KilobatCore
         },
         MCPTool(name: "get_usage_report", title: "Usage history",
                 description: "Data used on this Mac over the last `days` (7 by default): download and upload totals, per-day totals and the top 10 apps by bytes. History is recorded while the Kilobat app runs and never leaves the Mac. Same JSON as `kilobat report --summary --json --days N`.",
-                inputSchema: schema(["days": ["type": "integer", "minimum": 1, "maximum": 30, "default": 7, "description": "Number of days, including today."]]),
+                inputSchema: schema(["days": ["type": "integer", "minimum": 1, "maximum": 365, "default": 7, "description": "Number of days, including today."]]),
                 annotations: readOnly) { arguments, _ in
-            let days = try integer(arguments, "days", in: 1...30) ?? 7
+            let days = try integer(arguments, "days", in: 1...365) ?? 7
             return .json(try DiagnosticsCLI.encode(UsageSummary(TrafficStore(startMonitoring: false).usage, days: days)))
         },
         MCPTool(name: "list_rules", title: "Profile rules",
@@ -159,7 +183,7 @@ import KilobatCore
         MCPTool(name: "list_devices", title: "Devices on the local network",
                 description: "Devices this Mac has recently talked to on the local network (the ARP neighbor cache): `address`, `mac`, `interface` and `name`, including names the user gave them in Kilobat. Not a full network scan. Same JSON as `kilobat devices --json`.",
                 annotations: readOnly) { _, _ in
-            .json(try DiagnosticsCLI.encode(await ExpertCLI.namedDevices()))
+            .json(try DiagnosticsCLI.encode(try await ExpertCLI.namedDevices()))
         },
         MCPTool(name: "trace_route", title: "Trace the route to a host",
                 description: "A 12-hop route probe to `host`, as plain text. A latency jump that persists to the last hop is real; a single slow hop that recovers is usually a router deprioritizing probes. Takes up to about 30 seconds. Same output as `kilobat trace <host>`.",
@@ -179,7 +203,7 @@ import KilobatCore
                 description: "Sets the session data budget in GB (0.1–10000) for the current network. With the Kilobat app's filter on, new connections stop once it is used up in the travel and work profiles; unrestricted only tracks it." + confirm,
                 inputSchema: schema(["gb": ["type": "number", "minimum": 0.1, "maximum": 10000]], required: ["gb"]),
                 annotations: change) { arguments, _ in
-            guard let gb = (arguments["gb"] as? NSNumber)?.doubleValue, gb.isFinite, (0.1...10_000).contains(gb) else { throw MCPToolError("gb must be a number from 0.1 to 10000.") }
+            guard let raw = arguments["gb"] as? NSNumber, !isBoolean(raw), case let gb = raw.doubleValue, gb.isFinite, (0.1...10_000).contains(gb) else { throw MCPToolError("gb must be a number from 0.1 to 10000.") }
             TrafficStore(startMonitoring: false).preferences.limitGB = gb
             return .json(try object(["sessionBudgetGB": gb, "saved": true]))
         },
@@ -202,7 +226,7 @@ import KilobatCore
     }
     static func integer(_ arguments: [String: Any], _ key: String, in range: ClosedRange<Int>) throws -> Int? {
         guard let raw = arguments[key], !(raw is NSNull) else { return nil }
-        guard let value = (raw as? NSNumber).flatMap({ Int(exactly: $0.doubleValue) }), range.contains(value) else {
+        guard !isBoolean(raw), let value = (raw as? NSNumber).flatMap({ Int(exactly: $0.doubleValue) }), range.contains(value) else {
             throw MCPToolError("'\(key)' must be an integer from \(range.lowerBound) to \(range.upperBound).")
         }
         return value

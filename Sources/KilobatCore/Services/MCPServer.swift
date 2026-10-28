@@ -54,7 +54,9 @@ public struct MCPToolError: LocalizedError {
     private let tools: [String: MCPTool]
     private let order: [String]
     private let write: (Data) -> Void
-    private var running: [String: Task<Void, Never>] = [:]
+    private var running: [UUID: Task<Void, Never>] = [:]
+    /// Request ID to its newest task, for cancellation. A reused ID never orphans or unregisters another task.
+    private var requests: [String: UUID] = [:]
 
     public init(name: String, title: String, version: String, instructions: String, tools: [MCPTool], write: @escaping (Data) -> Void) {
         info = ["name": name, "title": title, "version": version]
@@ -70,12 +72,12 @@ public struct MCPToolError: LocalizedError {
         guard let message = try? JSONSerialization.jsonObject(with: line) else { return send(Self.failure(NSNull(), -32700, "Parse error")) }
         if let batch = message as? [Any] {
             guard !batch.isEmpty else { return send(Self.failure(NSNull(), -32600, "Invalid Request")) }
-            let key = "batch-" + UUID().uuidString
-            running[key] = Task { @MainActor in
+            let token = UUID()
+            running[token] = Task { @MainActor in
                 var replies: [[String: Any]] = []
                 for item in batch { if let reply = await self.respond(to: item) { replies.append(reply) } }
                 if !replies.isEmpty { self.send(replies) }
-                self.running.removeValue(forKey: key)
+                self.running.removeValue(forKey: token)
             }
             return
         }
@@ -85,15 +87,18 @@ public struct MCPToolError: LocalizedError {
             return send(Self.failure((message as? [String: Any])?["id"] ?? NSNull(), -32600, "Invalid Request"))
         }
         if method == "notifications/cancelled", let params = request["params"] as? [String: Any], let id = params["requestId"] {
-            running.removeValue(forKey: Self.key(id))?.cancel(); return
+            if let token = requests.removeValue(forKey: Self.key(id)) { running.removeValue(forKey: token)?.cancel() }
+            return
         }
         guard let id = request["id"] else { return }   // Other notifications need no reply.
-        let key = Self.key(id)
-        running[key] = Task { @MainActor in
+        let key = Self.key(id), token = UUID()
+        requests[key] = token
+        running[token] = Task { @MainActor in
             let reply = await self.respond(to: request)
             // A cancelled request gets no response, as the protocol requires.
             if !Task.isCancelled, let reply { self.send(reply) }
-            self.running.removeValue(forKey: key)
+            self.running.removeValue(forKey: token)
+            if self.requests[key] == token { self.requests.removeValue(forKey: key) }
         }
     }
 
