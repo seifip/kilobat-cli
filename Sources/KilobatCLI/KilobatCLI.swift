@@ -15,11 +15,12 @@ struct KilobatCLI {
     @MainActor static func run(_ arguments: [String]) async throws {
         var args = arguments
         let command = args.first ?? (Terminal.interactive ? "menu" : "status")
-        if args.count >= 2, args.first == "help" || args.dropFirst().contains(where: { ["--help", "-h"].contains($0) }) {
+        // Flags after `--` belong to the command `awake` runs.
+        if args.count >= 2, args.first == "help" || args.prefix(while: { $0 != "--" }).dropFirst().contains(where: { ["--help", "-h"].contains($0) }) {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -29,6 +30,7 @@ struct KilobatCLI {
         case "blocklist", "domain-exception", "remember-network", "scope": try await PolicyCLI.run(args)
         case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history": try await ExpertCLI.run(args)
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
+        case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
         case "--help", "-h", "help": print(help)
         case "completion":
@@ -169,7 +171,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.3.0"
+    static let version = "0.4.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -409,6 +411,8 @@ struct KilobatCLI {
         ("mcp", "MCP server for AI agents (stdio)"),
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
         ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS"),
+        ("awake", "Keep the Mac awake, network-aware"), ("sessions", "Awake sessions and AI agent runs"),
+        ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"),
         ("completion", "Shell completion script"), ("update", "Update the CLI"), ("help", "Show help"),
         ("blocked-history", "Blocked-flow metadata"), ("connection-rules", "List destination rules"),
         ("connection-rule", "Save a destination rule"), ("remove-connection-rule", "Remove a destination rule"),
@@ -426,7 +430,8 @@ struct KilobatCLI {
     ]
     static let commandValues: [String: [String]] = [
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["--csv", "--json", "--summary", "--days"],
-        "rules": ["--json", "--profile"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
+        "rules": ["--json", "--profile"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--json"],
+        "sessions": ["--days", "--json"], "why": ["--app", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
@@ -538,6 +543,20 @@ struct KilobatCLI {
       wifi password <name>  Show a saved password (macOS asks first)
       wifi share <name>     Password and a QR code to scan with a phone
       low-latency on        Pause AirDrop/AWDL for calls and games (15 min max)
+
+    Awake & agents
+      awake                 Keep the Mac awake until Ctrl-C; closing the lid still sleeps it
+        [--for 90m|2h|45s]  Stop after a while
+        [--until-quiet]     Stop once the Mac stays below 16 KB/s
+        [--app <id>]        With --until-quiet, watch one app only
+        [--quiet 1…60]      Quiet minutes that end it (3 default)
+        [--display]         Keep the display on too
+        [--json]            JSON summary at the end
+      awake [--display] -- <command> [args]  Stay awake while a command runs
+        [--json]            Summary on stderr with the bytes its processes moved; exits with its status
+      sessions [--days 1…365] [--json]  Awake sessions and AI agent runs the app recorded
+      why <url|host> [--app <id>] [--json]  The layer that stops a connection; exits 1 if one failed
+      conditions [--json]   Metered, Low Data Mode, VPN, latency, battery and heat, with advice
 
     Control
       profile [name]        List or select travel, work, unrestricted

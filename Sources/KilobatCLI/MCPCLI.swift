@@ -10,6 +10,10 @@ import KilobatCore
     For slow or flaky internet, start with diagnose_network, then get_status to see which apps use bandwidth. \
     For Wi-Fi problems use get_wifi, scan_wifi and suggest_wifi_channel; for drops, get_network_history. \
     Run run_speedtest only when capacity or bufferbloat matters, and ask first on metered connections. \
+    When one site, API or app can't connect, diagnose_connection finds the layer that stops it. \
+    Before a large download or upload or a long unattended run, call get_conditions: it reports metered links, Low Data Mode, VPN, battery and heat. \
+    keep_awake stops idle sleep for a set time (closing the lid still sleeps the Mac); tell the user, ask first on battery, and call release_awake when done. \
+    list_sessions shows earlier awake sessions and AI agent runs with the data they used. \
     set_profile, set_app_rule, set_dns and set_budget change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
     Rules are saved locally; blocking requires the Kilobat app with its network filter enabled. get_status reports `filteringActive` when the app is running.
     """
@@ -74,7 +78,7 @@ import KilobatCore
             .json(try DiagnosticsCLI.scanJSON(try await WiFiCLI.nearbyNetworks()))
         },
         MCPTool(name: "run_speedtest", title: "Speed and bufferbloat test",
-                description: "Measures download and upload Mbps against Cloudflare plus latency under load (`bufferbloat`: Low, Moderate, High or Inconclusive; `addedLatencyMs`). Also returns `voiceCalls`, `videoCalls` and `streaming` verdicts (the highest quality the bandwidth supports, and whether it may stutter) and `callWarnings` explaining any caution. Takes up to about 30 seconds and transfers up to `budget_mb` of data (80 MB by default). On a metered or hotspot connection, ask the user first and pass a small budget such as 10. Same JSON as `kilobat speedtest --json`.",
+                description: "Measures download and upload Mbps against Cloudflare plus latency under load (`bufferbloat`: Low, Moderate, High or Inconclusive; `addedLatencyMs`). Also returns `voiceCalls`, `videoCalls` and `streaming` verdicts (the highest quality the bandwidth supports, and whether it may stutter) and `callWarnings` explaining any caution. Takes up to about 30 seconds and transfers up to `budget_mb` of data (80 MB by default). On a metered or hotspot connection, get the user's confirmation first and pass a small budget such as 10. Same JSON as `kilobat speedtest --json`.",
                 inputSchema: schema(["budget_mb": ["type": "integer", "minimum": 1, "maximum": 80, "default": 80, "description": "Maximum data to transfer, in megabytes."]]),
                 annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: false, openWorld: true)) { arguments, context in
             let budget = try integer(arguments, "budget_mb", in: 1...80) ?? 80
@@ -199,6 +203,51 @@ import KilobatCore
                 annotations: readOnly) { _, _ in
             .json(try JSONSerialization.data(withJSONObject: WiFiCLI.networkRows(TrafficStore(startMonitoring: false)), options: [.sortedKeys, .withoutEscapingSlashes]))
         },
+        MCPTool(name: "get_conditions", title: "Conditions for a long run",
+                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (hotspot or marked expensive), `lowDataMode`, `vpn` and `vpnInterface`, `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
+                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
+            .json(try object(await AwakeCLI.conditions(holdUntil: hold?.until)))
+        },
+        MCPTool(name: "diagnose_connection", title: "Why something can't connect",
+                description: "Checks why one website, API or host can't be reached from this Mac, layer by layer: the Mac's network, VPN and proxy, DNS, Kilobat's own rules (blocklist, app and connection rules, data budget), the TCP connection, then TLS and the HTTP answer. Stops at the first layer that failed. Returns `verdict`, `next` (what to do), `ok` and `steps` (`layer`, `status`: ok, warning, failed or skipped, and `detail`). Pass `app` (a bundle ID or process:<name> from get_status) to include that app's rules. It checks from this Mac only; a sandbox, container or remote machine needs its own check. Takes up to about 20 seconds. Same JSON as `kilobat why <target> --json`.",
+                inputSchema: schema(["target": ["type": "string", "description": "A host such as api.example.com, or an http or https URL."],
+                                     "app": ["type": "string", "description": "Bundle ID such as com.example.App, or process:<name>."]], required: ["target"]),
+                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
+            let app = arguments["app"] as? String
+            let report = await ConnectionDoctor.run(try string(arguments, "target"), app: app?.isEmpty == false ? app : nil, policy: await AwakeCLI.policy())
+            if report.steps.isEmpty { throw MCPToolError(report.verdict + " " + report.next) }
+            return .json(try AwakeCLI.doctorJSON(report))
+        },
+        MCPTool(name: "list_sessions", title: "Awake sessions and agent runs",
+                description: "Awake sessions and AI agent runs (Claude Code, Codex, Gemini CLI and others) the Kilobat app recorded over the last `days` (7 by default), newest first: `kind` (awake or agent), `title`, `start`, `end`, `ended` (Went quiet, Exited, Timer ended, Turned off), bytes `received` and `sent`, bytes per process (`apps`), `destinations` an agent contacted, `events` (network changes during the run), `batteryStart`, `batteryEnd` and `peakThermal`. Recorded only while the app runs. Same JSON as `kilobat sessions --json --days N`.",
+                inputSchema: schema(["days": ["type": "integer", "minimum": 1, "maximum": 365, "default": 7, "description": "Number of days."]]),
+                annotations: readOnly) { arguments, _ in
+            .json(try DiagnosticsCLI.encode(AwakeCLI.history(days: try integer(arguments, "days", in: 1...365) ?? 7)))
+        },
+        MCPTool(name: "keep_awake", title: "Keep the Mac awake",
+                description: "Stops this Mac from idle-sleeping for `minutes` (1–240) so a long build, download or agent run isn't cut off. Closing the lid still sleeps the Mac. Calling again replaces the previous hold; it ends early with release_awake or when this MCP server stops. Shows in `pmset -g assertions` as \"Kilobat: <reason>\". Changes no settings and is low risk: tell the user for how long, and on battery get their confirmation first.",
+                inputSchema: schema(["minutes": ["type": "integer", "minimum": 1, "maximum": 240, "description": "How long to stay awake."],
+                                     "reason": ["type": "string", "description": "What the Mac stays awake for, e.g. \"Running the test suite\"."]], required: ["minutes"]),
+                annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: true)) { arguments, _ in
+            guard let minutes = try integer(arguments, "minutes", in: 1...240) else { throw MCPToolError("Missing required integer argument 'minutes'.") }
+            let reason = (arguments["reason"] as? String).map { String($0.prefix(80)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent run"
+            _ = releaseHold()
+            guard let assertion = SleepAssertion(reason: "Kilobat: " + reason) else { throw MCPToolError("macOS refused to keep the Mac awake.") }
+            let until = Date().addingTimeInterval(Double(minutes) * 60)
+            let timer = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(minutes * 60))
+                if !Task.isCancelled { _ = releaseHold() }
+            }
+            hold = (assertion, until, timer)
+            let power = PowerState.read()
+            return .json(try object(["holding": true, "until": ISO8601DateFormatter().string(from: until), "reason": reason, "onAC": power.onAC, "batteryPercent": power.batteryPercent ?? NSNull(),
+                                     "note": "Idle sleep is off until then. Closing the lid still sleeps the Mac."]))
+        },
+        MCPTool(name: "release_awake", title: "Let the Mac sleep again",
+                description: "Ends a keep_awake hold early so the Mac can idle-sleep again. `released` is false when there was none. Releasing needs no confirmation.",
+                annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: true)) { _, _ in
+            .json(try object(["released": releaseHold()]))
+        },
         MCPTool(name: "set_budget", title: "Set the data budget",
                 description: "Sets the session data budget in GB (0.1–10000) for the current network. With the Kilobat app's filter on, new connections stop once it is used up in the travel and work profiles; unrestricted only tracks it." + confirm,
                 inputSchema: schema(["gb": ["type": "number", "minimum": 0.1, "maximum": 10000]], required: ["gb"]),
@@ -208,6 +257,14 @@ import KilobatCore
             return .json(try object(["sessionBudgetGB": gb, "saved": true]))
         },
     ] }
+
+    /// The keep_awake hold, released by its timer, release_awake, or this process exiting.
+    static var hold: (assertion: SleepAssertion, until: Date, timer: Task<Void, Never>)?
+    static func releaseHold() -> Bool {
+        guard let hold else { return false }
+        hold.timer.cancel(); hold.assertion.release(); self.hold = nil
+        return true
+    }
 
     static func schema(_ properties: [String: Any], required: [String] = []) -> [String: Any] {
         var schema: [String: Any] = ["type": "object", "properties": properties, "additionalProperties": false]

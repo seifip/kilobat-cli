@@ -114,6 +114,13 @@ public struct SpeedTestResult: Codable, Sendable {
         guard let tier else { return "Low bandwidth" }
         return (baseline.lossPercent ?? 0) > 2 ? "\(tier) · may buffer" : "\(tier) bandwidth"
     }
+    /// Coding agents make many small round trips and upload context, so latency, jitter and loss matter more than speed.
+    public var agentReadiness: String {
+        let latency = baseline.average ?? 0, jitter = baseline.jitter ?? 0, loss = baseline.lossPercent ?? 0
+        if loss > 2 || (addedLatency ?? 0) > 200 || uploadMbps < 0.5 { return "May stall" }
+        if latency > 150 || jitter > 50 || uploadMbps < 2 { return "Sluggish" }
+        return "Smooth"
+    }
     public var addedLatency: Double? {
         guard let baseline = baseline.average, baseline.isFinite, (self.baseline.lossPercent ?? 0) <= 10, self.baseline.samples.count >= 3 else { return nil }
         var loaded: [Double] = []
