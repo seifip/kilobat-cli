@@ -116,22 +116,35 @@ public enum ConnectionDoctor {
         return report(trimmed, host, app, steps)
     }
 
+    /// The same decision the filter makes for this host and app (`FilterPolicy`), in words.
     static func rules(host: String, port: String, app: String?, policy: Policy) -> DoctorStep {
-        let preferences = policy.preferences
+        let preferences = policy.preferences, profile = preferences.profile.rawValue
         let enforced = policy.filterActive ? "" : " The network filter is off, so it isn’t enforced right now."
-        guard preferences.profile != .unrestricted else { return DoctorStep(layer: "Kilobat rules", status: .ok, detail: "The Unrestricted profile allows everything.") }
-        if policy.budgetReached { return DoctorStep(layer: "Kilobat rules", status: policy.filterActive ? .failed : .warning, detail: "This network’s data budget is used up, which stops new connections." + enforced) }
-        if let app, let rule = (preferences.connectionRules ?? []).reversed().first(where: { $0.profile == preferences.profile.rawValue && $0.matches(app: app, process: app.replacingOccurrences(of: "process:", with: ""), host: host, address: nil, port: port, direction: "outgoing") }) {
-            return DoctorStep(layer: "Kilobat rules", status: rule.allowed ? .ok : (policy.filterActive ? .failed : .warning), detail: (rule.allowed ? "A connection rule allows this." : "A connection rule in \(preferences.profile.rawValue) blocks this.") + (rule.allowed ? "" : enforced))
+        let rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached))
+        // An address typed as the target is matched as the remote address, as the filter would see it.
+        let address = AddressRange.parse(host) != nil ? host : nil
+        let decision = rules.decide(.init(app: app, process: app?.replacingOccurrences(of: "process:", with: "") ?? "", host: host, address: address, port: port),
+                                    appleSigned: { app?.hasPrefix("com.apple.") == true })
+        let blocked: DoctorStep.Status = policy.filterActive ? .failed : .warning
+        func step(_ status: DoctorStep.Status, _ detail: String) -> DoctorStep {
+            DoctorStep(layer: "Kilobat rules", status: status, detail: detail + (status == .ok ? "" : enforced))
         }
-        if let domain = DomainPolicy.blocked(host, app: app ?? "", domains: preferences.blockedDomains ?? [], exceptions: preferences.domainExceptions ?? [:]) {
-            return DoctorStep(layer: "Kilobat rules", status: policy.filterActive ? .failed : .warning, detail: "\(host) matches \(domain) on your blocklist." + enforced)
+        switch decision.reason {
+        case .filterOff, .unrestricted: return step(.ok, "The Unrestricted profile allows everything.")
+        case .connectionRule(let rule): return rule.allowed ? step(.ok, "A connection rule allows this.") : step(blocked, "A connection rule in \(profile) blocks this.")
+        case .blocklist(let entry): return step(blocked, "\(host) matches \(entry) on your blocklist.")
+        case .temporaryRule(let rule):
+            let until = rule.expires.formatted(date: .omitted, time: .shortened)
+            return rule.allowed ? step(.ok, "A temporary rule allows this app until \(until).") : step(blocked, "A temporary rule blocks this app until \(until).")
+        case .budget: return step(blocked, "This network’s data budget is used up, which stops new connections.")
+        case .appRule(let allowed): return allowed ? step(.ok, "This app is allowed in the \(profile) profile.") : step(blocked, "This app is blocked in the \(profile) profile.")
+        case .recentDecision(let allowed): return allowed ? step(.ok, "You allowed this app when asked.") : step(blocked, "You blocked this app when asked.")
+        case .appleSoftware: return step(.ok, "Apple software is allowed in \(profile).")
+        case .askNewApps: return step(.warning, "Kilobat asks before this app’s first connection. Answer in the approval window.")
+        case .newAppDefault(let allowed):
+            return allowed ? step(.ok, "Nothing in Kilobat blocks this app here.") : step(blocked, "New apps are blocked in \(profile), and this app has no rule.")
+        case .noAppRule: return step(.ok, "Nothing in Kilobat blocks this.")
         }
-        if let app {
-            let allowed = ProcessRuleKey.keys(app).lazy.compactMap { preferences.rules[preferences.profile.rawValue]?[$0] }.first ?? preferences.defaultAllow
-            if !allowed { return DoctorStep(layer: "Kilobat rules", status: policy.filterActive ? .failed : .warning, detail: "This app is blocked in the \(preferences.profile.rawValue) profile." + enforced) }
-        }
-        return DoctorStep(layer: "Kilobat rules", status: .ok, detail: "Nothing in Kilobat blocks this" + (app == nil ? "." : " app here."))
     }
 
     static func report(_ target: String, _ host: String, _ app: String?, _ steps: [DoctorStep]) -> DoctorReport {

@@ -7,6 +7,8 @@ import Observation
     public private(set) var pending: [PendingApproval] = []
     public private(set) var hostnames: [String: String] = [:]
     public private(set) var error: String?
+    /// An app an agent or the command line asked to allow. Only the person at the Mac confirms it.
+    public var requested: String?
     public init() {}
 
     public func poll() async {
@@ -24,6 +26,7 @@ import Observation
     /// Releases the held connections. The caller saves the rule so later connections follow it.
     public func decide(_ app: String, allowed: Bool) async {
         pending.removeAll { $0.app == app }
+        if requested == app { requested = nil }
         _ = await call({ service, reply in service.decide(app, allowed: allowed) { @Sendable decided in reply(Data([decided ? 1 : 0])) } })
     }
 

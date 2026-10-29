@@ -28,6 +28,40 @@ struct FirewallTests {
         #expect(DomainPolicy.blocked("other.example", address: "192.0.2.1", app: "a", domains: entries, exceptions: [:]) == nil)
     }
 
+    @Test func policyDecidesInTheFiltersOrder() {
+        var preferences = SavedPreferences(); preferences.profile = .travel
+        func decide(_ change: (inout SavedPreferences) -> Void = { _ in }, budget: Bool = false, app: String? = "com.example.App",
+                    host: String = "api.example.com", address: String? = nil, apple: Bool = false, recent: Bool? = nil) -> FilterPolicy.Reason {
+            var copy = preferences; change(&copy)
+            return FilterPolicy(FilterController.policy(copy, budgetReached: budget))
+                .decide(.init(app: app, process: "App", host: host, address: address), appleSigned: { apple }, recentDecision: recent).reason
+        }
+        #expect(decide() == .newAppDefault(false))
+        #expect(decide { $0.defaultAllow = true } == .newAppDefault(true))
+        #expect(decide { $0.askNewApps = true } == .askNewApps)
+        #expect(decide({ $0.askNewApps = true; $0.allowApple = true }, apple: true) == .appleSoftware)
+        #expect(decide({ $0.askNewApps = true }, recent: false) == .recentDecision(false))
+        #expect(decide { $0.rules = ["Travel": ["com.example.App": true]] } == .appRule(true))
+        // The budget stops saved allow rules, but not temporary ones or connection rules.
+        #expect(decide({ $0.rules = ["Travel": ["com.example.App": true]] }, budget: true) == .budget)
+        if case .temporaryRule = decide({ $0.temporaryRules = ["Travel|com.example.App": TemporaryRule(allowed: true, expires: Date().addingTimeInterval(600))] }, budget: true) {} else { Issue.record("temporary rule should win over the budget") }
+        // Hand-blocked hosts and ranges apply, and a connection rule wins over them.
+        #expect(decide({ $0.blockedHosts = ["203.0.113.0/24"] }, host: "203.0.113.9", address: "203.0.113.9") == .blocklist("203.0.113.0/24"))
+        let rule = ConnectionRule(app: "com.example.App", host: "api.example.com", allowed: true, profile: "Travel")
+        if case .connectionRule = decide({ $0.blockedHosts = ["example.com"]; $0.connectionRules = [rule] }) {} else { Issue.record("connection rule should win") }
+        #expect(decide({ $0.profile = .unrestricted; $0.blockedHosts = ["example.com"] }) == .unrestricted)
+        #expect(decide(app: nil) == .noAppRule && decide(budget: true, app: nil) == .budget)
+    }
+
+    @Test func doctorUsesTheSamePolicy() {
+        var preferences = SavedPreferences(); preferences.profile = .travel; preferences.blockedHosts = ["*.ads.example"]
+        let policy = ConnectionDoctor.Policy(preferences: preferences, filterActive: true, budgetReached: false)
+        #expect(ConnectionDoctor.rules(host: "x.ads.example", port: "443", app: nil, policy: policy).detail.contains("ads.example on your blocklist"))
+        preferences.askNewApps = true
+        let ask = ConnectionDoctor.rules(host: "api.example.com", port: "443", app: "com.example.New", policy: .init(preferences: preferences, filterActive: true, budgetReached: false))
+        #expect(ask.status == .warning && ask.detail.contains("asks before"))
+    }
+
     @Test func historySplitsSentAndReceivedPerApp() {
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "UTC")!
         let hour = calendar.date(from: DateComponents(year: 2026, month: 10, day: 29, hour: 12))!

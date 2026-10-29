@@ -46,7 +46,9 @@ public enum DomainPolicy {
 
     public static func matches(_ host: String, domain: String) -> Bool {
         let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        let domain = domain.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        var domain = domain.lowercased()
+        if domain.hasPrefix("*.") { domain.removeFirst(2) }
+        domain = domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
         return !domain.isEmpty && (host == domain || host.hasSuffix("." + domain))
     }
     /// The entry that blocks a connection, matching the hostname against domains and the remote address

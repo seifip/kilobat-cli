@@ -31,3 +31,10 @@ public enum ProcessRuleKey {
         return [id, String(id.prefix(23))]
     }
 }
+
+/// An app rule that lapses back to the profile default.
+public struct TemporaryRule: Codable, Equatable, Sendable {
+    public let allowed: Bool
+    public let expires: Date
+    public init(allowed: Bool, expires: Date) { self.allowed = allowed; self.expires = expires }
+}

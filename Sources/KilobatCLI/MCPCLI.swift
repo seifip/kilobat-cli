@@ -287,13 +287,14 @@ import KilobatCore
             .json(try FirewallCLI.encode(try await FirewallCLI.approvals()))
         },
         MCPTool(name: "decide_approval", title: "Allow or block a waiting app",
-                description: "Answers an approval from list_approvals: `allow` releases its held connections and saves an allow rule, `block` drops them and saves a block rule, in the active profile. Pass `minutes` to decide for a while only. Check the signature and destinations first, and never allow an app whose signature isn't valid without asking." + confirm,
+                description: "Answers an approval from list_approvals. `block` drops its held connections and saves a block rule in the active profile at once; pass `minutes` to block for a while only. `allow` doesn't apply by itself: it opens Kilobat's approval window on that app so the person confirms it, and returns `confirming: true`. Check the signature and destinations first." + confirm,
                 inputSchema: schema(["app": ["type": "string"], "decision": ["type": "string", "enum": ["allow", "block"]],
                                      "minutes": ["type": "integer", "minimum": 1, "maximum": 1440]], required: ["app", "decision"]),
                 annotations: change) { arguments, _ in
             let app = try string(arguments, "app"), decision = try string(arguments, "decision")
             guard ["allow", "block"].contains(decision) else { throw MCPToolError("decision must be allow or block.") }
-            return .json(try object(["app": app, "decided": try await FirewallCLI.decide(app, allowed: decision == "allow", minutes: try integer(arguments, "minutes", in: 1...1440))]))
+            let result = try await FirewallCLI.decide(app, allowed: decision == "allow", minutes: try integer(arguments, "minutes", in: 1...1440))
+            return .json(try object(["app": app, "decided": result.decided, "confirming": result.confirming]))
         },
         MCPTool(name: "block_destination", title: "Block a domain or IP",
                 description: "Blocks or unblocks a `target` domain (subdomains included; *.example.com is accepted), IP address or CIDR range for every app, or with `app` for that app only as a connection rule in the active profile. Check get_access_policy first so you don't cut off a connection an app needs." + confirm + " Takes effect on new connections while the Kilobat app's network filter is enabled.",

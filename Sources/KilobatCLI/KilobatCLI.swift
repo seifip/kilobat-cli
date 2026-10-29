@@ -172,7 +172,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.5.0"
+    static let version = "0.5.1"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -584,7 +584,7 @@ struct KilobatCLI {
       limit [GB]            Read or set the session budget
       settings [name [value]]  Read or change Kilobat's settings; new-apps allow|ask|block
       approvals [--json]    Apps waiting for approval while new-apps is ask
-      approve|deny <app-id>  Allow or block a waiting app and save the rule
+      approve|deny <app-id>  deny blocks a waiting app at once; approve asks you to confirm in the app
         [--minutes 1…1440]  Decide for a while instead
       block-host|unblock-host <domain|IP|CIDR>  Block for every app, *.example.com style
         [--app <id>]        Only for one app, as a connection rule

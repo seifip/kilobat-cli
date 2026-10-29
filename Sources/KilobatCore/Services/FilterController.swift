@@ -1,5 +1,5 @@
 import Foundation
-import NetworkExtension
+@preconcurrency import NetworkExtension
 import SystemExtensions
 import Observation
 
@@ -21,6 +21,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     private var eventPolling: Task<Void, Never>?
     private var configuration: [String: Any] = [:]
     private var activationRequest: OSSystemExtensionRequest?
+    private var removal: (request: OSSystemExtensionRequest, done: CheckedContinuation<Bool, Never>)?
     private var lastPolicy: Data?
     private var pendingPolicy: [String: Any]?
     private let manager = NEFilterManager.shared()
@@ -97,14 +98,40 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
     public func disable() { guard bundled else { return }; save(enabled: false) }
 
+    /// Takes the filter out completely: its configuration, then the system extension itself. Turning it off
+    /// leaves both installed, and a leftover default-deny policy would outlive the app. Returns whether macOS
+    /// removed the extension now; it may finish after a restart.
+    public func remove() async -> Bool {
+        guard bundled, removal == nil else { return false }
+        busy = true
+        let manager = manager
+        _ = await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            // NetworkExtension may answer on its own queue, so these must not be main-actor closures.
+            manager.loadFromPreferences { @Sendable _ in manager.removeFromPreferences { @Sendable _ in done.resume() } }
+        }
+        enabled = false; lastPolicy = nil
+        let removed = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
+            let request = OSSystemExtensionRequest.deactivationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
+            request.delegate = self
+            removal = (request, done)
+            OSSystemExtensionManager.shared.submitRequest(request)
+        }
+        busy = false
+        extensionEnabled = false
+        message = removed ? "Network filter removed." : "The network filter is turned off and will be removed after a restart."
+        return removed
+    }
+
     /// Answers an approval: releases the held connections and saves the rule in the current profile.
     public func decide(_ approval: PendingApproval, allowed: Bool, minutes: Int? = nil, store: TrafficStore) {
         if let minutes { store.setTemporary(approval.app, allowed: allowed, minutes: minutes) } else { store.setAllowed(approval.app, allowed) }
         Task { await approvals.decide(approval.app, allowed: allowed) }
     }
 
-    func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] {
-        ["enabled": true, "unrestricted": preferences.profile == .unrestricted,
+    func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] { Self.policy(preferences, budgetReached: budgetReached) }
+    /// The configuration the filter enforces; `FilterPolicy` reads it back for the filter and the doctor alike.
+    public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] {
+        ["enabled": true, "unrestricted": preferences.profile == .unrestricted, "profile": preferences.profile.rawValue,
          "defaultAllow": preferences.defaultAllow,
          "rules": preferences.rules[preferences.profile.rawValue] ?? [:],
          "budgetReached": budgetReached && preferences.profile != .unrestricted,
@@ -153,9 +180,11 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
     public func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction { .replace }
     public func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        if let removal, removal.request === request { self.removal = nil; removal.done.resume(returning: false); return }
         busy = false; message = error.localizedDescription; activationRequest = nil
     }
     public func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
+        if let removal, removal.request === request { self.removal = nil; removal.done.resume(returning: result == .completed); return }
         guard request === activationRequest else { return }
         activationRequest = nil
         if result == .completed { extensionEnabled = true; save(enabled: true) }

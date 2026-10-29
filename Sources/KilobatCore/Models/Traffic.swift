@@ -55,11 +55,6 @@ public enum NetworkProfile: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-public struct TemporaryRule: Codable, Equatable, Sendable {
-    public let allowed: Bool
-    public let expires: Date
-    public init(allowed: Bool, expires: Date) { self.allowed = allowed; self.expires = expires }
-}
 public struct NetworkSession: Codable, Sendable {
     public var name: String
     public var received: UInt64 = 0

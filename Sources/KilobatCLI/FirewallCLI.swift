@@ -62,9 +62,10 @@ import KilobatCore
             var minutes: Int?
             if words.count == 4, words[2] == "--minutes" { minutes = Int(words[3]).flatMap { (1...1440).contains($0) ? $0 : nil }; guard minutes != nil else { throw CLIError("Use --minutes 1…1440.") } }
             guard words.count == 2 || minutes != nil else { throw CLIError("Use \(words[0]) <app-id> [--minutes 1…1440].") }
-            let decided = try await decide(words[1], allowed: words[0] == "approve", minutes: minutes)
-            if json { print(String(decoding: try object(["app": words[1], "decided": decided]), as: UTF8.self)); return }
-            print(decided ? "✓ \(words[0] == "approve" ? "Allowed" : "Blocked") \(words[1])\(minutes.map { " for \($0) minutes" } ?? "")." : "\(words[1]) isn’t waiting for approval.")
+            let result = try await decide(words[1], allowed: words[0] == "approve", minutes: minutes)
+            if json { print(String(decoding: try object(["app": words[1], "decided": result.decided, "confirming": result.confirming]), as: UTF8.self)); return }
+            if result.confirming { print("Kilobat is asking you to confirm allowing \(words[1]) in its approval window.") }
+            else { print(result.decided ? "✓ Blocked \(words[1])\(minutes.map { " for \($0) minutes" } ?? "")." : "\(words[1]) isn’t waiting for approval.") }
         default: throw CLIError("Unknown firewall command.")
         }
     }
@@ -140,11 +141,13 @@ import KilobatCore
         return try decoder.decode([PendingApproval].self, from: data)
     }
 
-    static func decide(_ app: String, allowed: Bool, minutes: Int?) async throws -> Bool {
+    /// Blocks apply at once. An allow opens Kilobat's approval window for the person to confirm, so `confirming`
+    /// comes back true and `decided` false.
+    static func decide(_ app: String, allowed: Bool, minutes: Int?) async throws -> (decided: Bool, confirming: Bool) {
         guard AppRelay.appRunning else { throw CLIError("Approvals need the Kilobat app running with its network filter on.") }
         guard let data = await AppRelay.ask("decide|\(allowed ? "allow" : "block")|\(app)|\(minutes.map(String.init) ?? "")"),
               let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CLIError("The Kilobat app didn’t answer.") }
-        return reply["decided"] as? Bool == true
+        return (reply["decided"] as? Bool == true, reply["confirming"] as? Bool == true)
     }
 
     static func encode<T: Encodable>(_ value: T) throws -> Data {
