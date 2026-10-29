@@ -26,29 +26,43 @@ import KilobatCore
             print("Kilobat sessions · last \(days) days")
             for session in sessions {
                 let ended = session.ended.map { " · " + $0.lowercased() } ?? ""
-                print("  \(KilobatCLI.pad(session.start.formatted(date: .abbreviated, time: .shortened), 22))\(KilobatCLI.pad(session.title, 24))\(session.summary)\(ended)")
+                let title = session.title + (session.project.map { " · " + $0 } ?? "")
+                print("  \(KilobatCLI.pad(session.start.formatted(date: .abbreviated, time: .shortened), 22))\(KilobatCLI.pad(title, 24))\(session.summary)\(ended)")
                 let top = session.apps.sorted { $0.value > $1.value }.prefix(3).map { "\($0.key) \(TrafficFormat.bytes($0.value))" }
                 let hosts = session.destinations.isEmpty ? [] : [session.destinations.count == 1 ? "1 host" : "\(session.destinations.count) hosts"]
-                if !top.isEmpty || !hosts.isEmpty { print(Terminal.dim("  \(String(repeating: " ", count: 46))" + (top + hosts).joined(separator: " · "))) }
+                let extra = top + hosts + [session.note, session.install].compactMap { $0 }
+                if !extra.isEmpty { print(Terminal.dim("  \(String(repeating: " ", count: 46))" + extra.joined(separator: " · "))) }
             }
         case "why":
-            var target: String?, app: String?, index = 1
+            var target: String?, app: String?, proxy: String?, context: ConnectionDoctor.Context?, failedAt: Date?, index = 1
+            let usage = "Use why <url|host> [--app <id>] [--proxy <url>] [--context container|vm|remote|provider] [--failed-at <time>] [--json]."
             while index < args.count {
                 switch args[index] {
                 case "--json": index += 1
                 case "--app":
                     guard index + 1 < args.count, args[index + 1].contains(".") || args[index + 1].hasPrefix("process:") else { throw CLIError("--app takes a bundle ID such as com.example.App, or process:<name>.") }
                     app = args[index + 1]; index += 2
+                case "--proxy":
+                    guard index + 1 < args.count, !args[index + 1].hasPrefix("-") else { throw CLIError("--proxy takes the proxy the app uses, such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080.") }
+                    proxy = args[index + 1]; index += 2
+                case "--context":
+                    guard index + 1 < args.count, let value = ConnectionDoctor.Context(rawValue: args[index + 1]) else { throw CLIError("--context takes container, vm, remote or provider.") }
+                    context = value; index += 2
+                case "--failed-at":
+                    guard index + 1 < args.count, let value = ConnectionDoctor.failureTime(args[index + 1]) else { throw CLIError("--failed-at takes when the app failed, such as 14:05 or 2026-10-29T14:05:00Z, not a time still ahead.") }
+                    failedAt = value; index += 2
                 case let value where target == nil && !value.hasPrefix("-"): target = value; index += 1
-                default: throw CLIError("Use why <url|host> [--app <id>] [--json].")
+                default: throw CLIError(usage)
                 }
             }
-            guard let target else { throw CLIError("Use why <url|host> [--app <id>] [--json].") }
-            let report = await ConnectionDoctor.run(target, app: app, policy: await policy())
+            guard let target else { throw CLIError(usage) }
+            let report = await ConnectionDoctor.run(target, app: app, proxy: proxy, context: context, policy: await policy(), failedAt: failedAt)
             if report.steps.isEmpty { throw CLIError(report.verdict + " " + report.next) }
             if args.contains("--json") { print(String(decoding: try doctorJSON(report), as: UTF8.self)) }
             else {
-                print("Kilobat · why \(report.host)\(app.map { " · " + $0 } ?? "")")
+                let client = report.client.map { " · " + $0.name + ($0.version.map { " " + $0 } ?? "") } ?? ""
+                print("Kilobat · why \(report.target)\(client)")
+                print(Terminal.dim("  " + doctorRequest(report)))
                 for step in report.steps {
                     let mark = switch step.status { case .ok: Terminal.green("✓"); case .warning: Terminal.violet("!"); case .failed: Terminal.rose("✗"); case .skipped: Terminal.dim("–") }
                     print("  \(mark) \(KilobatCLI.pad(step.layer, 18))\(step.detail)")
@@ -74,6 +88,11 @@ import KilobatCore
             print("  Power     \((power["onAC"] as? Bool) == true ? "On power" : "On battery")\(battery) · \(power["thermal"] as? String ?? "unknown") heat\((power["lowPowerMode"] as? Bool) == true ? " · Low Power Mode" : "")")
             let reasons = value["awakeReasons"] as? [String] ?? []
             print("  Awake     \(reasons.isEmpty ? "Kilobat isn’t keeping the Mac awake" : reasons.joined(separator: ", "))")
+            let hold = value["lidHold"] as? [String: Any], until = (hold?["until"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+            print("  Lid       " + (until.map { "Can close: Kilobat keeps the Mac running until " + $0.formatted(date: .omitted, time: .shortened) } ?? ((value["lidClosedAllowed"] as? Bool) == true ? "Allowed for agent runs; closing it now sleeps the Mac" : "Closing it sleeps the Mac")))
+            let updaters = value["updaters"] as? [String: Any]
+            print("  Updaters  " + ((updaters?["paused"] as? Bool) == true ? "Paused on this metered network · kilobat updaters"
+                : (updaters?["pauseOnMetered"] as? Bool) == true ? "Running here; paused on metered networks while the filter is on" : "Never paused"))
             print("\n" + (value["advice"] as? String ?? ""))
         default: throw CLIError("Unknown command '\(args[0])'.")
         }
@@ -82,30 +101,17 @@ import KilobatCore
     // MARK: Awake
 
     static func awake(_ args: [String]) async throws {
-        let split = args.firstIndex(of: "--")
-        let options = Array(args[..<(split ?? args.endIndex)]), command = split.map { Array(args[($0 + 1)...]) } ?? []
-        try KilobatCLI.allow(options, ["--for", "--until-quiet", "--app", "--quiet", "--display", "--json"], valued: ["--for", "--app", "--quiet"])
-        func value(_ flag: String) throws -> String? {
-            guard let index = options.firstIndex(of: flag) else { return nil }
-            guard index + 1 < options.count else { throw CLIError("\(flag) needs a value. Run kilobat awake --help.") }
-            return options[index + 1]
-        }
-        let untilQuiet = options.contains("--until-quiet"), display = options.contains("--display")
+        let options: AwakeOptions
+        do { options = try AwakeOptions.parse(args) } catch let invalid as AwakeOptions.Invalid { throw CLIError(invalid.message) }
+        let (duration, untilQuiet, app, quietMinutes, display, command) = (options.duration, options.untilQuiet, options.app, options.quietMinutes, options.display, options.command)
         // Piped output gets the JSON summary; a wrapped command's own output stays untouched.
-        let json = options.contains("--json") || (Terminal.piped && command.isEmpty)
-        if split != nil && command.isEmpty { throw CLIError("Name a command after --, e.g. kilobat awake -- make test.") }
-        let duration = try value("--for").map { text -> Double in
-            guard let seconds = seconds(text), (1...86_400).contains(seconds) else { throw CLIError("--for takes a duration such as 45s, 90m or 2h, up to 24h.") }
-            return seconds
-        }
-        guard [duration != nil, untilQuiet, !command.isEmpty].filter({ $0 }).count <= 1 else { throw CLIError("Choose one of --for, --until-quiet or -- <command>.") }
-        let app = try value("--app"), quiet = try value("--quiet")
-        if (app != nil || quiet != nil) && !untilQuiet { throw CLIError("--app and --quiet go with --until-quiet.") }
-        if let app, !(app.contains(".") || app.hasPrefix("process:")) { throw CLIError("--app takes a bundle ID such as com.example.App, or process:<name>.") }
-        var quietMinutes = 3
-        if let quiet {
-            guard let seconds = seconds(quiet), case let minutes = Int((seconds / 60).rounded(.up)), (1...60).contains(minutes) else { throw CLIError("--quiet takes 1 to 60 minutes, e.g. 3m.") }
-            quietMinutes = minutes
+        let json = options.json || (Terminal.piped && command.isEmpty)
+        if let target = options.frontmost { try await whileFrontmost(target, options: options, json: json); return }
+        // The lid needs the app's power helper, so ask before anything starts.
+        var lid: LidLease?
+        if options.lidClosed {
+            let until = Date().addingTimeInterval(min(duration ?? LidPolicy.longest, LidPolicy.longest))
+            lid = try await holdLid(until: until, reason: command.isEmpty ? "kilobat awake" : "While \(command[0]) runs")
         }
 
         // Watching one app waits for a first sample, which names it and the helpers that count towards it.
@@ -135,7 +141,7 @@ import KilobatCore
         signal(SIGTERM) { _ in AwakeCLI.interrupted = true }
         let live = Terminal.interactive && !json && command.isEmpty
         if live { fputs("\u{1b}[?25l", stdout) }
-        else if command.isEmpty && !json { print("Keeping this Mac awake: \(mode.title.lowercased()). Ctrl-C to stop. Closing the lid still sleeps it.") }
+        else if command.isEmpty && !json { print("Keeping this Mac awake: \(mode.title.lowercased()). Ctrl-C to stop. " + (lid.map { "The lid can close: Kilobat keeps it running \($0.summary)." } ?? "Closing the lid still sleeps it.")) }
 
         var lastTick = Date(), received: UInt64 = 0, sent: UInt64 = 0, failure: String?
         while ended == nil && failure == nil && !interrupted && process?.isRunning != false {
@@ -155,7 +161,7 @@ import KilobatCore
                 lastTick = now
             }
             if live, let session = sessions.awake {
-                var parts = ["Awake", TrafficFormat.rate(sessions.watchedRate)]
+                var parts = ["Awake", TrafficFormat.rate(sessions.watchedRate)] + (lid == nil ? [] : ["lid closed OK"])
                 switch mode {
                 case .timer(let until): parts.insert(clock(until.timeIntervalSince(now)) + " left", at: 1)
                 case .untilQuiet(let id, let name):
@@ -170,12 +176,15 @@ import KilobatCore
         process?.waitUntilExit()
         if ended == nil { sessions.stop() }
         traffic.shutdown()
+        // The app also lets go once this process is gone; this is just sooner.
+        if lid != nil { _ = await AppRelay.ask(LidRelayRequest.release(owner: getpid()).action, timeout: .seconds(2)) }
         if let failure { throw CLIError("Traffic monitoring failed: \(failure)") }
         guard let session = ended else { return }
 
         let status = process.map { $0.terminationReason == .uncaughtSignal ? 128 + $0.terminationStatus : $0.terminationStatus }
         if json {
             var object = (try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(session))) as? [String: Any] ?? [:]
+            object["lidClosed"] = lid != nil
             if let status {
                 object["title"] = "While \(command.joined(separator: " ")) ran"
                 object["command"] = command; object["exitStatus"] = status
@@ -193,17 +202,63 @@ import KilobatCore
         if let status { fflush(stdout); exit(status) }
     }
 
-    /// 90m, 2h, 45s or 1h30m; a bare number is minutes.
-    static func seconds(_ text: String) -> Double? {
-        if let minutes = Double(text) { return minutes > 0 ? minutes * 60 : nil }
-        let units: [Character: Double] = ["h": 3600, "m": 60, "s": 1]
-        var total = 0.0, number = ""
-        for character in text.lowercased() {
-            if character.isNumber || character == "." { number.append(character); continue }
-            guard let value = Double(number), let unit = units[character] else { return nil }
-            total += value * unit; number = ""
+    /// `awake --while-frontmost <app>`: holds only while that app is in front, from the workspace's activation events.
+    /// Switching away lets go, coming back holds again; it ends when the app quits, --for runs out, the battery reaches 20% or on Ctrl-C.
+    static func whileFrontmost(_ target: String, options: AwakeOptions, json: Bool) async throws {
+        guard let (id, name) = FrontmostWatcher.resolve(target) else {
+            throw CLIError("No app named “\(target)”. Use its name as in Applications, e.g. Keynote, or a bundle ID such as com.apple.Preview.")
         }
-        return number.isEmpty && total > 0 ? total : nil
+        let defaults = UserDefaults(suiteName: "co.seifi.kilobat.cli") ?? .standard
+        defaults.register(defaults: ["awake.agents": false, "awake.notify": false, "awake.webhook": ""])
+        let sessions = SessionStore(defaults: defaults), start = Date()
+        let condition = FrontmostCondition(app: id, name: name, display: options.display, until: options.duration.map { start.addingTimeInterval($0) })
+        sessions.watchFrontmost(condition, now: start)
+        signal(SIGINT) { _ in AwakeCLI.interrupted = true }
+        signal(SIGTERM) { _ in AwakeCLI.interrupted = true }
+        let screen = options.display ? "screen stays on" : "screen may dim"
+        let live = Terminal.interactive && !json
+        if live { fputs("\u{1b}[?25l", stdout) }
+        else if !json { print("Keeping this Mac awake while \(name) is in front (\(screen)). Ctrl-C to stop. Closing the lid still sleeps it.") }
+
+        var held = 0.0, last = start, lastTick = start
+        while sessions.frontmost != nil && !interrupted {
+            try? await Task.sleep(for: .milliseconds(250))
+            let now = Date()
+            if sessions.holdingFrontmost { held += now.timeIntervalSince(last) }
+            last = now
+            // The timer and the battery floor are checked here; focus changes arrive as events.
+            if now.timeIntervalSince(lastTick) >= 2 { sessions.tick(apps: [], interval: now.timeIntervalSince(lastTick), now: now); lastTick = now }
+            if live {
+                let line = sessions.holdingFrontmost ? Terminal.violet("◉ ") + "Awake · \(name) in front · \(screen)" : Terminal.dim("○ ") + "Waiting for \(name) to come to the front"
+                let left = condition.until.map { " · " + clock($0.timeIntervalSince(now)) + " left" } ?? ""
+                fputs("\r" + line + " · held \(clock(held))" + left + Terminal.dim(" · Ctrl-C to stop") + "\u{1b}[K", stdout); fflush(stdout)
+            }
+        }
+        if live { fputs("\r\u{1b}[K\u{1b}[?25h", stdout) }
+        if sessions.frontmost != nil { sessions.stopFrontmost() }
+        let end = Date(), ended = sessions.frontmostEnded ?? "Turned off"
+        if json {
+            let formatter = ISO8601DateFormatter()
+            let object: [String: Any] = ["kind": "frontmost", "app": id, "name": name, "display": options.display, "start": formatter.string(from: start), "end": formatter.string(from: end),
+                                         "until": condition.until.map { formatter.string(from: $0) } ?? NSNull(), "ended": ended, "heldSeconds": Int(held.rounded())]
+            print(String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
+        } else {
+            print("✓ \(ended == "Turned off" ? "Stopped" : ended) · held awake \(clock(held)) of \(clock(end.timeIntervalSince(start))) while \(name) was in front")
+        }
+    }
+
+    /// Asks the app for a lid hold owned by this process; the app's answer says why when it can't.
+    static func holdLid(until: Date, reason: String) async throws -> LidLease {
+        let setup = "Turn on “Allow running with the lid closed” in Kilobat Settings › Awake & agents."
+        guard AppRelay.appRunning else { throw CLIError("--lid-closed needs the Kilobat app running. Open it, then: " + setup) }
+        guard let data = await AppRelay.ask(LidRelayRequest.hold(until: until, owner: getpid(), reason: reason).action, timeout: .seconds(4)),
+              let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CLIError("The Kilobat app didn’t answer. --lid-closed needs Kilobat 1.3 or later.")
+        }
+        guard reply["holding"] as? Bool == true, let text = reply["until"] as? String, let until = ISO8601DateFormatter().date(from: text) else {
+            throw CLIError(reply["error"] as? String ?? setup)
+        }
+        return LidLease(until: until, reason: reason, batteryFloor: reply["batteryFloor"] as? Int ?? 20, onlyOnAC: reply["onlyOnAC"] as? Bool ?? false)
     }
     static func clock(_ seconds: Double) -> String {
         let total = max(0, Int(seconds.rounded()))
@@ -236,7 +291,18 @@ import KilobatCore
         let preferences = TrafficStore(startMonitoring: false).preferences, app = await WiFiCLI.connection()
         // Unrestricted only tracks the budget; it never stops connections.
         let budgetReached = ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
-        return ConnectionDoctor.Policy(preferences: preferences, filterActive: app?["filteringActive"] as? Bool ?? false, budgetReached: budgetReached)
+        // The app reports the current network's effective cost, which decides whether updaters are paused.
+        return ConnectionDoctor.Policy(preferences: preferences, filterActive: app?["filteringActive"] as? Bool ?? false, budgetReached: budgetReached,
+                                       metered: app?["metered"] as? Bool ?? false)
+    }
+    /// What was sent, over which path, and when, against when the app failed: "HEAD through LM Studio’s own proxy (127.0.0.1:7890) · checked 14:31 · app failed 14:02".
+    static func doctorRequest(_ report: DoctorReport) -> String {
+        let path: String? = report.path.map { path in
+            (path.kind == .direct ? "directly" : "through " + ConnectionDoctor.via(path, app: report.client?.name)) + (path.untested.map { ", not through \($0)" } ?? "")
+        }
+        func time(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
+        return [[report.method, path].compactMap { $0 }.joined(separator: " "), "checked " + time(report.date), report.failedAt.map { "app failed " + time($0) }]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
     static func doctorJSON(_ report: DoctorReport) throws -> Data {
         var object = (try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(report))) as? [String: Any] ?? [:]
@@ -265,14 +331,20 @@ import KilobatCore
         async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3)
         async let ping = DiagnosticProbe.ping("1.1.1.1", count: 4, interval: 0.25)
         async let assertions = CommandRunner.run("/usr/bin/pmset", ["-g", "assertions"], timeout: 3)
+        async let answer = AppRelay.ask("connection", timeout: .seconds(3))
         let (link, internet, power) = (await path, await ping, PowerState.read())
+        let app = await answer.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let store = TrafficStore(startMonitoring: false), cost = WiFiCLI.currentCost(store, app: app), metered = cost.metered(os: link.expensive)
+        // Paused only while the app's network filter enforces it.
+        let updatersPaused = UpdaterPause.active(store.preferences, metered: metered) && app?["filteringActive"] as? Bool == true
         let interface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first
         let vpn = interface.flatMap { ["utun", "ipsec", "ppp"].contains(where: $0.hasPrefix) ? $0 : nil }
         let reasons = Array(Set(DiagnosticProbe.matches(#"named: "(Kilobat[^"]*)""#, in: await assertions.output))).sorted()
 
         var advice: [String] = []
         if !link.connected { advice.append("Offline: network tasks will fail until the Mac reconnects.") }
-        if link.expensive { advice.append("Metered connection: avoid large downloads and uploads, or ask the user first.") }
+        if metered { advice.append("Metered connection\(cost == .metered ? " (marked by the user)" : ""): avoid large downloads and uploads, or ask the user first.") }
+        if updatersPaused { advice.append("Kilobat pauses app and system updaters here; apps that update from inside themselves still can.") }
         if link.constrained { advice.append("Low Data Mode is on: keep transfers small.") }
         if link.connected, let average = internet.average {
             if (internet.lossPercent ?? 0) >= 5 || average > 150 { advice.append("Unstable internet (\(Int(average)) ms, \(Int(internet.lossPercent ?? 0))% loss): expect slow transfers and retries.") }
@@ -283,12 +355,15 @@ import KilobatCore
         if ["serious", "critical"].contains(power.thermal) { advice.append("The Mac is running hot (\(power.thermal)): heavy work will be throttled.") }
         if advice.isEmpty { advice.append("Good conditions: online, unmetered, on power.") }
 
-        return ["connected": link.connected, "network": link.kind, "interface": link.interface ?? NSNull(), "metered": link.expensive, "lowDataMode": link.constrained,
+        return cost.fields(os: link.expensive).merging(["connected": link.connected, "network": link.kind, "interface": link.interface ?? NSNull(), "lowDataMode": link.constrained,
                 "vpn": vpn != nil, "vpnInterface": vpn ?? NSNull(),
                 "internetLatencyMs": internet.average.map { WiFiCLI.tenths($0) } ?? NSNull(), "internetLossPercent": internet.lossPercent ?? NSNull(),
                 "power": ["batteryPercent": power.batteryPercent ?? NSNull(), "onAC": power.onAC, "thermal": power.thermal, "lowPowerMode": power.lowPowerMode] as [String: Any],
                 "keptAwake": !reasons.isEmpty || holdUntil != nil, "awakeReasons": reasons,
                 "awakeUntil": holdUntil.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
-                "advice": advice.joined(separator: " ")]
+                // Only the app knows; it reports both when it runs.
+                "lidClosedAllowed": app?["lidClosedAllowed"] as? Bool ?? false, "lidHold": app?["lidHold"] ?? NSNull(),
+                "updaters": ["pauseOnMetered": UpdaterPause.enabled(store.preferences), "paused": updatersPaused] as [String: Any],
+                "advice": advice.joined(separator: " ")]) { $1 }
     }
 }

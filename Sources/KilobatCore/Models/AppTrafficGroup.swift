@@ -11,18 +11,25 @@ public struct AppTrafficGroup: Identifiable {
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
     }
 
+    /// The group of macOS services that download for apps and the system.
+    public static let systemDownloads = "system:downloads"
+
     public static func make(_ apps: [AppTraffic], grouped: Bool) -> [AppTrafficGroup] {
         let buckets = Dictionary(grouping: apps) { app in
-            grouped ? (app.ownerPath ?? app.bundlePath.flatMap(ProcessOwnership.outerApplication)).map { "owner:" + $0 } ?? app.id : app.id
+            guard grouped else { return app.id }
+            if SystemDownloads.service(for: app) != nil { return systemDownloads }
+            return (app.ownerPath ?? app.bundlePath.flatMap(ProcessOwnership.outerApplication)).map { "owner:" + $0 } ?? app.id
         }
         return buckets.map { key, members in
             let path = key.hasPrefix("owner:") ? String(key.dropFirst(6)) : nil
-            let name = path.map(displayName) ?? members[0].name
-            var summary = AppTraffic(id: key, name: name, bundlePath: path ?? members[0].bundlePath)
+            let name = key == systemDownloads ? "System downloads" : path.map(displayName) ?? members[0].name
+            var summary = AppTraffic(id: key, name: name, bundlePath: path ?? (key == systemDownloads ? nil : members[0].bundlePath))
             for member in members {
                 summary.received += member.received; summary.sent += member.sent
+                summary.local += member.local; summary.tunnel += member.tunnel
                 summary.downloadRate += member.downloadRate; summary.uploadRate += member.uploadRate
                 summary.processIDs += member.processIDs
+                summary.rates.merge(member.rates) { $1 }
             }
             summary.processIDs = Array(Set(summary.processIDs)).sorted()
             return AppTrafficGroup(id: key, members: members, summary: summary)

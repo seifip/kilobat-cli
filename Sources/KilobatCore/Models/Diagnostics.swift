@@ -54,6 +54,8 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     public let dnsServers: [String]
     public let captivePortal: Bool?
     public let networkService: String?
+    /// The Ethernet or USB interface traffic leaves through while Wi-Fi stays joined, such as a tethered phone.
+    public var wiredInterface: String? = nil
     public var health: ConnectionHealth {
         if captivePortal == true { return .poor }
         if radio.health == .poor || (internet.lossPercent ?? 0) >= 20 { return .poor }

@@ -40,13 +40,9 @@ public enum OpenConnections {
                 continue
             }
             guard let pid = current, pids.contains(pid), let space = head.firstIndex(of: " ") else { continue }
-            let proto = String(head[..<space]), remote = head[arrow.upperBound...]
-            // IPv6 rows separate the port with a dot, IPv4 rows with a colon.
-            guard let split = proto.hasSuffix("6") ? remote.lastIndex(of: ".") : remote.lastIndex(of: ":") else { continue }
-            var address = String(remote[..<split]), port = String(remote[remote.index(after: split)...])
-            if let zone = address.firstIndex(of: "%") { address = String(address[..<zone]) }
-            if address.hasPrefix("::ffff:") { address = String(address.dropFirst(7)) }
-            guard address != "*", !isLoopback(address), port != "*" else { continue }
+            let proto = String(head[..<space])
+            let (address, port) = TrafficRoute.endpoint(head[arrow.upperBound...], v6: proto.hasSuffix("6"))
+            guard address != "*", !isLoopback(address), port != "*", !port.isEmpty else { continue }
             let received = UInt64(columns[1]) ?? 0, sent = UInt64(columns[2]) ?? 0
             var entry = destinations[address] ?? OpenDestination(address: address, ports: [], protocols: [], received: 0, sent: 0, connections: 0)
             entry.ports.insert(port); entry.protocols.insert(proto.hasPrefix("udp") ? "UDP" : "TCP")

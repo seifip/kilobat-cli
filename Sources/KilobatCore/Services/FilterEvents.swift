@@ -9,8 +9,25 @@ public struct FilterEvent: Codable, Identifiable, Sendable {
     public let endpoint: String
     public let direction: String
     public let reason: String
-    public init(id: UUID = UUID(), date: Date = Date(), app: String, endpoint: String, direction: String, reason: String) {
-        self.id = id; self.date = date; self.app = app; self.endpoint = endpoint; self.direction = direction; self.reason = reason
+    /// The system service that made the connection for `app`, such as com.apple.nsurlsessiond. Nil when the app made it.
+    public let via: String?
+    public init(id: UUID = UUID(), date: Date = Date(), app: String, endpoint: String, direction: String, reason: String, via: String? = nil) {
+        self.id = id; self.date = date; self.app = app; self.endpoint = endpoint; self.direction = direction; self.reason = reason; self.via = via
+    }
+}
+
+/// Connections one process made for another app, as the filter saw them: com.apple.nsurlsessiond for com.apple.Music.
+/// The filter sees a connection when it opens, not the bytes after it, so these are counts.
+public struct DelegatedFlows: Codable, Sendable, Equatable, Identifiable {
+    /// Signing identifiers of the process that connected and the app it connected for.
+    public let process: String
+    public let app: String
+    public var allowed: Int
+    public var blocked: Int
+    public var last: Date
+    public var id: String { process + "|" + app }
+    public init(process: String, app: String, allowed: Int = 0, blocked: Int = 0, last: Date = Date()) {
+        self.process = process; self.app = app; self.allowed = allowed; self.blocked = blocked; self.last = last
     }
 }
 
@@ -52,6 +69,8 @@ public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
     func decide(_ app: String, allowed: Bool, reply: @escaping (Bool) -> Void)
     /// Recently seen hostnames by remote address, so open connections can be named.
     func hostnames(reply: @escaping (Data) -> Void)
+    /// Connections system services made for other apps, as encoded `[DelegatedFlows]`.
+    func delegatedFlows(reply: @escaping (Data) -> Void)
 }
 
 public enum FilterSigning {

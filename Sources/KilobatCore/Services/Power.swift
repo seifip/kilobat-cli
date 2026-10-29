@@ -29,7 +29,7 @@ public struct PowerState: Codable, Equatable, Sendable {
     static func heat(_ thermal: String) -> Int { ["nominal": 0, "fair": 1, "serious": 2, "critical": 3][thermal] ?? 0 }
 }
 
-/// Keeps macOS from idle-sleeping while it exists. Closing the lid still sleeps the Mac; that needs root.
+/// Keeps macOS from idle-sleeping while it exists. Closing the lid still sleeps the Mac; only the power helper (LidKeeper) can stop that.
 public final class SleepAssertion: @unchecked Sendable {
     private var ids: [IOPMAssertionID] = []
     public init?(reason: String, display: Bool = false) {

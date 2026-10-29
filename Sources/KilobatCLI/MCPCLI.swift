@@ -10,12 +10,15 @@ import KilobatCore
     For slow or flaky internet, start with diagnose_network, then get_status to see which apps use bandwidth. \
     For Wi-Fi problems use get_wifi, scan_wifi and suggest_wifi_channel; for drops, get_network_history. \
     Run run_speedtest only when capacity or bufferbloat matters, and ask first on metered connections. \
+    When calls, game streaming or remote desktops stutter but speed looks fine, run run_stutter_test, then get_nearby_radios for AirDrop and Bluetooth. \
     When one site, API or app can't connect, diagnose_connection finds the layer that stops it. \
     Before a large download or upload or a long unattended run, call get_conditions: it reports metered links, Low Data Mode, VPN, battery and heat. \
-    keep_awake stops idle sleep for a set time (closing the lid still sleeps the Mac); tell the user, ask first on battery, and call release_awake when done. \
+    get_updaters says which updaters Kilobat pauses on metered networks, which update bytes still got through, and which apps update from inside themselves. \
+    keep_awake stops idle sleep for a set time; tell the user, ask first on battery, and call release_awake when done. Closing the lid still sleeps the Mac unless you pass lid_closed, which needs the user's explicit confirmation every time. \
     list_sessions shows earlier awake sessions and AI agent runs with the data they used. \
+    When a router, ISP or carrier reports more or less data than Kilobat, compare_usage sets the two side by side for the same period with the hours Kilobat recorded and likely reasons; never call either figure wrong. \
     get_app_bandwidth shows one app's traffic over an hour, day, week or month; get_access_policy what an app says it connects to. \
-    set_profile, set_app_rule, set_new_app_mode, block_destination, decide_approval, set_dns and set_budget change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
+    set_profile, set_app_rule, set_new_app_mode, block_destination, decide_approval, set_dns, set_budget, set_app_quota, set_network_cost and set_updater_pause change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
     Rules are saved locally; blocking requires the Kilobat app with its network filter enabled. get_status reports `filteringActive` when the app is running.
     """
 
@@ -47,8 +50,8 @@ import KilobatCore
               let properties = schemas[name]?["properties"] as? [String: [String: Any]], let arguments = params["arguments"] as? [String: Any] else { return nil }
         for (key, value) in arguments.sorted(by: { $0.key < $1.key }) where !(value is NSNull) {
             guard let type = properties[key]?["type"] as? String else { return failure(-32602, "Unknown argument '\(key)' for \(name).") }
-            let valid = type == "string" ? value is String : (value is NSNumber && !isBoolean(value))
-            if !valid { return failure(-32602, "Argument '\(key)' must be \(type == "string" ? "a string" : "a number").") }
+            let valid = type == "string" ? value is String : type == "boolean" ? isBoolean(value) : (value is NSNumber && !isBoolean(value))
+            if !valid { return failure(-32602, "Argument '\(key)' must be \(type == "string" ? "a string" : type == "boolean" ? "true or false" : "a number").") }
         }
         return nil
     }
@@ -97,8 +100,26 @@ import KilobatCore
             let days = try integer(arguments, "days", in: 1...365) ?? 7
             return .json(try DiagnosticsCLI.encode(UsageSummary(TrafficStore(startMonitoring: false).usage, days: days)))
         },
+        MCPTool(name: "compare_usage", title: "Compare with a router or provider",
+                description: "Sets a router's, ISP's or carrier's data figure beside what Kilobat recorded on this Mac for the same period, networks and direction. Pass `total` and its `unit` exactly as the router or provider shows them (GB is decimal, GiB binary; many providers write GB for either), `direction` (both, download or upload) and the period: `from` and `to` (2026-10-01, 2026-10-01 18:00 or ISO 8601 with an offset; a date-only `to` includes that day; ask the user for the provider's time zone when it matters) or a `period` preset. `network` limits it to one network by name or key from list_networks. Returns Kilobat's `kilobatBytes` and `kilobatAmount` in the same unit, `downloadBytes`, `uploadBytes`, `differenceBytes` (the figure minus Kilobat), `alternateBytes` (the figure read in the other unit system), `localBytes` (local network and AirDrop, not counted), `unattributedBytes` (packet headers and the like, counted), `otherNetworkBytes`, `periodHours`, `recordedHours`, `coverage`, `gaps` (`start`, `end`, `hours`, `reason`: asleep, notRecorded, otherNetwork, beforeHistory or notYet), `networks`, `topApps`, a `summary` and `reasons`, the likely causes of the difference in plain English, most likely first. Kilobat sees only this Mac and only while it runs, so a router or provider total is usually higher; relay the reasons and never conclude that the provider, the router or Kilobat is wrong, or that the difference proves malware or a billing error. Same JSON as `kilobat report compare --json`.",
+                inputSchema: schema(["total": ["type": "number", "minimum": 0, "description": "The router's or provider's figure, e.g. 40."],
+                                     "unit": ["type": "string", "enum": UsageComparison.Unit.allCases.map(\.rawValue), "description": "The unit the router or provider shows."],
+                                     "direction": ["type": "string", "enum": ["both", "download", "upload"], "default": "both"],
+                                     "from": ["type": "string", "description": "Start of the figure's period, e.g. 2026-10-01."],
+                                     "to": ["type": "string", "description": "End of the figure's period, e.g. 2026-10-31 (that day included)."],
+                                     "period": ["type": "string", "enum": UsageComparison.Preset.allCases.map(\.rawValue), "description": "A ready-made period instead of from and to."],
+                                     "network": ["type": "string", "description": "A network name or key from list_networks; every network when left out."]], required: ["total", "unit"]),
+                annotations: readOnly) { arguments, _ in
+            guard let total = arguments["total"] as? NSNumber, !isBoolean(total), total.doubleValue.isFinite, total.doubleValue >= 0 else { throw MCPToolError("Pass total, the router's or provider's figure.") }
+            do {
+                let network = (arguments["network"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return .json(try ReportCLI.comparison(total: String(total.doubleValue), unit: try string(arguments, "unit"), direction: arguments["direction"] as? String,
+                                                      from: arguments["from"] as? String, to: arguments["to"] as? String, period: arguments["period"] as? String,
+                                                      networks: network.map { [$0] } ?? []).json(pretty: false))
+            } catch let error as CLIError { throw MCPToolError(error.message) }
+        },
         MCPTool(name: "list_rules", title: "Profile rules",
-                description: "Rules for the active profile, or for `profile` if given: the profile name, whether it is `active`, whether unknown apps are allowed by default, saved allow/block rules by bundle ID or process:<name>, unexpired temporary rules and the session data budget. Same JSON as `kilobat rules --json [--profile name]`.",
+                description: "Rules for the active profile, or for `profile` if given: the profile name, whether it is `active`, whether unknown apps are allowed by default, saved allow/block rules by bundle ID or process:<name>, unexpired temporary rules, the data `budget` (limit, `cycle`, `alerts`, `usedBytes` this cycle and when it `resets`) and app `quotas` with their use. Same JSON as `kilobat rules --json [--profile name]`.",
                 inputSchema: schema(["profile": profileProperty]),
                 annotations: readOnly) { arguments, _ in
             .json(try KilobatCLI.rulesJSON(TrafficStore(startMonitoring: false), profile: try profile(arguments), app: await WiFiCLI.connection()))
@@ -200,62 +221,135 @@ import KilobatCore
             return .text(result)
         },
         MCPTool(name: "list_networks", title: "Known networks",
-                description: "Networks Kilobat has seen, with `key`, `name`, the `profile` and `budgetGB` remembered for each (null if none) and data used in the current session there. Same JSON as `kilobat networks --json`.",
+                description: "Networks Kilobat has seen, with `key`, `name`, the `profile` and `budgetGB` remembered for each (null if none), data used in the current session there, `current`, the data `cost` the user set (automatic, metered or unmetered) and `metered`, `osMetered` and `meteredSource` (macOS only reports the current network). Same JSON as `kilobat networks --json`.",
                 annotations: readOnly) { _, _ in
-            .json(try JSONSerialization.data(withJSONObject: WiFiCLI.networkRows(TrafficStore(startMonitoring: false)), options: [.sortedKeys, .withoutEscapingSlashes]))
+            .json(try JSONSerialization.data(withJSONObject: await WiFiCLI.networkRows(TrafficStore(startMonitoring: false)), options: [.sortedKeys, .withoutEscapingSlashes]))
         },
         MCPTool(name: "get_conditions", title: "Conditions for a long run",
-                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (hotspot or marked expensive), `lowDataMode`, `vpn` and `vpnInterface`, `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
+                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (what Kilobat acts on), `osMetered` (what macOS says) and `meteredSource` (macOS, or you when the user set the network's data cost), `lowDataMode`, `vpn` and `vpnInterface`, `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake), `updaters` (`pauseOnMetered`, the setting, and `paused`, whether the filter pauses updaters on this network now; get_updaters has the detail) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
             .json(try object(await AwakeCLI.conditions(holdUntil: hold?.until)))
         },
+        MCPTool(name: "get_updaters", title: "Updaters paused on metered networks",
+                description: "Whether Kilobat pauses updater helpers on metered networks (`enabled`, on unless the user turned it off), whether this network is `metered` and they are `paused` now, and `filterActive` (null when the Kilobat app isn't running; pausing needs its network filter). `covered` lists the helpers it recognizes (`downloads` is false for Sparkle's and Squirrel's installers, which only install what the app already downloaded). `gotThrough` lists update bytes on the current network: an updater's own, or a System downloads service such as nsurlsessiond that connected for one (`shared`, so its bytes include other downloads); null without the running app. `pausedConnections` counts updater connections the filter stopped in the last 24 hours. `inProcess` lists installed apps that update from inside their own process (Sparkle or Squirrel), which can't be paused without blocking the app. `limits` says what pausing can't do. Same JSON as `kilobat updaters --json`.",
+                annotations: readOnly) { _, _ in
+            .json(try object(try UpdatersCLI.object(await UpdatersCLI.report(TrafficStore(startMonitoring: false)))))
+        },
         MCPTool(name: "diagnose_connection", title: "Why something can't connect",
-                description: "Checks why one website, API or host can't be reached from this Mac, layer by layer: the Mac's network, VPN and proxy, DNS, Kilobat's own rules (blocklist, app and connection rules, data budget), the TCP connection, then TLS and the HTTP answer. Stops at the first layer that failed. Returns `verdict`, `next` (what to do), `ok` and `steps` (`layer`, `status`: ok, warning, failed or skipped, and `detail`). Pass `app` (a bundle ID or process:<name> from get_status) to include that app's rules. It checks from this Mac only; a sandbox, container or remote machine needs its own check. Takes up to about 20 seconds. Same JSON as `kilobat why <target> --json`.",
-                inputSchema: schema(["target": ["type": "string", "description": "A host such as api.example.com, or an http or https URL."],
-                                     "app": ["type": "string", "description": "Bundle ID such as com.example.App, or process:<name>."]], required: ["target"]),
+                description: "Checks why one website, API or host can't be reached from this Mac, layer by layer: the Mac's network and the interface it uses (Wi-Fi, Ethernet, a phone hotspot or a VPN), the system proxy and PAC file, DNS and its resolver (including a VPN's private resolver for its domain), Kilobat's own rules, TCP and TLS over IPv4 and IPv6 separately, the same connection over each interface when there are several, the exact request (path and query kept) through the path the app uses, every redirect hop with its own IPv4 and IPv6 check of the final host, and with a VPN or proxy on, the direct path against the tunnel or proxy. A HEAD request the server refuses is retried once as a one-byte GET; nothing larger is downloaded. A broken IPv6 or IPv4 path, a tunnel that fails while direct connections work, a proxy that works where direct connections are blocked, and a redirect target that fails each get their own verdict. A passing check means this request from this Mac over that path works now, not that every app or transfer is fine. Returns `verdict`, `next` (what to do), `ok`, `steps` (`layer`, `status`: ok, warning, failed or skipped, and `detail`), `hops` (`url`, `host`, `method`, `status` or `error`), `method` (what the check sent: HEAD, or a one-byte GET), `path` (`kind`: appProxy, environmentProxy, systemProxy or direct; `proxy` as host:port; `untested`, an app setting the check couldn't go through), `client` (`id`, `name`, `version` of the app as installed), `date` (when the check ran) and `failedAt`. `target`, details and hop URLs never show query values or passwords. Pass `app` (a bundle ID or process:<name> from get_status) to include that app's rules, the proxy variables in its environment (HTTPS_PROXY, ALL_PROXY, NO_PROXY) and its open connections to the host or its proxy, compared with the fresh one, and a `Transfer` step that says whether bytes still arrive on them a few seconds apart. A quiet transfer may be stalled or finished with its connection still open: never report a download as finished from it. Pass `proxy` when the app uses a proxy address from its own settings: the request goes through it, and when that fails while direct connections work, the verdict says the network is fine and the app's path isn't. Some apps have a setting Kilobat can't read or go through, such as LM Studio's Hugging Face proxy (a switch with no address) for huggingface.co downloads: an `App setting` step cites dated user reports, and the verdict says the network works, not that the app's request does. Suggest the user checks that setting; never change another app's settings or promise it will resume a download on its own. Pass `failed_at` when the user says when the app failed. Pass `context` when the failing code runs in a container, VM or remote machine: the checks still run on this Mac, and a `Context` step says how to check from there. Pass `context` provider when a hosted service makes the request from its own servers (Warp's custom inference endpoint, say; pass its `app`, dev.warp.Warp-Stable, to name it): a `Provider` step says whether the target is private (localhost, a LAN or Tailscale address, a name only private DNS knows), which those servers can't reach however well it works from the Mac. Picking a known provider as `app` adds that step on its own, worded as an if. Never suggest SSH into the provider or exposing the Mac's service through a tunnel; the options are a public endpoint the user controls or a route the provider supports, quoted from `next`. When the user describes a slow or failing transfer already under way, say that a fresh check can't see that connection, and suggest get_app_bandwidth for it. Takes up to about 30 seconds. Same JSON as `kilobat why <target> --json`.",
+                inputSchema: schema(["target": ["type": "string", "description": "A host such as api.example.com, or the exact http or https URL that fails, query included."],
+                                     "app": ["type": "string", "description": "Bundle ID such as com.example.App, or process:<name>."],
+                                     "proxy": ["type": "string", "description": "A proxy the app uses by its own setting, such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080."],
+                                     "context": ["type": "string", "enum": ConnectionDoctor.Context.allCases.map(\.rawValue), "description": "Where the failing code runs, when not on this Mac; provider for a hosted service whose servers make the request."],
+                                     "failed_at": ["type": "string", "description": "When the app failed, as ISO 8601 (2026-10-29T14:05:00Z) or 14:05 today; recorded beside the check's own time."]], required: ["target"]),
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
-            let app = arguments["app"] as? String
-            let report = await ConnectionDoctor.run(try string(arguments, "target"), app: app?.isEmpty == false ? app : nil, policy: await AwakeCLI.policy())
+            let app = arguments["app"] as? String, proxy = arguments["proxy"] as? String
+            let context = try (arguments["context"] as? String).flatMap { value in
+                guard let context = ConnectionDoctor.Context(rawValue: value) else { throw MCPToolError("context takes container, vm, remote or provider.") }
+                return context
+            }
+            let failedAt = try (arguments["failed_at"] as? String).map { value in
+                guard let date = ConnectionDoctor.failureTime(value) else { throw MCPToolError("failed_at takes when the app failed, such as 2026-10-29T14:05:00Z or 14:05, not a time still ahead.") }
+                return date
+            }
+            let report = await ConnectionDoctor.run(try string(arguments, "target"), app: app?.isEmpty == false ? app : nil, proxy: proxy?.isEmpty == false ? proxy : nil,
+                                                    context: context, policy: await AwakeCLI.policy(), failedAt: failedAt)
             if report.steps.isEmpty { throw MCPToolError(report.verdict + " " + report.next) }
             return .json(try AwakeCLI.doctorJSON(report))
         },
         MCPTool(name: "list_sessions", title: "Awake sessions and agent runs",
-                description: "Awake sessions and AI agent runs (Claude Code, Codex, Gemini CLI and others) the Kilobat app recorded over the last `days` (7 by default), newest first: `kind` (awake or agent), `title`, `start`, `end`, `ended` (Went quiet, Exited, Timer ended, Turned off), bytes `received` and `sent`, bytes per process (`apps`), `destinations` an agent contacted, `events` (network changes during the run), `batteryStart`, `batteryEnd` and `peakThermal`. Recorded only while the app runs. Same JSON as `kilobat sessions --json --days N`.",
+                description: "Awake sessions and AI agent runs (Claude Code, Codex, Gemini CLI and others) the Kilobat app recorded over the last `days` (7 by default), newest first: `kind` (awake or agent), `title`, `start`, `end`, `ended` (Finished, Failed, Went quiet, Exited, Timer ended, Turned off); for agent runs the agent's hooks report, `session`, `cwd`, `project` and `state` (working, waitingForYou, done, stalled, networkFailed or failed; the last one seen for an ended run), `note` (e.g. Rate-limited until 3pm), `lastEvent` (last hook), `lastActive` (last traffic) and `lastCPU` (last CPU work), and `sharedTraffic` when bytes may include other runs of the same agent; only `ended` Finished means the agent said it was done. `executable`, `origin` (Homebrew, npm (node 22.3.0), Claude app…), `version` and `otherInstalls` show which install ran; bytes `received` and `sent`, bytes per process (`apps`), `destinations` an agent contacted, `events` (network changes during the run), `batteryStart`, `batteryEnd` and `peakThermal`. Recorded only while the app runs. Same JSON as `kilobat sessions --json --days N`.",
                 inputSchema: schema(["days": ["type": "integer", "minimum": 1, "maximum": 365, "default": 7, "description": "Number of days."]]),
                 annotations: readOnly) { arguments, _ in
             .json(try DiagnosticsCLI.encode(AwakeCLI.history(days: try integer(arguments, "days", in: 1...365) ?? 7)))
         },
         MCPTool(name: "keep_awake", title: "Keep the Mac awake",
-                description: "Stops this Mac from idle-sleeping for `minutes` (1–240) so a long build, download or agent run isn't cut off. Closing the lid still sleeps the Mac. Calling again replaces the previous hold; it ends early with release_awake or when this MCP server stops. Shows in `pmset -g assertions` as \"Kilobat: <reason>\". Changes no settings and is low risk: tell the user for how long, and on battery get their confirmation first.",
+                description: "Stops this Mac from idle-sleeping for `minutes` (1–240) so a long build, download or agent run isn't cut off. Calling again replaces the previous hold; it ends early with release_awake or when this MCP server stops. Shows in `pmset -g assertions` as \"Kilobat: <reason>\". Changes no settings and is low risk: tell the user for how long, and on battery get their confirmation first. Closing the lid still sleeps the Mac unless `lid_closed` is true: then the Kilobat app's power helper keeps it running with the lid shut, which works only after the user allowed it in Kilobat Settings and approved the helper. A closed Mac in a bag can overheat and drains its battery, so get the user's explicit confirmation for lid_closed every time, saying for how long; Kilobat still lets it sleep at the user's battery floor, when it runs hot, and when the time is up. `lidHold` in the result says until when, and `lidFloor` at which battery percentage it gives up.",
                 inputSchema: schema(["minutes": ["type": "integer", "minimum": 1, "maximum": 240, "description": "How long to stay awake."],
-                                     "reason": ["type": "string", "description": "What the Mac stays awake for, e.g. \"Running the test suite\"."]], required: ["minutes"]),
+                                     "reason": ["type": "string", "description": "What the Mac stays awake for, e.g. \"Running the test suite\"."],
+                                     "lid_closed": ["type": "boolean", "default": false, "description": "Also keep running with the lid closed. Needs the user's confirmation."]], required: ["minutes"]),
                 annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: true)) { arguments, _ in
             guard let minutes = try integer(arguments, "minutes", in: 1...240) else { throw MCPToolError("Missing required integer argument 'minutes'.") }
             let reason = (arguments["reason"] as? String).map { String($0.prefix(80)) }.flatMap { $0.isEmpty ? nil : $0 } ?? "Agent run"
-            _ = releaseHold()
-            guard let assertion = SleepAssertion(reason: "Kilobat: " + reason) else { throw MCPToolError("macOS refused to keep the Mac awake.") }
+            let lidClosed = arguments["lid_closed"] as? Bool ?? false
+            await releaseHold()
             let until = Date().addingTimeInterval(Double(minutes) * 60)
+            var lid: LidLease?
+            if lidClosed {
+                do { lid = try await AwakeCLI.holdLid(until: until, reason: reason) } catch { throw MCPToolError(error.localizedDescription) }
+            }
+            guard let assertion = SleepAssertion(reason: "Kilobat: " + reason) else {
+                if lid != nil { _ = await AppRelay.ask(LidRelayRequest.release(owner: getpid()).action, timeout: .seconds(2)) }
+                throw MCPToolError("macOS refused to keep the Mac awake.")
+            }
             let timer = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(minutes * 60))
-                if !Task.isCancelled { _ = releaseHold() }
+                if !Task.isCancelled { await releaseHold() }
             }
-            hold = (assertion, until, timer)
+            hold = (assertion, until, lid != nil, timer)
             let power = PowerState.read()
             return .json(try object(["holding": true, "until": ISO8601DateFormatter().string(from: until), "reason": reason, "onAC": power.onAC, "batteryPercent": power.batteryPercent ?? NSNull(),
-                                     "note": "Idle sleep is off until then. Closing the lid still sleeps the Mac."]))
+                                     "lidHold": lid.map { ISO8601DateFormatter().string(from: $0.until) } ?? NSNull(), "lidFloor": lid.map { $0.onlyOnAC ? 100 : $0.batteryFloor } ?? NSNull(),
+                                     "note": lid.map { "Idle sleep is off until then, and the lid can close until \($0.until.formatted(date: .omitted, time: .shortened)); Kilobat lets the Mac sleep \($0.onlyOnAC ? "if it's unplugged" : "at \($0.batteryFloor)% battery") or when it runs hot." } ?? "Idle sleep is off until then. Closing the lid still sleeps the Mac."]))
         },
         MCPTool(name: "release_awake", title: "Let the Mac sleep again",
-                description: "Ends a keep_awake hold early so the Mac can idle-sleep again. `released` is false when there was none. Releasing needs no confirmation.",
+                description: "Ends a keep_awake hold early, with its lid-closed hold if any, so the Mac can sleep again. `released` is false when there was none. Releasing needs no confirmation.",
                 annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: true)) { _, _ in
-            .json(try object(["released": releaseHold()]))
+            .json(try object(["released": await releaseHold()]))
         },
         MCPTool(name: "set_budget", title: "Set the data budget",
-                description: "Sets the session data budget in GB (0.1–10000) for the current network. With the Kilobat app's filter on, new connections stop once it is used up in the travel and work profiles; unrestricted only tracks it." + confirm,
-                inputSchema: schema(["gb": ["type": "number", "minimum": 0.1, "maximum": 10000]], required: ["gb"]),
+                description: "Sets the current network's data budget: `gb` (0.1–10000), when it starts over (`cycle`: session only resets by hand, or daily, weekly, monthly), `reset_day` (1–31 for monthly, 1 Monday to 7 Sunday for weekly) and `alerts`, the percentages that notify once per cycle (\"50,80,100\" or \"none\"). Omitted values stay as they are. With the Kilobat app's filter on, new connections stop once it is used up in the travel and work profiles; unrestricted only tracks it. Usage is sampled, so the cap is approximate." + confirm,
+                inputSchema: schema(["gb": ["type": "number", "minimum": 0.1, "maximum": 10000],
+                                     "cycle": ["type": "string", "enum": ["session", "daily", "weekly", "monthly"]],
+                                     "reset_day": ["type": "integer", "minimum": 1, "maximum": 31],
+                                     "alerts": ["type": "string", "description": "Comma-separated percentages such as 50,80,100, or none."]]),
                 annotations: change) { arguments, _ in
-            guard let raw = arguments["gb"] as? NSNumber, !isBoolean(raw), case let gb = raw.doubleValue, gb.isFinite, (0.1...10_000).contains(gb) else { throw MCPToolError("gb must be a number from 0.1 to 10000.") }
-            TrafficStore(startMonitoring: false).preferences.limitGB = gb
-            return .json(try object(["sessionBudgetGB": gb, "saved": true]))
+            var gb: Double?
+            if let raw = arguments["gb"], !(raw is NSNull) {
+                guard let number = raw as? NSNumber, !isBoolean(number), number.doubleValue.isFinite, (0.1...10_000).contains(number.doubleValue) else { throw MCPToolError("gb must be a number from 0.1 to 10000.") }
+                gb = number.doubleValue
+            }
+            let cycle = arguments["cycle"] as? String, alerts = arguments["alerts"] as? String, day = try integer(arguments, "reset_day", in: 1...31)
+            guard gb != nil || cycle != nil || day != nil || alerts != nil else { throw MCPToolError("Pass gb, cycle, reset_day or alerts.") }
+            let store = TrafficStore(startMonitoring: false)
+            do { return .json(try object(try QuotaCLI.applyBudget(store, gb: gb, cycle: cycle, resetDay: day, alerts: alerts, network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection())))) }
+            catch let error as CLIError { throw MCPToolError(error.message) }
+        },
+        MCPTool(name: "set_network_cost", title: "Set a network's data cost",
+                description: "Sets what the current network, or `network` (a key or name from list_networks), costs. `metered` gets the protection of a phone hotspot: Kilobat switches to Travel (when that is on and no profile is remembered for the network) and skips scheduled speed tests. Use it for Android hotspots and USB or Ethernet tethering that macOS doesn't flag. `unmetered` overrides macOS, `automatic` follows it again. Kilobat refuses a network it can't tell apart, such as Wi-Fi whose name macOS hides without Location access." + confirm,
+                inputSchema: schema(["cost": ["type": "string", "enum": NetworkCost.allCases.map(\.rawValue)],
+                                     "network": ["type": "string", "description": "A key or name from list_networks; the current network if omitted."]], required: ["cost"]),
+                annotations: change) { arguments, _ in
+            guard let cost = NetworkCost(rawValue: try string(arguments, "cost")) else { throw MCPToolError("cost takes metered, unmetered or automatic.") }
+            let network = (arguments["network"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            do {
+                return .json(try object(try await WiFiCLI.setCost(cost, network: network, store: TrafficStore(startMonitoring: false))))
+            } catch let error as CLIError { throw MCPToolError(error.message) }
+        },
+        MCPTool(name: "set_updater_pause", title: "Pause updaters on metered networks",
+                description: "Turns pausing updaters on metered networks `on` (the default) or `off`. While on and the network is metered, the Kilobat app's network filter blocks updater helpers (Google Updater, Microsoft AutoUpdate, macOS Software Update, App Store downloads, Sparkle's and Squirrel's helpers) with an ordinary rule; the apps themselves keep working, nothing in other apps or macOS changes, and updates resume on an unmetered network. Returns `enabled`, `metered`, `paused` and the `effect` in words." + confirm,
+                inputSchema: schema(["pause": ["type": "string", "enum": ["on", "off"]]], required: ["pause"]),
+                annotations: change) { arguments, _ in
+            do {
+                return .json(try object(try await UpdatersCLI.set(try string(arguments, "pause") == "on", store: TrafficStore(startMonitoring: false))))
+            } catch let error as CLIError { throw MCPToolError(error.message) }
+        },
+        MCPTool(name: "set_app_quota", title: "Set an app's data quota",
+                description: "Limits how much data one app may use per budget cycle (daily with a session budget), counting `direction` total or upload only, on this `network` or on all of them. With the Kilobat app's filter on, its new connections stop once the quota is used up, as with the budget; a temporary allow rule still lets it through. `action` remove deletes the app's quotas. Identify the app by bundle ID (get_status `apps[].id`) or process:<name>. Usage is sampled, so it is approximate." + confirm,
+                inputSchema: schema(["app": ["type": "string", "description": "Bundle ID such as com.getdropbox.dropbox, or process:<name>."],
+                                     "gb": ["type": "number", "minimum": 0.01, "maximum": 10000],
+                                     "direction": ["type": "string", "enum": ["total", "upload"], "default": "total"],
+                                     "network": ["type": "string", "enum": ["this", "all"], "default": "this"],
+                                     "action": ["type": "string", "enum": ["set", "remove"], "default": "set"]], required: ["app"]),
+                annotations: change) { arguments, _ in
+            let app = try string(arguments, "app"), store = TrafficStore(startMonitoring: false)
+            if arguments["action"] as? String == "remove" { return .json(try object(["app": app, "removed": QuotaCLI.removeQuota(app, store: store)])) }
+            guard let raw = arguments["gb"] as? NSNumber, !isBoolean(raw) else { throw MCPToolError("Pass gb, the quota in GB.") }
+            do {
+                let quota = try QuotaCLI.setQuota(app, gb: raw.doubleValue, uploadOnly: arguments["direction"] as? String == "upload", everyNetwork: arguments["network"] as? String == "all",
+                                                  network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection()), store: store)
+                return .json(try object(["app": app, "name": quota.name, "limitBytes": quota.bytes, "uploadOnly": quota.uploadOnly, "network": quota.network ?? NSNull(), "saved": true]))
+            } catch let error as CLIError { throw MCPToolError(error.message) }
         },
         MCPTool(name: "get_app_bandwidth", title: "One app's bandwidth over time",
                 description: "Bytes one app sent and received in a calendar `range` (hour, day, week or month), split into buckets (minutes, hours, six-hour blocks or days), with totals and the peak rate and when it happened. Omit `app` for all traffic. `back` steps to earlier periods: 1 is the previous hour, day, week or month. Use the app names from get_usage_report `topApps` or get_status `apps[].name`; helpers count under the app that owns them. History is recorded while the Kilobat app runs. Same JSON as `kilobat bandwidth [app] <range> --back N --json`.",
@@ -312,13 +406,38 @@ import KilobatCore
             let since = Date().addingTimeInterval(-Double(try integer(arguments, "days", in: 1...7) ?? 1) * 86_400)
             return .json(try FirewallCLI.encode(FilterEventJournal().events.filter { $0.date >= since }))
         },
+        MCPTool(name: "run_stutter_test", title: "Find latency spikes",
+                description: "Pings the router (or `target`: internet for 1.1.1.1, or a host) every 50 ms for `seconds` (20 by default) to find the short latency spikes that make calls, game streaming and remote desktops stutter while speed and loss look fine. Returns `latencyMs` (p50, p95, p99, max), `lossPercent` (`pingRateLimited` is true when the router answers only some fast pings, which is not real loss), `spikes` (`atSeconds`, `peakMs`; a spike is over 3× the median and over 50 ms), `periodSeconds` when spikes repeat at a regular interval, `pattern` (steady, few, periodic, irregular, noReplies), `awdl` (the AirDrop link and what used it) and a plain `verdict`. Regular spikes on the router often come from AirDrop/AWDL scanning, but not always; a speed test can't see them. Sends pings only. Same JSON as `kilobat stutter --json` without the raw samples.",
+                inputSchema: schema(["seconds": ["type": "integer", "minimum": 10, "maximum": 60, "default": 20],
+                                     "target": ["type": "string", "description": "router (default), internet, or a host name or IP address."]]),
+                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
+            let target = (arguments["target"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "router"
+            do { return .json(try object(NearbyCLI.stutterJSON(try await StutterTest.run(target: target, seconds: try integer(arguments, "seconds", in: 10...60) ?? 20), samples: false))) }
+            catch let error as DiagnosticError { throw MCPToolError(error.message) }
+        },
+        MCPTool(name: "get_nearby_radios", title: "AirDrop and Bluetooth",
+                description: "The radios that share this Mac's Wi-Fi chip or band: `awdl` (whether the AirDrop link is up and active and which features use it: AirDrop, Universal Control, Sidecar, iPhone Mirroring, Continuity), AirDrop `visibility` (everyone, contacts, off), Bluetooth `devices` (`name`, `kind`, `connected`, `sharesBand`), the Wi-Fi band and coexistence `advice` when Bluetooth audio or input devices share 2.4 GHz with Wi-Fi.",
+                annotations: readOnly) { _, _ in
+            let awdl = await NearbyRadios.awdlStatus(), devices = await NearbyCLI.bluetoothDevices(), band = await DiagnosticProbe().radio().band
+            return .json(try object(["awdl": NearbyCLI.awdlJSON(awdl), "visibility": NearbyRadios.airDropVisibility()?.key as Any? ?? NSNull(), "wifiBand": band as Any? ?? NSNull(),
+                                     "devices": devices.map { ["name": $0.name, "kind": $0.kind.rawValue, "connected": $0.connected, "sharesBand": NearbyRadios.sharesBand($0, wifiBand: band)] },
+                                     "advice": NearbyRadios.coexistence(wifiBand: band, devices: devices) as Any? ?? NSNull()] as [String: Any]))
+        },
+        MCPTool(name: "set_airdrop_visibility", title: "Change AirDrop visibility",
+                description: "Asks for AirDrop visibility `everyone`, `contacts` or `off`. macOS lets only System Settings change it, so this opens System Settings at General › AirDrop & Handoff for the user to choose, and returns the current `visibility` and `openedSettings`. Opens a window on the user's screen: explain why and get the user's explicit confirmation before calling.",
+                inputSchema: schema(["visibility": ["type": "string", "enum": ["everyone", "contacts", "off"]]], required: ["visibility"]),
+                annotations: change) { arguments, _ in
+            guard let wanted = AirDropVisibility.allCases.first(where: { $0.key == (arguments["visibility"] as? String) }) else { throw MCPToolError("visibility must be everyone, contacts or off.") }
+            return .json(try object(NearbyCLI.setAirDrop(wanted)))
+        },
     ] }
 
-    /// The keep_awake hold, released by its timer, release_awake, or this process exiting.
-    static var hold: (assertion: SleepAssertion, until: Date, timer: Task<Void, Never>)?
-    static func releaseHold() -> Bool {
+    /// The keep_awake hold, released by its timer, release_awake, or this process exiting; the app drops its lid hold then too.
+    static var hold: (assertion: SleepAssertion, until: Date, lid: Bool, timer: Task<Void, Never>)?
+    @discardableResult static func releaseHold() async -> Bool {
         guard let hold else { return false }
         hold.timer.cancel(); hold.assertion.release(); self.hold = nil
+        if hold.lid { _ = await AppRelay.ask(LidRelayRequest.release(owner: getpid()).action, timeout: .seconds(2)) }
         return true
     }
 

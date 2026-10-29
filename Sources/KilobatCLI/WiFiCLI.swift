@@ -13,7 +13,7 @@ import KilobatCore
         case "channels":
             guard rest.count == 1 else { throw CLIError("Use channels [--json].") }
             try await channels(json: json)
-        case "networks": try networks(Array(rest.dropFirst()), json: json)
+        case "networks": try await networks(Array(rest.dropFirst()), json: json)
         case "health-history": try healthHistory(Array(rest.dropFirst()), json: json)
         case "settings": try settings(Array(rest.dropFirst()), json: json)
         case "low-latency": try await lowLatency(Array(rest.dropFirst()))
@@ -181,38 +181,84 @@ import KilobatCore
 
     // MARK: Remembered networks
 
-    static func networks(_ args: [String], json: Bool) throws {
+    static func networks(_ args: [String], json: Bool) async throws {
         let store = TrafficStore(startMonitoring: false)
-        let keys = networkKeys(store)
         func name(_ key: String) -> String { store.networkSessions[key]?.name ?? "Unknown network" }
         switch args.first {
         case nil:
-            let rows = networkRows(store)
+            let rows = await networkRows(store)
             if json { try printObject(rows); return }
             if rows.isEmpty { print("No networks yet. Kilobat records them while the app runs."); return }
             for row in rows {
                 let profile = (row["profile"] as? String).map { "\($0) · " } ?? ""
                 let budget = (row["budgetGB"] as? Double).map { "\($0.formatted()) GB budget · " } ?? ""
-                print("\(KilobatCLI.pad(row["name"] as? String ?? "", 28))\(profile)\(budget)\(TrafficFormat.bytes(row["sessionBytes"] as? UInt64 ?? 0)) this session  \(row["key"] as? String ?? "")")
+                let cost = row["meteredSource"] as? String == "you" ? ((row["metered"] as? Bool) == true ? "metered · " : "unmetered · ") : ""
+                print("\(KilobatCLI.pad(row["name"] as? String ?? "", 28))\(profile)\(budget)\(cost)\(TrafficFormat.bytes(row["sessionBytes"] as? UInt64 ?? 0)) this session  \(row["key"] as? String ?? "")")
             }
         case "forget":
             guard args.count == 2 else { throw CLIError("Use networks forget <key or name>.") }
-            let matches = keys.filter { $0 == args[1] || name($0).caseInsensitiveCompare(args[1]) == .orderedSame }
-            guard matches.count == 1, let key = matches.first else { throw CLIError(matches.isEmpty ? "No network matches “\(args[1])”." : "Several networks match; use the key from kilobat networks.") }
-            store.preferences.networkProfiles?.removeValue(forKey: key); store.preferences.networkLimits?.removeValue(forKey: key)
-            print("✓ Forgot the profile and budget for \(name(key)).")
-        default: throw CLIError("Use networks [--json] or networks forget <key or name>.")
+            let key = try network(args[1], store: store)
+            store.preferences.networkProfiles?.removeValue(forKey: key); store.preferences.networkLimits?.removeValue(forKey: key); store.preferences.setCost(.automatic, for: key)
+            print("✓ Forgot the profile, budget and data cost for \(name(key)).")
+        case "cost":
+            guard (2...3).contains(args.count), let cost = NetworkCost(rawValue: args[1].lowercased()) else { throw CLIError("Use networks cost <metered|unmetered|automatic> [key or name].") }
+            var result = try await setCost(cost, network: args.count == 3 ? args[2] : nil, store: store)
+            let effect = result.removeValue(forKey: "effect") as? String ?? ""
+            if json { try printObject(result); return }
+            print("✓ \(result["name"] as? String ?? "")\(result["lastRecorded"] as? Bool == true ? " (the network Kilobat last recorded)" : "") \(effect)")
+        default: throw CLIError("Use networks [--json], networks cost <metered|unmetered|automatic> [name] or networks forget <key or name>.")
         }
     }
     static func networkKeys(_ store: TrafficStore) -> Set<String> {
-        Set((store.preferences.networkProfiles ?? [:]).keys).union((store.preferences.networkLimits ?? [:]).keys).union(store.networkSessions.keys).subtracting(["unknown"])
+        Set((store.preferences.networkProfiles ?? [:]).keys).union((store.preferences.networkLimits ?? [:]).keys).union((store.preferences.networkCost ?? [:]).keys)
+            .union(store.networkSessions.keys).subtracting(["unknown"])
     }
-    static func networkRows(_ store: TrafficStore) -> [[String: Any]] {
+    static func network(_ text: String, store: TrafficStore) throws -> String {
+        let matches = networkKeys(store).filter { $0 == text || store.networkSessions[$0]?.name.caseInsensitiveCompare(text) == .orderedSame }
+        guard matches.count == 1, let key = matches.first else { throw CLIError(matches.isEmpty ? "No network matches “\(text)”." : "Several networks match; use the key from kilobat networks.") }
+        return key
+    }
+    /// Sets the data cost of `network` (a key or name), or of the network the app is on.
+    static func setCost(_ cost: NetworkCost, network: String?, store: TrafficStore) async throws -> [String: Any] {
+        let app = network == nil ? await connection() : nil
+        let current = network == nil ? currentNetwork(store, app: app) : nil
+        if network == nil && current == nil { throw CLIError("Kilobat hasn’t recorded a network yet. Open the app, or name one from kilobat networks.") }
+        let key = try current?.key ?? Self.network(network ?? "", store: store)
+        guard current?.identified ?? (store.networkSessions[key]?.identified != false) else {
+            throw CLIError("Kilobat can’t tell this network apart yet — allow Location in the app so it can see the Wi-Fi name.")
+        }
+        store.preferences.setCost(cost, for: key)
+        let travel = store.preferences.autoHotspot && store.preferences.networkProfiles?[key] == nil
+        let effect = switch cost {
+        case .automatic: "follows macOS again."
+        case .unmetered: "is unmetered now."
+        case .metered: "is metered now. Kilobat " + (travel ? "switches to Travel and skips" : "skips") + " scheduled speed tests there."
+        }
+        return ["key": key, "name": store.networkSessions[key]?.name ?? "Unknown network", "cost": cost.rawValue, "lastRecorded": current != nil && app == nil, "effect": effect]
+    }
+    /// The network the app is on, or failing that the one Kilobat last recorded.
+    static func currentNetwork(_ store: TrafficStore, app: [String: Any]?) -> (key: String, identified: Bool)? {
+        guard let key = QuotaCLI.currentNetwork(store, app: app) else { return nil }
+        return (key, app?["networkIdentified"] as? Bool ?? (store.networkSessions[key]?.identified != false))
+    }
+    /// The current network's cost. Without the app, the network last recorded may not be this one, so only a stricter setting counts.
+    static func currentCost(_ store: TrafficStore, app: [String: Any]?) -> NetworkCost {
+        let cost = currentNetwork(store, app: app).map { store.preferences.cost(of: $0.key) } ?? .automatic
+        return app == nil && cost == .unmetered ? .automatic : cost
+    }
+    static func networkRows(_ store: TrafficStore) async -> [[String: Any]] {
         let preferences = store.preferences, keys = networkKeys(store)
+        async let path = AwakeCLI.currentPath()
+        let app = await connection(), current = currentNetwork(store, app: app)?.key, os = await path.expensive
         func name(_ key: String) -> String { store.networkSessions[key]?.name ?? "Unknown network" }
         return keys.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }.map { key -> [String: Any] in
-                ["key": key, "name": name(key), "profile": preferences.networkProfiles?[key]?.lowercased() ?? NSNull(), "remembered": preferences.networkProfiles?[key] != nil,
-                 "budgetGB": preferences.networkLimits?[key] ?? NSNull(), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0)]
+            let cost = key == current ? currentCost(store, app: app) : preferences.cost(of: key)
+            // macOS only reports the network the Mac is on.
+            let metered: [String: Any] = key == current ? cost.fields(os: os)
+                : ["metered": cost == .automatic ? NSNull() : cost == .metered, "osMetered": NSNull(), "meteredSource": cost == .automatic ? NSNull() : "you"]
+            return ["key": key, "name": name(key), "profile": preferences.networkProfiles?[key]?.lowercased() ?? NSNull(), "remembered": preferences.networkProfiles?[key] != nil,
+                    "budgetGB": preferences.networkLimits?[key] ?? NSNull(), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0),
+                    "current": key == current, "cost": preferences.cost(of: key).rawValue].merging(metered) { $1 }
         }
     }
 
@@ -266,6 +312,8 @@ import KilobatCore
                 read: { $0.preferences.allowApple == true ? "on" : "off" }, write: { store, value in store.preferences.allowApple = try toggle(value) }),
         Setting(key: "auto-travel", values: "on|off", detail: "Switch to Travel on metered networks such as a phone hotspot",
                 read: { $0.preferences.autoHotspot ? "on" : "off" }, write: { store, value in store.preferences.autoHotspot = try toggle(value) }),
+        Setting(key: "pause-updaters", values: "on|off", detail: "Block updater helpers such as Google Updater and macOS Software Update while the network is metered",
+                read: { UpdaterPause.enabled($0.preferences) ? "on" : "off" }, write: { store, value in store.preferences.pauseUpdaters = try toggle(value) ? nil : false }),
         Setting(key: "scope", values: "external|wifi|wired", detail: "Which traffic counts toward per-app totals",
                 read: { $0.preferences.trafficScope ?? "external" },
                 write: { store, value in guard ["external", "wifi", "wired"].contains(value) else { throw CLIError("Use external, wifi or wired.") }; store.preferences.trafficScope = value }),
@@ -319,22 +367,63 @@ import KilobatCore
     // MARK: Low latency and quitting apps
 
     static func lowLatency(_ args: [String]) async throws {
-        guard args == ["on"] else { throw CLIError("Use low-latency on. It pauses AirDrop and AWDL for up to 15 minutes while this command runs; Ctrl-C restores it.") }
+        let usage = "Use low-latency on [--for 15m|1h|2h] [--until-quit <app>], or low-latency off."
+        if args == ["off"] {
+            let released = LowLatencyMode.releaseAll()
+            await waitForAWDL()
+            switch await LowLatencyMode.isUp() {
+            case true?: print(released > 0 ? "✓ AWDL restored." : "AWDL is already on.")
+            case false?:
+                try await LowLatencyMode.forceRestore(reason: "Kilobat turns AirDrop (AWDL) back on.")
+                print("✓ AWDL restored.")
+            case nil: print("This Mac has no AWDL interface.")
+            }
+            return
+        }
+        guard args.first == "on" else { throw CLIError(usage) }
+        try KilobatCLI.allow(args, ["--for", "--until-quit"], valued: ["--for", "--until-quit"])
+        func value(_ flag: String) throws -> String? {
+            guard let index = args.firstIndex(of: flag) else { return nil }
+            guard index + 1 < args.count else { throw CLIError(usage) }
+            return args[index + 1]
+        }
+        let seconds = try value("--for").map { text -> TimeInterval in
+            guard let seconds = LowLatencyHold.seconds(text) else { throw CLIError("--for takes a length such as 15m, 1h or 2h, up to 4h.") }
+            return seconds
+        }
+        let app = try value("--until-quit").map { name -> (pid: Int32, name: String) in
+            let running = NSWorkspace.shared.runningApplications.first {
+                $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame || $0.bundleIdentifier?.caseInsensitiveCompare(name) == .orderedSame
+            }
+            guard let running, let title = running.localizedName else { throw CLIError("'\(name)' isn't running. Open it first, or use --for.") }
+            return (running.processIdentifier, title)
+        }
         let mode = LowLatencyMode()
-        await mode.enable()
+        await mode.enable(seconds: seconds ?? (app == nil ? 900 : nil), app: app)
         if let error = mode.error { throw CLIError(error) }
-        print("✓ AWDL paused: AirDrop, Sidecar and Universal Control are off for up to 15 minutes.")
-        print("  Keep this running during your call or game. Ctrl-C or closing Terminal restores them.")
+        print("✓ AWDL paused: AirDrop, Sidecar and Universal Control are off (\(mode.hold?.label() ?? "for now"), 4 hours at most).")
+        print("  Keep this running during your call or game. Ctrl-C, closing Terminal or kilobat low-latency off restores them.")
         signal(SIGINT, SIG_IGN)
         let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         let stopped = AsyncStream<Void> { continuation in
             interrupt.setEventHandler { continuation.finish() }
             interrupt.resume()
-            Task { try? await Task.sleep(for: .seconds(900)); continuation.finish() }
+            Task { @MainActor in
+                while mode.active { try? await Task.sleep(for: .seconds(1)) }
+                continuation.finish()
+            }
         }
         for await _ in stopped {}
         mode.release()
+        await waitForAWDL()
         print("\n✓ AWDL restored.")
+    }
+    /// The watchdog restores AWDL within a couple of seconds of its lease going away.
+    static func waitForAWDL() async {
+        for _ in 0..<5 {
+            guard await LowLatencyMode.isUp() == false else { return }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     static func quit(_ args: [String]) async throws {

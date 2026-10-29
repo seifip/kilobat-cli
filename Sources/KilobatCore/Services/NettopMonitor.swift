@@ -17,6 +17,20 @@ public final class NettopMonitor: @unchecked Sendable {
         return ProcessTraffic(pid: pid, process: String(columns[0][..<dot]), received: received, sent: sent)
     }
 
+    /// With the interface column, a process row (`name.pid,,in,out,`) is followed by its connections
+    /// (`tcp4 local<->remote,en0,in,out,`), which say whether its bytes went to the Internet, the local network or a tunnel.
+    static func parse(_ line: String, into rows: inout [ProcessTraffic]) {
+        let columns = line.split(separator: ",", omittingEmptySubsequences: false)
+        guard columns.count >= 4, let received = UInt64(columns[2]), let sent = UInt64(columns[3]) else { return }
+        if columns[0].contains("<->") {
+            guard !rows.isEmpty else { return }
+            rows[rows.count - 1].connections.append(ConnectionTraffic(id: String(columns[0]), route: TrafficRoute.classify(columns[0], interface: columns[1]),
+                                                                    interface: String(columns[1]), received: received, sent: sent))
+        } else if let dot = columns[0].lastIndex(of: "."), let pid = Int32(columns[0][columns[0].index(after: dot)...]) {
+            rows.append(ProcessTraffic(pid: pid, process: String(columns[0][..<dot]), received: received, sent: sent))
+        }
+    }
+
     public func start(scope: String = "external", onSample: @escaping @Sendable (TrafficSnapshot) -> Void,
                onError: @escaping @Sendable (String) -> Void) {
         stop()
@@ -32,7 +46,9 @@ public final class NettopMonitor: @unchecked Sendable {
         let process = Process()
         // A PTY keeps nettop line-buffered; direct pipes coalesce samples and distort rates.
         process.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-        process.arguments = ["-q", "-F", "/dev/null", "/usr/bin/nettop", "-P", "-L", "0", "-s", "1", "-n", "-x", "-J", "bytes_in,bytes_out", "-t", ["external", "wifi", "wired"].contains(scope) ? scope : "external"]
+        // Per-connection rows rather than -P: about 1.7% of a core instead of 1%, and the only way to tell
+        // Internet bytes from LAN, AirDrop and VPN tunnel bytes.
+        process.arguments = ["-q", "-F", "/dev/null", "/usr/bin/nettop", "-L", "0", "-s", "1", "-n", "-x", "-J", "interface,bytes_in,bytes_out", "-t", ["external", "wifi", "wired"].contains(scope) ? scope : "external"]
         let output = Pipe()
         process.standardInput = Pipe()
         process.standardOutput = output
@@ -67,7 +83,7 @@ public final class NettopMonitor: @unchecked Sendable {
                     if line.contains(",bytes_in,bytes_out,") {
                         if sawHeader && self.current(id) { onSample(TrafficSnapshot(timestamp: Date(), processes: rows)); sampled = true }
                         rows = []; sawHeader = true
-                    } else if let row = Self.parseRow(line) { rows.append(row) }
+                    } else { Self.parse(line, into: &rows) }
                 }
             }
             process.waitUntilExit()

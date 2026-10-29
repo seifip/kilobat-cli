@@ -23,6 +23,16 @@ import Observation
         hostnames = names
     }
 
+    /// Connections system services such as nsurlsessiond made for other apps, as the filter saw them.
+    public private(set) var delegations: [DelegatedFlows] = []
+
+    public func refreshDelegations() async {
+        guard let data = await call({ service, reply in service.delegatedFlows(reply: reply) }) else { return }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        guard let flows = try? decoder.decode([DelegatedFlows].self, from: data), flows != delegations else { return }
+        delegations = flows
+    }
+
     /// Releases the held connections. The caller saves the rule so later connections follow it.
     public func decide(_ app: String, allowed: Bool) async {
         pending.removeAll { $0.app == app }

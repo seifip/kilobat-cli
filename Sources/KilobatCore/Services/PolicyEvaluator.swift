@@ -6,6 +6,10 @@ public struct FilterPolicy: Sendable {
     public var enabled = true
     public var unrestricted = false
     public var budgetReached = false
+    /// Rule keys of apps that used up their quota.
+    public var quotaReached: Set<String> = []
+    /// On a metered network with pausing on: updater helpers (`UpdaterHelpers`) are blocked, the apps they update aren't.
+    public var updatersPaused = false
     public var defaultAllow = false
     public var askNewApps = false
     public var allowApple = false
@@ -23,6 +27,8 @@ public struct FilterPolicy: Sendable {
         enabled = configuration["enabled"] as? Bool ?? false
         unrestricted = configuration["unrestricted"] as? Bool == true
         budgetReached = configuration["budgetReached"] as? Bool == true
+        quotaReached = Set(configuration["quotaReached"] as? [String] ?? [])
+        updatersPaused = configuration["updatersPaused"] as? Bool == true
         defaultAllow = configuration["defaultAllow"] as? Bool ?? false
         askNewApps = configuration["askNewApps"] as? Bool == true
         allowApple = configuration["allowApple"] as? Bool == true
@@ -48,8 +54,11 @@ public struct FilterPolicy: Sendable {
         public var address: String?
         public var port: String?
         public var direction: String
-        public init(app: String?, process: String, host: String?, address: String? = nil, port: String? = nil, direction: String = "outgoing") {
-            self.app = app; self.process = process; self.host = host; self.address = address; self.port = port; self.direction = direction
+        /// The process that made the connection for `app`, when another one did: nsurlsessiond for Music, or a
+        /// Sparkle download service for its app. Only pausing updaters looks at it; rules stay with `app`.
+        public var via: String?
+        public init(app: String?, process: String, host: String?, address: String? = nil, port: String? = nil, direction: String = "outgoing", via: String? = nil) {
+            self.app = app; self.process = process; self.host = host; self.address = address; self.port = port; self.direction = direction; self.via = via
         }
     }
 
@@ -62,6 +71,10 @@ public struct FilterPolicy: Sendable {
         case blocklist(String)
         case temporaryRule(TemporaryRule)
         case budget
+        /// The app used up its data quota; carries its rule key.
+        case quota(String)
+        /// An updater helper on a metered network; carries the helper's name.
+        case updaterPaused(String)
         case appRule(Bool)
         case recentDecision(Bool)
         case appleSoftware
@@ -79,6 +92,8 @@ public struct FilterPolicy: Sendable {
             case .blocklist(let entry): "Blocklist: " + entry
             case .temporaryRule: "Temporary app rule"
             case .budget: "Network budget reached"
+            case .quota: "App quota reached"
+            case .updaterPaused: UpdaterHelpers.reason
             case .appRule(let allowed): allowed ? "App allow rule" : "App block rule"
             case .recentDecision(let allowed): allowed ? "Allowed when asked" : "Blocked when asked"
             case .appleSoftware: "Apple software"
@@ -102,9 +117,13 @@ public struct FilterPolicy: Sendable {
         }
         guard let app = flow.app else { return budgetReached ? (.block, .budget) : (.allow, .noAppRule) }
         let keys = [app] + ProcessRuleKey.keys("process:" + flow.process)
-        // Explicit rules win over the budget, so "allow for N minutes" still works once it is reached.
+        // Explicit rules win over the budget, quotas and paused updaters, so "allow for N minutes" still works.
         if let rule = keys.lazy.compactMap({ temporary[$0] }).first, rule.expires > now { return (rule.allowed ? .allow : .block, .temporaryRule(rule)) }
         if budgetReached { return (.block, .budget) }
+        if let key = keys.first(where: quotaReached.contains) { return (.block, .quota(key)) }
+        if updatersPaused, let helper = UpdaterHelpers.helper(app, process: flow.process) ?? UpdaterHelpers.helper(flow.via) {
+            return (.block, .updaterPaused(helper.name))
+        }
         if let saved = keys.lazy.compactMap({ rules[$0] }).first { return (saved ? .allow : .block, .appRule(saved)) }
         if let recentDecision { return (recentDecision ? .allow : .block, .recentDecision(recentDecision)) }
         if (askNewApps || !defaultAllow) && allowApple && appleSigned() { return (.allow, .appleSoftware) }

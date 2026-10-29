@@ -51,7 +51,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
             while !Task.isCancelled {
                 guard let self, let store else { return }
                 store.reloadPreferences()
-                self.sync(preferences: store.preferences, budgetReached: store.limitFraction >= 1)
+                self.sync(preferences: store.preferences, budgetReached: store.limitFraction >= 1, quotaReached: store.quotaReached, metered: store.metered)
                 // Polling is also how the filter knows someone is here to answer, so it only runs while asking.
                 tick += 1
                 if self.active && store.preferences.askNewApps == true && store.preferences.profile != .unrestricted {
@@ -76,9 +76,9 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         }
     }
 
-    public func activate(preferences: SavedPreferences, budgetReached: Bool) {
+    public func activate(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
         guard bundled else { message = "This build has no signed network extension. Use a provisioned build to enable filtering."; return }
-        configuration = policy(preferences, budgetReached: budgetReached)
+        configuration = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
         busy = true
         message = "Approve Kilobat in System Settings → General → Login Items & Extensions → Network Extensions."
         let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
@@ -87,9 +87,9 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         OSSystemExtensionManager.shared.submitRequest(request)
     }
 
-    public func sync(preferences: SavedPreferences, budgetReached: Bool) {
+    public func sync(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
         guard bundled, active || busy else { return }
-        let next = policy(preferences, budgetReached: budgetReached)
+        let next = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
         let encoded = try? JSONSerialization.data(withJSONObject: next, options: .sortedKeys)
         if busy { pendingPolicy = next; return }
         guard encoded != lastPolicy else { return }
@@ -128,13 +128,18 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         Task { await approvals.decide(approval.app, allowed: allowed) }
     }
 
-    func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] { Self.policy(preferences, budgetReached: budgetReached) }
+    func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false) -> [String: Any] {
+        Self.policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
+    }
     /// The configuration the filter enforces; `FilterPolicy` reads it back for the filter and the doctor alike.
-    public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] {
+    /// `metered` is the current network's effective cost, which decides whether updaters are paused.
+    public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false) -> [String: Any] {
         ["enabled": true, "unrestricted": preferences.profile == .unrestricted, "profile": preferences.profile.rawValue,
          "defaultAllow": preferences.defaultAllow,
          "rules": preferences.rules[preferences.profile.rawValue] ?? [:],
          "budgetReached": budgetReached && preferences.profile != .unrestricted,
+         "quotaReached": preferences.profile == .unrestricted ? [] : quotaReached.sorted(),
+         "updatersPaused": UpdaterPause.active(preferences, metered: metered),
          "connectionRules": (try? JSONEncoder().encode((preferences.connectionRules ?? []).filter { $0.profile == preferences.profile.rawValue }))?.base64EncodedString() ?? "",
          "temporary": (preferences.temporaryRules ?? [:]).filter { $0.key.hasPrefix(preferences.profile.rawValue + "|") }.reduce(into: [String: [String: Any]]()) { output, item in
              output[String(item.key.dropFirst(preferences.profile.rawValue.count + 1))] = ["allowed": item.value.allowed, "expires": item.value.expires.timeIntervalSince1970]

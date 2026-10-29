@@ -4,11 +4,15 @@ import CryptoKit
 import UserNotifications
 
 public extension DiagnosticSnapshot {
+    /// A wired link names the network by its service and gateway, the same whether Wi-Fi is joined alongside or not.
     var networkKey: String {
-        let identity = [radio.ssid ?? "SSID unavailable", gateway ?? "no gateway", radio.interface ?? networkService ?? "unknown"].joined(separator: "|")
+        let wifi = wiredInterface == nil ? radio : nil
+        let identity = [wifi?.ssid ?? "SSID unavailable", gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"].joined(separator: "|")
         return SHA256.hash(data: Data(identity.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
-    var networkName: String { radio.ssid ?? networkService ?? "Unknown network" }
+    var networkName: String { (wiredInterface == nil ? radio.ssid : nil) ?? networkService ?? "Unknown network" }
+    /// Wi-Fi without its name (macOS hides it without Location) looks the same as any network behind the same router address.
+    var networkIdentified: Bool { gateway != nil && (wiredInterface != nil || radio.interface == nil || radio.ssid != nil) }
 }
 public struct NetworkEvent: Codable, Identifiable, Sendable {
     public var id = UUID()

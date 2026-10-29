@@ -20,19 +20,23 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
         // A piped report gets the compact JSON summary unless a format was chosen; raw samples can run to megabytes.
-        if Terminal.piped, command == "report", !args.contains("--json"), !args.contains("--csv") { args += ["--summary", "--json"] }
+        if Terminal.piped, command == "report", !args.contains("--json"), !args.contains("--csv") { args += args.dropFirst().first == "compare" ? ["--json"] : ["--summary", "--json"] }
         switch command {
         case "blocklist", "domain-exception", "remember-network", "scope": try await PolicyCLI.run(args)
         case "bandwidth", "access-policy", "block-host", "unblock-host", "approvals", "approve", "deny": try await FirewallCLI.run(args)
         case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history": try await ExpertCLI.run(args)
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
         case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
+        case "limit", "quota": try await QuotaCLI.run(args)
+        case "updaters": try await UpdatersCLI.run(args)
+        case "agent-event": await AgentCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
+        case "stutter", "airdrop", "bluetooth": try await NearbyCLI.run(args)
         case "--help", "-h", "help": print(help)
         case "completion":
             guard args.count <= 2 else { throw CLIError("Use completion [zsh|bash|fish].") }
@@ -104,15 +108,8 @@ struct KilobatCLI {
                 print("\(rule.allowed ? "allow" : "block")  \(key.dropFirst(profile.rawValue.count + 1)) · until \(rule.expires.formatted(date: .omitted, time: .shortened))")
             }
             print("Saved rules · check the app for live filter status")
-        case "limit":
-            let store = TrafficStore(startMonitoring: false)
-            if args.count == 1 { print("Session budget: \(store.preferences.limitGB) GB (informational in monitor mode)") }
-            else {
-                guard args.count == 2, let amount = Double(args[1]), amount.isFinite, amount >= 0.1, amount <= 10_000 else { throw CLIError("Use limit <GB>, between 0.1 and 10000.") }
-                store.preferences.limitGB = amount
-                print("✓ Session budget: \(amount) GB. Monitor mode does not stop transfers.")
-            }
         case "report":
+            if args.dropFirst().first == "compare" { try ReportCLI.compare(args); return }
             var days = 30, index = 1
             while index < args.count {
                 if ["--json", "--csv", "--summary"].contains(args[index]) { index += 1; continue }
@@ -125,8 +122,10 @@ struct KilobatCLI {
             if args.contains("--summary") {
                 let summary = UsageSummary(store.usage, days: days)
                 if args.contains("--json") { print(String(decoding: try DiagnosticsCLI.encode(summary), as: UTF8.self)); return }
-                print("Kilobat · last \(days) days · ↓ \(TrafficFormat.bytes(summary.downloadBytes))  ↑ \(TrafficFormat.bytes(summary.uploadBytes))")
+                print("Kilobat · last \(days) days · Internet ↓ \(TrafficFormat.bytes(summary.downloadBytes))  ↑ \(TrafficFormat.bytes(summary.uploadBytes))")
                 for app in summary.topApps { print("  \(pad(app.name, 30))\(TrafficFormat.bytes(app.bytes))") }
+                if summary.localBytes > 0 { print("  Local network: \(TrafficFormat.bytes(summary.localBytes)), not counted") }
+                if summary.localBytes > 0 { print("Local network and AirDrop: \(TrafficFormat.bytes(summary.localBytes)), not counted above") }
                 return
             }
             if args.contains("--json") {
@@ -172,7 +171,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.5.1"
+    static let version = "0.6.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -254,7 +253,7 @@ struct KilobatCLI {
     /// `app` is the running app's relay answer; without it the session line shows only what this command sampled.
     @MainActor static func dashboard(_ store: TrafficStore, app: [String: Any]? = nil, bySession: Bool = false, rows: Int = 12) -> [String] {
         let violet = Terminal.violet, blue = Terminal.blue
-        var lines = ["", violet("  ◉  kilobat"), "  \(store.networkKind) · \(store.expensive ? "Metered" : "Unmetered") · \(store.preferences.profile.rawValue) · Filtering status: see app", ""]
+        var lines = ["", violet("  ◉  kilobat"), "  \(store.networkKind) · \(app?["metered"] as? Bool ?? store.metered ? "Metered" : "Unmetered") · \(store.preferences.profile.rawValue) · Filtering status: see app", ""]
         lines.append(Terminal.dim("  ↓ DOWNLOAD                         ↑ UPLOAD"))
         lines.append("  \(blue(pad(TrafficFormat.rate(store.download), 35)))\(violet(TrafficFormat.rate(store.upload)))")
         lines.append("  \(blue(pad(spark(store.downloadHistory), 35)))\(violet(spark(store.uploadHistory)))")
@@ -298,9 +297,24 @@ struct KilobatCLI {
         if let encoded = try? statusJSON(store, app: app) { print(String(decoding: encoded, as: UTF8.self)) }
     }
     @MainActor static func statusJSON(_ store: TrafficStore, app: [String: Any]? = nil) throws -> Data {
-        // sessionBytes counts only this command's sampling window (sampleSeconds); networkSessionBytes is the app's figure.
-        var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "sampleSeconds": WiFiCLI.tenths(Date().timeIntervalSince(store.startedAt)), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.expensive, "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, "apps": store.filteredApps.map { ["id": $0.id, "name": $0.name, "downloadBytesPerSecond": $0.downloadRate, "uploadBytesPerSecond": $0.uploadRate, "sessionBytes": $0.total, "allowedRule": store.isAllowed($0.id), "processIDs": $0.processIDs] as [String: Any] }]
+        // sessionBytes counts only this command's sampling window (sampleSeconds); networkSessionBytes is the app's figure. Both count
+        // Internet bytes only, from the Wi-Fi and Ethernet counters when `countsInterfaces`. An app's sessionBytes is everything it moved, split into internetBytes and localBytes (LAN, AirDrop), with tunnelBytes inside a VPN.
+        // A system download service's onBehalfOf lists the apps the filter saw it download for; null without the filter.
+        let downloadsFor = (app?["downloadsFor"] as? [String: [String]]) ?? [:], filtered = app?["filteringActive"] as? Bool == true
+        var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "sampleSeconds": WiFiCLI.tenths(Date().timeIntervalSince(store.startedAt)), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.metered, "osMetered": store.osExpensive, "meteredSource": "macOS", "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, 
+                                   "localBytes": store.local, "tunnelBytes": store.tunnel, "unattributedBytes": store.unattributedBytes, "countsInterfaces": store.countsInterfaces,
+                                   "apps": store.filteredApps.map { traffic in
+            var row: [String: Any] = ["id": traffic.id, "name": traffic.name, "downloadBytesPerSecond": traffic.downloadRate, "uploadBytesPerSecond": traffic.uploadRate, "sessionBytes": traffic.total,
+                                      "internetBytes": traffic.internet, "localBytes": traffic.local, "tunnelBytes": traffic.tunnel, "allowedRule": store.isAllowed(traffic.id), "processIDs": traffic.processIDs]
+            if let path = traffic.executablePath { row["executablePath"] = path }
+            if let service = SystemDownloads.service(for: traffic) {
+                row["systemDownload"] = service.detail
+                row["onBehalfOf"] = filtered ? (downloadsFor[service.process] ?? []) : NSNull()
+            }
+            return row
+        }]
         if let app { data.merge(appFields(app)) { _, new in new } }
+        data["budget"] = QuotaCLI.budgetJSON(store, app: app); data["quotas"] = QuotaCLI.quotasJSON(store, app: app)
         return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     /// What only the running app knows: filter state, Wi-Fi name and this network's budget use.
@@ -309,6 +323,9 @@ struct KilobatCLI {
         if let budget = app["budgetGB"] { fields["sessionBudgetGB"] = budget }
         if let used = app["budgetUsed"] { fields["budgetUsed"] = used }
         if let bytes = app["sessionBytes"] { fields["networkSessionBytes"] = bytes }
+        for key in ["metered", "osMetered", "meteredSource"] { if let value = app[key] { fields[key] = value } }
+        if let bytes = app["localBytes"] { fields["networkLocalBytes"] = bytes }
+        if let bytes = app["unattributedBytes"] { fields["networkUnattributedBytes"] = bytes }
         return fields
     }
     @MainActor static func rulesJSON(_ store: TrafficStore, profile selected: NetworkProfile? = nil, app: [String: Any]? = nil) throws -> Data {
@@ -323,7 +340,8 @@ struct KilobatCLI {
         let data: [String: Any] = ["profile": profile.lowercased(), "active": selected == store.preferences.profile, "defaultAllow": selected == .unrestricted || store.preferences.defaultAllow,
                                    "newApps": newApps, "allowApple": store.preferences.allowApple == true, "rules": rules, "temporaryRules": temporary,
                                    "connectionRules": connections, "blockedHosts": store.preferences.blockedHosts ?? [], "blocklistEntries": store.preferences.blockedDomains?.count ?? 0,
-                                   "sessionBudgetGB": store.preferences.limitGB, "filteringActive": app?["filteringActive"] ?? NSNull()]
+                                   "sessionBudgetGB": store.preferences.limitGB, "filteringActive": app?["filteringActive"] ?? NSNull(),
+                                   "budget": QuotaCLI.budgetJSON(store, app: app), "quotas": QuotaCLI.quotasJSON(store, app: app)]
         return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     @MainActor @discardableResult static func selectProfile(_ name: String, in store: TrafficStore) throws -> NetworkProfile {
@@ -414,13 +432,13 @@ struct KilobatCLI {
 
     static let commands: [(name: String, detail: String)] = [
         ("status", "Live per-app traffic"), ("profile", "List or select a profile"), ("allow", "Save an allow rule"),
-        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the session budget"),
-        ("report", "Export usage history"), ("open", "Open the Mac app"), ("doctor", "Check your setup"),
+        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the data budget and its cycle"), ("quota", "Per-app data quotas"), ("updaters", "Pause updaters on metered networks"),
+        ("report", "Usage history, or compare it with a router or provider"), ("open", "Open the Mac app"), ("doctor", "Check your setup"),
         ("mcp", "MCP server for AI agents (stdio)"),
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
         ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS"),
         ("awake", "Keep the Mac awake, network-aware"), ("sessions", "Awake sessions and AI agent runs"),
-        ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"),
+        ("agent-event", "Report an agent's state from its hooks"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"),
         ("completion", "Shell completion script"), ("update", "Update the CLI"), ("help", "Show help"),
         ("blocked-history", "Blocked-flow metadata"), ("connection-rules", "List destination rules"),
         ("connection-rule", "Save a destination rule"), ("remove-connection-rule", "Remove a destination rule"),
@@ -434,20 +452,22 @@ struct KilobatCLI {
         ("scan-history", "Saved scans"), ("route-history", "Saved routes"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
         ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"),
-        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("quit", "Quit a process"),
+        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"),
+        ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
         ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
         ("block-host", "Block a domain or IP"), ("unblock-host", "Unblock a domain or IP"),
     ]
     static let commandValues: [String: [String]] = [
-        "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["--csv", "--json", "--summary", "--days"],
-        "rules": ["--json", "--profile"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--json"],
-        "sessions": ["--days", "--json"], "why": ["--app", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
+        "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
+        "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
+        "sessions": ["--days", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["forget", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on"], "quit": ["--force"],
-        "settings": ["new-apps", "auto-travel", "scope", "alerts", "outage-trace", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
+        "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
         "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
@@ -531,13 +551,21 @@ struct KilobatCLI {
       report [--csv|--json]  Export locally recorded usage history
         [--summary]         Daily totals and top apps instead of raw samples
         [--days 1…365]      Limit the window (30 days default; the app keeps up to a year)
+      report compare --total 40GB  Set a router's or provider's figure beside Kilobat's for the same period
+        [--unit GB|GiB|MB|…]  The figure's unit, if --total has none; GB is decimal, GiB binary
+        [--direction both|download|upload]  What the figure counts (both by default)
+        [--from DATE --to DATE]  2026-10-01, 2026-10-01 18:00 or ISO 8601; a date-only --to includes that day
+        [--period last-month]  Or this-month, last-7-days, yesterday, today, last-24-hours
+        [--network NAME]    Count only this network; repeat for more (all by default)
+        [--json|--csv]      Export with the scope, recorded hours and every gap, to share
       bandwidth [app] [hour|day|week|month]  Sent and received for one app or all, with the peak
         [--back N]          An earlier period: --back 1 is the previous hour, day, week or month
         [--json]            Totals and per-bucket bytes
       access-policy <bundle-id> [--json]  The connections an app's developer declares, and why
       health-history [--hours 1…720] [--json]  Router, internet and DNS checks over time
-      networks [--json]     Networks seen, with remembered profile and budget
-      networks forget <name>  Drop a network's remembered profile and budget
+      networks [--json]     Networks seen, with remembered profile, budget and data cost
+      networks cost <metered|unmetered|automatic> [name]  Set a network's data cost (this one by default)
+      networks forget <name>  Drop a network's remembered profile, budget and data cost
 
     Diagnose
       diagnose [--json]     Wi-Fi, router, internet, DNS and portal checks
@@ -547,6 +575,9 @@ struct KilobatCLI {
       channels [--json]     Congestion per channel and the least crowded one
       speedtest [--json]    Speed, loaded latency, call and streaming verdicts
         [--budget-mb 1…80]  Maximum data use (80 MB default)
+      stutter [--json]      Ping every 50 ms to find latency spikes and how regular they are
+        [--seconds 10…60]   Test length (20 s default)
+        [--target router|internet|<host>]  What to ping (the router by default)
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
 
     Wi-Fi
@@ -558,20 +589,44 @@ struct KilobatCLI {
       wifi known [--json]   Saved networks in order of preference
       wifi password <name>  Show a saved password (macOS asks first)
       wifi share <name>     Password and a QR code to scan with a phone
-      low-latency on        Pause AirDrop/AWDL for calls and games (15 min max)
+      low-latency on        Pause AirDrop/AWDL for calls and games while this runs (15 min default)
+        [--for 15m|1h|2h]   Pause for longer, up to 4h
+        [--until-quit <app>]  Restore when that app quits
+      low-latency off       Restore AWDL, also for a pause started elsewhere
+      airdrop [status] [--json]  AirDrop visibility, the AirDrop link and what uses it
+      airdrop everyone|contacts|off  Open AirDrop settings to change visibility (only macOS can)
+      bluetooth [--json]    Bluetooth devices and whether they share 2.4 GHz with Wi-Fi
 
     Awake & agents
-      awake                 Keep the Mac awake until Ctrl-C; closing the lid still sleeps it
+      awake                 Keep the Mac awake until Ctrl-C; closing the lid sleeps it unless --lid-closed
         [--for 90m|2h|45s]  Stop after a while
         [--until-quiet]     Stop once the Mac stays below 16 KB/s
         [--app <id>]        With --until-quiet, watch one app only
         [--quiet 1…60]      Quiet minutes that end it (3 default)
         [--display]         Keep the display on too
+        [--lid-closed]      Keep running with the lid closed, 8h at most; needs the app's power helper
         [--json]            JSON summary at the end
-      awake [--display] -- <command> [args]  Stay awake while a command runs
+      awake [--display] [--lid-closed] -- <command> [args]  Stay awake while a command runs
         [--json]            Summary on stderr with the bytes its processes moved; exits with its status
+      awake --while-frontmost <app>  Stay awake only while that app (Keynote, or a bundle ID) is in front
+        [--display]         Keep the screen on too; otherwise only the Mac stays awake and the screen may dim
+        [--for 90m|2h]      End after a while, even with the app in front
+        [--json]            JSON summary; switching away lets the Mac sleep, it ends when the app quits or at 20% battery
       sessions [--days 1…365] [--json]  Awake sessions and AI agent runs the app recorded
-      why <url|host> [--app <id>] [--json]  The layer that stops a connection; exits 1 if one failed
+      agent-event <kind>    For an agent's hooks: start, working, waiting, done or failed
+        [--agent name]      claude, codex, gemini…; found from the hook's process if left out
+        [--session id]      Tells runs in one folder apart
+        [--cwd path]        The project folder; the current one by default
+        [--message text]    Shown in the notification, up to 200 characters
+        [--stdin-json]      Read the hook's JSON from stdin (Claude Code, Codex, Gemini CLI)
+        [--json-arg]        Read it from the last argument (Codex notify)
+        [--verbose]         Say what happened; otherwise prints nothing and always exits 0
+      why <url|host> [--json]  The layer that stops a connection; exits 1 if one failed
+                            The full URL is requested, query included; output hides query values
+        [--app <id>]        Also check that app's rules, the proxy in its environment and its open connections
+        [--proxy <url>]     Test through the proxy address the app uses by its own setting
+        [--failed-at <time>]  When the app failed (14:05 or ISO 8601), kept beside the check's own time
+        [--context container|vm|remote|provider]  Where the failing code runs; provider: a hosted service's own servers
       conditions [--json]   Metered, Low Data Mode, VPN, latency, battery and heat, with advice
 
     Control
@@ -581,7 +636,17 @@ struct KilobatCLI {
         [--profile name]    Use another profile than the active one
       reset <bundle-id>     Remove an app's rule [--profile name]
       rules [--json]        Review a profile's rules [--profile name]
-      limit [GB]            Read or set the session budget
+      limit [GB]            Read or set this network's data budget; approximate, as usage is sampled
+        [--cycle session|daily|weekly|monthly]  When it starts over (session: only when reset)
+        [--reset-day N]     Day it starts: 1–31 monthly, 1 (Monday) to 7 weekly
+        [--alert 50,80,100]  Notify at these percentages once per cycle, or none
+      quota <bundle-id> <GB>  Limit one app's data per budget cycle
+        [--upload]          Count uploads only
+        [--all-networks]    Count every network, not just this one
+      quota <bundle-id> --remove  Remove an app's quota
+      quota --list [--json]  Quotas with use in the current cycle
+      updaters [--json]     Updaters paused on metered networks, update bytes that got through, apps that update inside
+      updaters on|off       Pause updater helpers while the network is metered (on by default); the apps keep working
       settings [name [value]]  Read or change Kilobat's settings; new-apps allow|ask|block
       approvals [--json]    Apps waiting for approval while new-apps is ask
       approve|deny <app-id>  deny blocks a waiting app at once; approve asks you to confirm in the app

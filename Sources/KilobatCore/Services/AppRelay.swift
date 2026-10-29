@@ -3,10 +3,10 @@ import Foundation
 
 /// Lets the CLI read what only the running app can see. macOS hides Wi-Fi names from processes
 /// without Location permission, and the filter state lives in the app, so the CLI asks the app.
-/// Read-only by design: a request carries an action name and a reply ID, never arguments.
+/// A request carries a whitelisted action name and a reply ID; the few actions that take arguments check them.
 public enum AppRelay {
     public static let appBundleID = "co.seifi.kilobat"
-    public static let actions: Set<String> = ["scan", "connection", "approvals", "decide"]
+    public static let actions: Set<String> = ["scan", "connection", "approvals", "decide", "agent", "bluetooth", "lid", "updaters"]
     /// An action may carry arguments after a `|`, such as `decide|allow|com.example.App`.
     static func known(_ action: String) -> Bool { actions.contains(String(action.prefix { $0 != "|" })) }
     static let request = Notification.Name("co.seifi.kilobat.relay.request")
@@ -27,7 +27,8 @@ public enum AppRelay {
                 try? FileManager.default.removeItem(at: reply)
                 return data
             }
-            try? await Task.sleep(for: .milliseconds(100))
+            // Agent hooks wait for this, so the reply is checked often.
+            try? await Task.sleep(for: .milliseconds(25))
         }
         return nil
     }

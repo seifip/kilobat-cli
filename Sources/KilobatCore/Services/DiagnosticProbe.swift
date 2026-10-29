@@ -94,13 +94,15 @@ public actor DiagnosticProbe {
         let routeOutput = await route.output
         let gateway = Self.matches("gateway:\\s+([^\\s]+)", in: routeOutput).first
         let router = if let gateway { await Self.ping(gateway) } else { nil as PingResult? }
-        let service = Self.serviceName(await services.output, interface: radio.interface ?? Self.matches("interface:\\s+([^\\s]+)", in: routeOutput).first ?? "en0")
+        let routeInterface = Self.matches("interface:\\s+([^\\s]+)", in: routeOutput).first
+        let wired = routeInterface.flatMap { $0 != radio.interface && $0.hasPrefix("en") ? $0 : nil }
+        let service = Self.serviceName(await services.output, interface: wired ?? radio.interface ?? routeInterface ?? "en0")
         let dnsOutput = await dns.output
         let dnsTime = Self.matches("Query time: ([0-9.]+) msec", in: dnsOutput).first.flatMap(Double.init)
         let resolvers = await CommandRunner.run("/usr/sbin/scutil", ["--dns"])
         let servers = Array(Set(Self.matches("nameserver\\[[0-9]+\\] : ([^\\s]+)", in: resolvers.output))).sorted()
         return await DiagnosticSnapshot(date: Date(), radio: radio, gateway: gateway, router: router, internet: internet,
-                                        dnsMilliseconds: dnsTime, dnsServers: servers, captivePortal: portal, networkService: service)
+                                        dnsMilliseconds: dnsTime, dnsServers: servers, captivePortal: portal, networkService: service, wiredInterface: wired)
     }
     public static func portal() async -> Bool? {
         let config = URLSessionConfiguration.ephemeral

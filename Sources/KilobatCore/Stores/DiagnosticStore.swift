@@ -16,6 +16,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     private var scheduleConnected = false
     private var scheduleMetered = true
     private let scheduleNetwork = NetworkStatus()
+    /// The current network's cost as the app sees it, including networks marked by hand; macOS's flag otherwise.
+    public var metered: (@MainActor () -> Bool)?
     private var scheduleTask: Task<Void, Never>?
     public var onSnapshot: ((DiagnosticSnapshot) -> Void)?
     public let tools = ToolsStore()
@@ -64,6 +66,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var changingDNS = false
     public var flushingDNS = false
     public let lowLatency = LowLatencyMode()
+    public let stutter = StutterStore()
+    public let nearby = NearbyStore()
+    public let bluetooth = BluetoothState()
     private let probe = DiagnosticProbe()
     private let location = CLLocationManager()
     private var radioTask: Task<Void, Never>?
@@ -82,7 +87,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(60)) } catch { return }
                 guard let self else { return }
-                if let next = self.nextScheduledTest, next <= Date(), self.scheduleHours > 0, self.scheduleConnected, !self.scheduleMetered, !self.sleeping, !self.speedRunning {
+                if Self.scheduledTestDue(next: self.nextScheduledTest, hours: self.scheduleHours, connected: self.scheduleConnected, metered: self.metered?() ?? self.scheduleMetered, busy: self.sleeping || self.speedRunning) {
                     self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600)
                     self.runSpeedTest()
                 }
@@ -103,6 +108,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         notifications.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.sleeping = false; await self?.diagnose() }
         })
+    }
+    static func scheduledTestDue(next: Date?, hours: Int, connected: Bool, metered: Bool, busy: Bool, now: Date = Date()) -> Bool {
+        guard let next else { return false }
+        return next <= now && hours > 0 && connected && !metered && !busy
     }
     public func setSurface(_ id: UUID, radar: Bool?, menuBar: Bool) {
         if let radar { surfaces[id] = (radar, menuBar) }

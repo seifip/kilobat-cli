@@ -12,25 +12,63 @@ public final class TrafficStore {
     public var received: UInt64 = 0
     public var sent: UInt64 = 0
     public var connected = false
-    public var expensive = false
+    /// What macOS says about the current path; `metered` is what Kilobat acts on.
+    public var osExpensive = false
     public var networkKind = "Connecting"
     public var ready = false
     public var error: String?
     public var search = ""
     public var filter = "All apps"
     public var selectedApp: String?
-    public var preferences: SavedPreferences { didSet { if preferences != oldValue && !reloading { savePreferences() } } }
+    public var preferences: SavedPreferences {
+        didSet {
+            guard preferences != oldValue else { return }
+            // The budget always describes the current network; keeping its copy current means a relaunch,
+            // which starts on no network, can't lose a plan set since the last switch.
+            if recordHistory, networkKey != "unknown", preferences.limitGB != oldValue.limitGB || preferences.budgetCycle != oldValue.budgetCycle {
+                preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([networkKey: preferences.limitGB]) { $1 }
+                preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: networkKey)
+            }
+            if !reloading { savePreferences() }
+            if preferences.networkCost != oldValue.networkCost, lastMetered != nil { costChanged() }
+        }
+    }
     public var usage: [UsageEntry] = []
     public var networkKey = "unknown"
     public var networkName = "Current session"
     public var networkSessions: [String: NetworkSession] = [:]
+    /// When the Mac slept, so a gap in the history can say so. A sleep that ends in a shutdown has no wake and isn't kept.
+    public private(set) var sleeps: [DateInterval] = []
+    private var sleptAt: Date?
+    /// False while Kilobat can't tell this network from others behind the same router, such as Wi-Fi whose name macOS hides.
+    public private(set) var networkIdentified = false
     public let startedAt = Date()
-    private var previous: [Int32: ProcessTraffic] = [:]
+    /// This network's bytes to the local network, AirDrop and nearby devices, kept out of `received` and `sent`.
+    public var local: UInt64 = 0
+    /// Bytes Wi-Fi and Ethernet carried that no process accounts for, already in `received` and `sent`: packet headers and acknowledgments, processes
+    /// that came and went between samples, Internet Sharing, a VPN macOS runs itself.
+    public var unattributed: UInt64 = 0
+    /// This session's bytes through VPN tunnels, counted once where the tunnel leaves the Mac.
+    public private(set) var tunnel: UInt64 = 0
+    private var previous: [Int32: SeenProcess] = [:]
     private var lastSample: Date?
     private var pendingReceived: UInt64 = 0
     private var pendingSent: UInt64 = 0
     private var pendingApps: [String: UInt64] = [:]
     private var pendingAppsSent: [String: UInt64] = [:]
+    private var pendingLocal: UInt64 = 0
+    private var pendingAppsLocal: [String: UInt64] = [:]
+    /// Internet bytes processes account for since the last flush, to tell what the interfaces carried beyond them.
+    private var pendingAttributed: UInt64 = 0
+    /// Interface counters, nil to count only what processes account for, as the tests do. A reading of nil is a failure.
+    var readCounters: (() -> [String: ByteCount]?)? = nil
+    var startTime: (Int32) -> Date? = TrafficAttribution.startTime
+    private var interfaces = InterfaceTally()
+    private var counterFailures = 0
+    /// Local bytes nettop reported before the interface counters showed them.
+    private var localCarry = ByteCount()
+    private var wifiNames: Set<String> = []
+    private var executables: [Int32: String] = [:]
     /// The last five minutes of each app's rates, one sample a second, for sparklines and the bandwidth panel.
     public private(set) var liveSeries: [String: LiveSeries] = [:]
     private var lastFlush = Date()
@@ -41,7 +79,7 @@ public final class TrafficStore {
     private let recordHistory: Bool
     private var lastPreferencesData: Data?
     private var reloading = false
-    private var metered: Bool?
+    private var lastMetered: Bool?
     private let directory: URL
 
     /// `recordHistory: false` makes a read-only sampling store: it never records usage or changes preferences.
@@ -53,28 +91,73 @@ public final class TrafficStore {
         lastPreferencesData = try? Data(contentsOf: self.directory.appendingPathComponent("preferences.json"))
         usage = Self.compact(StoredJSON.read(self.directory.appendingPathComponent("usage.json")) ?? [])
         networkSessions = StoredJSON.read(self.directory.appendingPathComponent("network-sessions.json")) ?? [:]
+        sleeps = StoredJSON.read(self.directory.appendingPathComponent("sleeps.json")) ?? []
         if startMonitoring {
+            readCounters = InterfaceCounters.read
+            wifiNames = InterfaceCounters.wifiInterfaces()
+            // Counters can jump across sleep; start over rather than count what can't be told apart.
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.rebaseline(); self?.woke() }
+            }
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.slept() }
+            }
             startCollector(scope: preferences.trafficScope ?? "external")
             network.start { [weak self] connected, expensive, kind in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.connected = connected
-                    self.expensive = expensive
-                    self.networkKind = kind
-                    self.meteredChanged(expensive)
-                }
+                Task { @MainActor in self?.pathChanged(connected: connected, expensive: expensive, kind: kind) }
             }
         }
     }
 
+    func slept(at now: Date = Date()) { sleptAt = now }
+    func woke(at now: Date = Date()) {
+        guard recordHistory, let start = sleptAt, now > start else { sleptAt = nil; return }
+        sleptAt = nil
+        let cutoff = now.addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
+        sleeps = (sleeps + [DateInterval(start: start, end: now)]).filter { $0.end >= cutoff }
+        persist(sleeps, as: "sleeps.json")
+    }
+    public var cost: NetworkCost { preferences.cost(of: networkKey) }
+    public var metered: Bool { cost.metered(os: osExpensive) }
+    func pathChanged(connected: Bool, expensive: Bool, kind: String) {
+        self.connected = connected; osExpensive = expensive; networkKind = kind
+        costChanged()
+    }
+    /// With networks marked by hand, the cost waits until Kilobat knows which network this is.
+    private func costChanged() {
+        guard networkKey != "unknown" || preferences.networkCost == nil else { return }
+        meteredChanged(metered)
+    }
+    /// Sets what the current network costs. Refused while Kilobat can't tell this network apart.
+    @discardableResult public func setCost(_ cost: NetworkCost) -> Bool {
+        guard networkKey != "unknown", networkIdentified else { return false }
+        preferences.setCost(cost, for: networkKey)
+        return true
+    }
+    /// Wi-Fi names marked as hotspots before network cost existed become metered networks once Kilobat has seen them.
+    /// Returns the names still waiting; a cost already chosen stays.
+    public func adoptHotspots(_ names: [String]) -> [String] {
+        var sessions = networkSessions
+        if networkKey != "unknown" { sessions[networkKey] = session }
+        var next = preferences, waiting: [String] = []
+        for name in names {
+            let keys = sessions.filter { $0.value.name == name && $0.value.identified != false }.map(\.key)
+            if keys.isEmpty { waiting.append(name) }
+            for key in keys where next.networkCost?[key] == nil { next.setCost(.metered, for: key) }
+        }
+        preferences = next
+        return waiting
+    }
+
     /// Travel is applied when a metered network appears, not on every path update, and the
     /// previous profile returns afterwards unless the user picked another one meanwhile.
+    /// A profile remembered for the network wins over Travel.
     func meteredChanged(_ expensive: Bool) {
-        defer { metered = expensive }
-        guard recordHistory, expensive != metered else { return }
+        defer { lastMetered = expensive }
+        guard recordHistory, expensive != lastMetered else { return }
         var next = preferences
         if expensive {
-            guard next.autoHotspot, next.profile != .travel else { return }
+            guard next.autoHotspot, next.profile != .travel, next.networkProfiles?[networkKey] == nil else { return }
             next.autoProfileFrom = next.profile.rawValue; next.profile = .travel
         } else if let previous = next.autoProfileFrom {
             if next.profile == .travel, let profile = NetworkProfile(rawValue: previous) { next.profile = profile }
@@ -85,7 +168,35 @@ public final class TrafficStore {
 
     public var total: UInt64 { received + sent }
     public var limit: UInt64 { UInt64(preferences.limitGB * 1_000_000_000) }
-    public var limitFraction: Double { min(1, Double(total) / Double(max(1, limit))) }
+    public var limitFraction: Double { min(1, Double(budgetUsedBytes) / Double(max(1, limit))) }
+    public var budgetCycle: BudgetCycle { preferences.budgetCycle ?? BudgetCycle() }
+    /// The current cycle on this network; nil for a session budget.
+    public var budgetInterval: DateInterval? { budgetCycle.interval(containing: Date()) }
+    /// Bytes counted against this network's budget.
+    public var budgetUsedBytes: UInt64 { budgetUsed(on: networkKey) }
+    /// A session budget uses the session counter; a cycle adds up history on that network since it began,
+    /// so a monthly plan survives restarts.
+    public func budgetUsed(on network: String, cycle: BudgetCycle? = nil, now: Date = Date()) -> UInt64 {
+        let current = network == networkKey
+        guard let interval = (cycle ?? (current ? budgetCycle : preferences.networkCycles?[network] ?? BudgetCycle())).interval(containing: now) else {
+            return current ? total : networkSessions[network].map { $0.received + $0.sent } ?? 0
+        }
+        return BudgetCycle.used(usage, in: interval, network: network) + (current ? pendingReceived + pendingSent : 0)
+    }
+    /// Quotas count within the budget cycle of their network; every-network quotas follow the current one.
+    public func quotaCycle(_ quota: AppQuota) -> BudgetCycle {
+        guard let network = quota.network, network != networkKey else { return budgetCycle }
+        return preferences.networkCycles?[network] ?? BudgetCycle()
+    }
+    public func quotaUsed(_ quota: AppQuota, now: Date = Date()) -> UInt64 {
+        let pending = quota.applies(to: networkKey) ? (quota.uploadOnly ? pendingAppsSent[quota.name] : pendingApps[quota.name]) ?? 0 : 0
+        return quota.used(usage, cycle: quotaCycle(quota), now: now) + pending
+    }
+    /// Rule keys of apps whose quota for this network is used up, for the filter.
+    public var quotaReached: [String] {
+        Array(Set((preferences.quotas ?? []).filter { $0.applies(to: networkKey) && quotaUsed($0) >= $0.bytes }.flatMap(\.apps))).sorted()
+    }
+    public func uploadAnomalies(now: Date = Date()) -> [UploadAnomaly] { UploadAnomaly.detect(usage, pending: pendingAppsSent, now: now) }
     public var allowedCount: Int { apps.filter { isAllowed($0.id) }.count }
     public var filteredApps: [AppTraffic] {
         apps.filter {
@@ -126,18 +237,31 @@ public final class TrafficStore {
         guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; return }
         flush()
         if networkKey != "unknown" {
-            networkSessions[networkKey] = NetworkSession(name: networkName, received: received, sent: sent)
+            networkSessions[networkKey] = session
             let oldLimit = preferences.limitGB
             if preferences.networkLimits == nil { preferences.networkLimits = [:] }
             preferences.networkLimits?[networkKey] = oldLimit
+            rememberCycle()
+        } else if recordHistory, usage.last?.networkKey == snapshot.networkKey {
+            // After a relaunch the saved budget still describes the network the Mac was last on.
+            preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([snapshot.networkKey: preferences.limitGB]) { $1 }
+            preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: snapshot.networkKey)
         }
-        networkKey = snapshot.networkKey; networkName = snapshot.networkName
+        networkKey = snapshot.networkKey; networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified
         let saved = networkSessions[networkKey]
-        received = saved?.received ?? 0; sent = saved?.sent ?? 0
-        apps = []; previous = [:]; lastSample = nil
-        preferences.limitGB = preferences.networkLimits?[networkKey] ?? 5
+        received = saved?.received ?? 0; sent = saved?.sent ?? 0; local = saved?.local ?? 0; unattributed = saved?.unattributed ?? 0; tunnel = 0
+        apps = []; if readCounters != nil { wifiNames = InterfaceCounters.wifiInterfaces() }
+        rebaseline()
+        // Both at once, or the copy kept per network would pick up the old cycle under the new key.
+        var budget = preferences
+        budget.limitGB = budget.networkLimits?[networkKey] ?? 5; budget.budgetCycle = budget.networkCycles?[networkKey]
+        preferences = budget
         if let profile = preferences.networkProfiles?[networkKey], let value = NetworkProfile(rawValue: profile) { preferences.profile = value }
         persist(networkSessions, as: "network-sessions.json")
+        costChanged()
+    }
+    private var session: NetworkSession {
+        NetworkSession(name: networkName, received: received, sent: sent, identified: networkIdentified ? nil : false, local: local, unattributed: unattributed)
     }
     public func rememberNetwork() {
         if preferences.networkProfiles == nil { preferences.networkProfiles = [:] }
@@ -145,13 +269,25 @@ public final class TrafficStore {
         let profile = preferences.profile.rawValue, limit = preferences.limitGB
         preferences.networkProfiles?[networkKey] = profile
         preferences.networkLimits?[networkKey] = limit
+        rememberCycle()
+    }
+    private func rememberCycle() { preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: networkKey) }
+    /// A session budget leaves no entry, so networks without a cycle add nothing to the file.
+    private static func cycles(_ cycles: [String: BudgetCycle]?, _ cycle: BudgetCycle?, for network: String) -> [String: BudgetCycle]? {
+        var cycles = cycles
+        if let cycle { cycles = (cycles ?? [:]).merging([network: cycle]) { $1 } } else { cycles?[network] = nil }
+        return cycles
     }
     public func setScope(_ scope: String) {
         guard ["external", "wifi", "wired"].contains(scope) else { return }
         flush(); preferences.trafficScope = scope
-        previous = [:]; lastSample = nil; download = 0; upload = 0
+        rebaseline(); download = 0; upload = 0
         startCollector(scope: scope)
     }
+    /// The next sample only sets baselines: after a wake, a network change or a new scope.
+    func rebaseline() { previous = [:]; lastSample = nil; interfaces.reset(); localCarry = ByteCount() }
+    /// Whether totals come from Wi-Fi and Ethernet counters rather than only the processes nettop saw.
+    public var countsInterfaces: Bool { readCounters != nil && counterFailures < 5 }
     private func startCollector(scope: String) {
         let generation = UUID(); sampleGeneration = generation
         monitor.start(scope: scope, onSample: { [weak self] snapshot in
@@ -165,10 +301,10 @@ public final class TrafficStore {
     }
     public func resetSession() {
         flush()
-        received = 0; sent = 0
-        networkSessions[networkKey] = NetworkSession(name: networkName)
+        received = 0; sent = 0; local = 0; unattributed = 0; tunnel = 0
+        networkSessions[networkKey] = NetworkSession(name: networkName, identified: networkIdentified ? nil : false)
         persist(networkSessions, as: "network-sessions.json")
-        for index in apps.indices { apps[index].received = 0; apps[index].sent = 0 }
+        for index in apps.indices { apps[index].received = 0; apps[index].sent = 0; apps[index].local = 0; apps[index].tunnel = 0 }
     }
     public func identity(_ process: ProcessTraffic) -> (String, String, String?) {
         if let identity = identities[process.pid] { return identity }
@@ -179,51 +315,76 @@ public final class TrafficStore {
         let id = app?.bundleIdentifier ?? "process:\(executable)"
         let value = (id, name, app?.bundleURL?.path)
         identities[process.pid] = value
+        if app?.bundleIdentifier == nil, let path = Self.executablePath(pid: process.pid), CommandLineTools.unrecognized(path) { executables[process.pid] = path }
         return value
     }
-    static func executableName(pid: Int32) -> String? {
-        var path = [CChar](repeating: 0, count: 4096)
+    static func executablePath(pid: Int32) -> String? {
+        var path = [UInt8](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
-        let name = URL(fileURLWithPath: String(cString: path)).lastPathComponent
+        return String(decoding: path.prefix { $0 != 0 }, as: UTF8.self)
+    }
+    static func executableName(pid: Int32) -> String? {
+        guard let path = executablePath(pid: pid) else { return nil }
+        let name = URL(fileURLWithPath: path).lastPathComponent
         return name.isEmpty ? nil : name
     }
     public func consume(_ snapshot: TrafficSnapshot) {
         let generation = sampleGeneration
         reloadPreferences()
         guard generation == sampleGeneration else { return }
+        let counters = readCounters?()
+        let scope = preferences.trafficScope ?? "external", wifi = wifiNames
+        let physical: (String) -> Bool = { InterfaceCounters.physical($0, scope: scope, wifi: wifi) }
+        let starts = Dictionary(snapshot.processes.map { ($0.pid, startTime($0.pid)) }) { first, _ in first }
         defer {
-            previous = Dictionary(uniqueKeysWithValues: snapshot.processes.map { ($0.pid, $0) })
+            // A process missing from a sample keeps its place for half a minute, so it isn't counted again from scratch.
+            var seen = previous.filter { snapshot.timestamp.timeIntervalSince($0.value.at) < 30 }
+            for process in snapshot.processes { seen[process.pid] = SeenProcess(traffic: process, started: starts[process.pid] ?? nil, at: snapshot.timestamp) }
+            previous = seen
             lastSample = snapshot.timestamp
             ready = true
         }
-        guard let lastSample else { return }
+        guard let lastSample else {
+            if let counters { _ = interfaces.advance(counters, elapsed: 1, include: physical) }
+            return
+        }
         let elapsed = max(0.1, snapshot.timestamp.timeIntervalSince(lastSample))
         var index = Dictionary(uniqueKeysWithValues: apps.map { ($0.id, $0) })
-        for key in index.keys { index[key]?.downloadRate = 0; index[key]?.uploadRate = 0; index[key]?.processIDs = [] }
-        var incoming: UInt64 = 0, outgoing: UInt64 = 0
+        for key in index.keys { index[key]?.downloadRate = 0; index[key]?.uploadRate = 0; index[key]?.processIDs = []; index[key]?.rates = [:] }
+        var all = ByteCount(), local = ByteCount(), physicalLocal = ByteCount(), tunnel = ByteCount(), internet = ByteCount()
         var owners: [String: Set<String>] = [:]
         let currentPIDs = Set(snapshot.processes.map(\.pid))
-        let currentNames = Dictionary(uniqueKeysWithValues: snapshot.processes.map { ($0.pid, $0.process) })
-        identities = identities.filter { currentPIDs.contains($0.key) && previous[$0.key]?.process == currentNames[$0.key] }
+        let currentNames = Dictionary(snapshot.processes.map { ($0.pid, $0.process) }) { first, _ in first }
+        // A pid with another name or start time is another process; one that has exited keeps its identity for its last rows.
+        let kept = identities.filter { pid, _ in
+            currentPIDs.contains(pid) && previous[pid]?.traffic.process == currentNames[pid] && (starts[pid] ?? nil).map { $0 == previous[pid]?.started } != false
+        }
+        identities = kept
+        executables = executables.filter { kept[$0.key] != nil }
         for process in snapshot.processes {
             // First sighting establishes a baseline, never imports lifetime data.
-            guard let old = previous[process.pid], old.process == process.process else { continue }
-            let down = process.received >= old.received ? process.received - old.received : 0
-            let up = process.sent >= old.sent ? process.sent - old.sent : 0
+            guard let flow = TrafficAttribution.flow(process, started: starts[process.pid] ?? nil, previous: previous[process.pid],
+                                                     lastSample: lastSample, elapsed: elapsed, physical: physical) else { continue }
             let (id, name, path) = identity(process)
             var app = index[id] ?? AppTraffic(id: id, name: name, bundlePath: path)
             app.processIDs.append(process.pid)
+            app.executablePath = executables[process.pid] ?? app.executablePath
             let owner = ProcessOwnership.applicationPath(pid: process.pid)
             owners[id, default: []].insert(owner ?? "")
-            app.received += down; app.sent += up
-            app.downloadRate += Double(down) / elapsed
-            app.uploadRate += Double(up) / elapsed
+            let rate = ProcessRate(down: Double(flow.total.received) / elapsed, up: Double(flow.total.sent) / elapsed)
+            app.received += flow.total.received; app.sent += flow.total.sent
+            app.local += flow.local.total; app.tunnel += flow.tunnel.total
+            app.rates[process.pid] = rate
+            app.downloadRate += rate.down
+            app.uploadRate += rate.up
             index[id] = app
-            incoming += down; outgoing += up
-            // History counts helpers and services under the app that owns them, as the app list does.
+            all += flow.total; local += flow.local; physicalLocal += flow.physicalLocal; tunnel += flow.tunnel; internet += flow.internet
+            // History counts helpers and services under the app that owns them, as the app list does; local bytes apart.
             let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
-            pendingApps[historyName, default: 0] += down + up
-            pendingAppsSent[historyName, default: 0] += up
+            let counted = flow.total - flow.local
+            pendingApps[historyName, default: 0] += counted.total
+            pendingAppsSent[historyName, default: 0] += counted.sent
+            if flow.local.total > 0 { pendingAppsLocal[historyName, default: 0] += flow.local.total }
         }
         for (id, paths) in owners {
             index[id]?.ownerPath = paths.count == 1 ? paths.first.flatMap { $0.isEmpty ? nil : $0 } : nil
@@ -236,22 +397,56 @@ public final class TrafficStore {
             if series[id]?.isIdle == true { series[id] = nil }
         }
         liveSeries = series
-        received += incoming; sent += outgoing
-        pendingReceived += incoming; pendingSent += outgoing
-        download = Double(incoming) / elapsed; upload = Double(outgoing) / elapsed
+        let counted = macInternet(counters, elapsed: elapsed, attributed: internet, physicalLocal: physicalLocal, physical: physical)
+        received += counted.received; sent += counted.sent
+        pendingReceived += counted.received; pendingSent += counted.sent
+        self.local += local.total; pendingLocal += local.total; self.tunnel += tunnel.total
+        download = Double(all.received) / elapsed; upload = Double(all.sent) / elapsed
         downloadHistory = Array((downloadHistory + [download]).suffix(60))
         uploadHistory = Array((uploadHistory + [upload]).suffix(60))
         if snapshot.timestamp.timeIntervalSince(lastFlush) >= 30 { flush() }
     }
+    /// What the Mac sent to and received from the Internet in a sample. Wi-Fi and Ethernet counters see everything
+    /// the carrier bills, from processes nettop missed too, and a VPN's traffic once (its tunnel isn't counted); their
+    /// local traffic is taken out. Without counters, the processes' own Internet bytes stand in.
+    private func macInternet(_ counters: [String: ByteCount]?, elapsed: TimeInterval, attributed: ByteCount, physicalLocal: ByteCount, physical: (String) -> Bool) -> ByteCount {
+        guard readCounters != nil else { return attributed }
+        guard let counters else {
+            // A missed reading is caught up by the next one; only several in a row mean the counters are gone.
+            counterFailures += 1
+            if counterFailures == 5 { interfaces.reset() }
+            if counterFailures < 5 { pendingAttributed += attributed.total }
+            return counterFailures < 5 ? ByteCount() : attributed
+        }
+        if counterFailures >= 5 { interfaces.reset() }
+        counterFailures = 0
+        pendingAttributed += attributed.total
+        // Local bytes nettop reported before the counters moved are taken from the next sample instead.
+        let local = physicalLocal + localCarry, link = interfaces.advance(counters, elapsed: elapsed, include: physical)
+        localCarry = (local - link).capped(physicalLocal)
+        return link - local
+    }
+    /// Bytes the interfaces carried since the last flush beyond what processes account for.
+    private var pendingUnattributed: UInt64 {
+        guard countsInterfaces else { return 0 }
+        let counted = pendingReceived + pendingSent
+        return counted > pendingAttributed ? counted - pendingAttributed : 0
+    }
+    /// This network's unattributed bytes so far, including those not yet saved.
+    public var unattributedBytes: UInt64 { unattributed + pendingUnattributed }
     public func flush() {
-        guard recordHistory, pendingReceived + pendingSent > 0 else { return }
-        usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent))
+        guard recordHistory, pendingReceived + pendingSent + pendingLocal > 0 else { return }
+        let gap = pendingUnattributed
+        unattributed += gap
+        usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent,
+                                localBytes: pendingLocal, appsLocal: pendingAppsLocal.isEmpty ? nil : pendingAppsLocal, unattributed: countsInterfaces ? gap : nil))
         let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
         usage = Self.compact(usage.filter { $0.date >= cutoff })
         persist(usage, as: "usage.json")
-        networkSessions[networkKey] = NetworkSession(name: networkName, received: received, sent: sent)
+        networkSessions[networkKey] = session
         persist(networkSessions, as: "network-sessions.json")
         pendingReceived = 0; pendingSent = 0; pendingApps = [:]; pendingAppsSent = [:]; lastFlush = Date()
+        pendingLocal = 0; pendingAppsLocal = [:]; pendingAttributed = 0
     }
     public func reloadPreferences() {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("preferences.json")),
@@ -260,6 +455,7 @@ public final class TrafficStore {
         let scopeChanged = preferences.trafficScope != saved.trafficScope
         lastPreferencesData = data
         reloading = true; preferences = saved; reloading = false
+        if preferences != saved { savePreferences() }
         if scopeChanged { setScope(saved.trafficScope ?? "external") }
     }
     public func savePreferences() {
@@ -274,6 +470,8 @@ public final class TrafficStore {
         var buckets: [String: [UsageEntry]] = [:]
         var kept: [UsageEntry] = []
         func bucket(_ date: Date) -> Date? { calendar.dateInterval(of: date < old ? .day : .hour, for: date)?.start }
+        // Fields history from before 1.3 lacks stay missing rather than turning into zeros.
+        func sum(_ values: [UInt64?]) -> UInt64? { values.contains { $0 != nil } ? values.reduce(0) { $0 + ($1 ?? 0) } : nil }
         for entry in usage {
             guard entry.date < recent, let start = bucket(entry.date) else { kept.append(entry); continue }
             buckets["\(start.timeIntervalSince1970)|\(entry.networkKey ?? "")", default: []].append(entry)
@@ -283,7 +481,9 @@ public final class TrafficStore {
             if entries.count == 1 && entries[0].date == start { return entries[0] }
             return UsageEntry(date: start, received: entries.reduce(0) { $0 + $1.received }, sent: entries.reduce(0) { $0 + $1.sent },
                               apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey,
-                              appsSent: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.estimatedSent, uniquingKeysWith: +) })
+                              appsSent: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.estimatedSent, uniquingKeysWith: +) },
+                              localBytes: sum(entries.map(\.localBytes)), appsLocal: entries.contains { $0.appsLocal != nil } ? entries.reduce(into: [:]) { apps, entry in apps.merge(entry.appsLocal ?? [:], uniquingKeysWith: +) } : nil,
+                              unattributed: sum(entries.map(\.unattributed)))
         }
         return (merged + kept).sorted { $0.date < $1.date }
     }
