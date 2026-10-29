@@ -8,6 +8,7 @@ import Observation
 @MainActor @Observable
 public final class FilterController: NSObject, @preconcurrency OSSystemExtensionRequestDelegate {
     public let eventJournal = FilterEventJournal()
+    public let approvals = ApprovalCenter()
     public private(set) var enabled = false
     public private(set) var extensionEnabled = false
     public private(set) var busy = false
@@ -45,10 +46,16 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     public func observe(_ store: TrafficStore) {
         guard policyPolling == nil else { return }
         policyPolling = Task { [weak self, weak store] in
+            var tick = 0
             while !Task.isCancelled {
                 guard let self, let store else { return }
                 store.reloadPreferences()
                 self.sync(preferences: store.preferences, budgetReached: store.limitFraction >= 1)
+                // Polling is also how the filter knows someone is here to answer, so it only runs while asking.
+                tick += 1
+                if self.active && store.preferences.askNewApps == true && store.preferences.profile != .unrestricted {
+                    if tick % 2 == 0 { await self.approvals.poll() }
+                } else if !self.approvals.pending.isEmpty { self.approvals.clear() }
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
             }
         }
@@ -90,6 +97,12 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
     public func disable() { guard bundled else { return }; save(enabled: false) }
 
+    /// Answers an approval: releases the held connections and saves the rule in the current profile.
+    public func decide(_ approval: PendingApproval, allowed: Bool, minutes: Int? = nil, store: TrafficStore) {
+        if let minutes { store.setTemporary(approval.app, allowed: allowed, minutes: minutes) } else { store.setAllowed(approval.app, allowed) }
+        Task { await approvals.decide(approval.app, allowed: allowed) }
+    }
+
     func policy(_ preferences: SavedPreferences, budgetReached: Bool) -> [String: Any] {
         ["enabled": true, "unrestricted": preferences.profile == .unrestricted,
          "defaultAllow": preferences.defaultAllow,
@@ -99,7 +112,8 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
          "temporary": (preferences.temporaryRules ?? [:]).filter { $0.key.hasPrefix(preferences.profile.rawValue + "|") }.reduce(into: [String: [String: Any]]()) { output, item in
              output[String(item.key.dropFirst(preferences.profile.rawValue.count + 1))] = ["allowed": item.value.allowed, "expires": item.value.expires.timeIntervalSince1970]
          },
-         "blockedDomains": preferences.blockedDomains ?? [], "domainExceptions": preferences.domainExceptions ?? [:]]
+         "blockedDomains": (preferences.blockedDomains ?? []) + (preferences.blockedHosts ?? []), "domainExceptions": preferences.domainExceptions ?? [:],
+         "askNewApps": preferences.askNewApps == true, "allowApple": preferences.allowApple == true]
     }
     private func save(enabled: Bool) {
         busy = true
@@ -148,6 +162,16 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         else { busy = false; message = "Restart your Mac to finish installing the network extension." }
     }
     public func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
-        extensionEnabled = properties.contains { $0.bundleIdentifier == Self.identifier && $0.isEnabled }
+        let ours = properties.filter { $0.bundleIdentifier == Self.identifier && $0.isEnabled }
+        extensionEnabled = !ours.isEmpty
+        // An app update ships a newer filter, but macOS keeps running the old one until asked to replace it.
+        guard extensionEnabled, activationRequest == nil, let bundled = Self.bundledVersion, !ours.contains(where: { $0.bundleVersion == bundled }) else { return }
+        let update = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
+        update.delegate = self
+        activationRequest = update
+        OSSystemExtensionManager.shared.submitRequest(update)
+    }
+    static var bundledVersion: String? {
+        Bundle(url: Bundle.main.bundleURL.appendingPathComponent("Contents/Library/SystemExtensions/\(identifier).systemextension"))?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
     }
 }

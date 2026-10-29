@@ -33,10 +33,10 @@ import Observation
         client.remoteObjectInterface = NSXPCInterface(with: FilterEventService.self)
         client.setCodeSigningRequirement(FilterSigning.requirement(team: team, bundle: "co.seifi.kilobat.filter"))
         connection = client; client.resume()
-        let proxy = client.remoteObjectProxyWithErrorHandler { [weak self] error in
+        let proxy = client.remoteObjectProxyWithErrorHandler { @Sendable [weak self] error in
             Task { @MainActor in self?.finish(id, error: error.localizedDescription) }
         } as? FilterEventService
-        proxy?.recentEvents { [weak self] data in
+        proxy?.recentEvents { @Sendable [weak self] data in
             Task { @MainActor in
                 guard let self, self.requestID == id else { return }
                 do {

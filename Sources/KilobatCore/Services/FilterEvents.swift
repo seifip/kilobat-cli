@@ -14,8 +14,44 @@ public struct FilterEvent: Codable, Identifiable, Sendable {
     }
 }
 
+/// An app with no rule whose connections the filter is holding until the user allows or blocks it.
+public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
+    public struct Destination: Codable, Sendable, Equatable, Hashable {
+        public let host: String?
+        public let address: String?
+        public let port: String?
+        public init(host: String?, address: String?, port: String?) { self.host = host; self.address = address; self.port = port }
+        public var label: String { (host ?? address ?? "Unknown") + (port.map { ":" + $0 } ?? "") }
+    }
+    /// The rule key: a bundle or signing identifier.
+    public let app: String
+    public let process: String
+    public let path: String?
+    public let signer: String?
+    public let signatureValid: Bool
+    public let pid: Int32
+    public let uid: UInt32
+    public var requests: Int
+    public var waiting: Int
+    public var destinations: [Destination]
+    public let first: Date
+    public var last: Date
+    public var id: String { app }
+    public init(app: String, process: String, path: String?, signer: String?, signatureValid: Bool, pid: Int32, uid: UInt32,
+                requests: Int = 1, waiting: Int = 1, destinations: [Destination], first: Date = Date(), last: Date = Date()) {
+        self.app = app; self.process = process; self.path = path; self.signer = signer; self.signatureValid = signatureValid
+        self.pid = pid; self.uid = uid; self.requests = requests; self.waiting = waiting; self.destinations = destinations; self.first = first; self.last = last
+    }
+}
+
 @objc public protocol FilterEventService {
     func recentEvents(reply: @escaping (Data) -> Void)
+    /// Apps waiting for a decision. Asking also tells the filter someone is there to answer.
+    func pendingApprovals(reply: @escaping (Data) -> Void)
+    /// Releases an app's held connections, letting them through or dropping them.
+    func decide(_ app: String, allowed: Bool, reply: @escaping (Bool) -> Void)
+    /// Recently seen hostnames by remote address, so open connections can be named.
+    func hostnames(reply: @escaping (Data) -> Void)
 }
 
 public enum FilterSigning {

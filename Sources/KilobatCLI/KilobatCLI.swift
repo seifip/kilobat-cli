@@ -20,7 +20,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -28,6 +28,7 @@ struct KilobatCLI {
         if Terminal.piped, command == "report", !args.contains("--json"), !args.contains("--csv") { args += ["--summary", "--json"] }
         switch command {
         case "blocklist", "domain-exception", "remember-network", "scope": try await PolicyCLI.run(args)
+        case "bandwidth", "access-policy", "block-host", "unblock-host", "approvals", "approve", "deny": try await FirewallCLI.run(args)
         case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history": try await ExpertCLI.run(args)
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
         case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
@@ -171,7 +172,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.4.0"
+    static let version = "0.5.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -315,7 +316,14 @@ struct KilobatCLI {
         let rules = (store.preferences.rules[profile] ?? [:]).sorted { $0.key < $1.key }.map { ["id": $0.key, "allowed": $0.value] as [String: Any] }
         let temporary = (store.preferences.temporaryRules ?? [:]).filter { $0.key.hasPrefix(profile + "|") && $0.value.expires > Date() }.sorted { $0.key < $1.key }
             .map { ["id": String($0.key.dropFirst(profile.count + 1)), "allowed": $0.value.allowed, "expires": ISO8601DateFormatter().string(from: $0.value.expires)] as [String: Any] }
-        let data: [String: Any] = ["profile": profile.lowercased(), "active": selected == store.preferences.profile, "defaultAllow": selected == .unrestricted || store.preferences.defaultAllow, "rules": rules, "temporaryRules": temporary, "sessionBudgetGB": store.preferences.limitGB, "filteringActive": app?["filteringActive"] ?? NSNull()]
+        let connections = (store.preferences.connectionRules ?? []).filter { $0.profile == profile }.map {
+            ["id": $0.id.uuidString, "app": $0.app, "host": $0.host, "port": $0.port.isEmpty ? NSNull() : $0.port, "direction": $0.direction, "allowed": $0.allowed] as [String: Any]
+        }
+        let newApps = selected == .unrestricted ? "allow" : store.preferences.askNewApps == true ? "ask" : store.preferences.defaultAllow ? "allow" : "block"
+        let data: [String: Any] = ["profile": profile.lowercased(), "active": selected == store.preferences.profile, "defaultAllow": selected == .unrestricted || store.preferences.defaultAllow,
+                                   "newApps": newApps, "allowApple": store.preferences.allowApple == true, "rules": rules, "temporaryRules": temporary,
+                                   "connectionRules": connections, "blockedHosts": store.preferences.blockedHosts ?? [], "blocklistEntries": store.preferences.blockedDomains?.count ?? 0,
+                                   "sessionBudgetGB": store.preferences.limitGB, "filteringActive": app?["filteringActive"] ?? NSNull()]
         return try JSONSerialization.data(withJSONObject: data, options: [.sortedKeys, .withoutEscapingSlashes])
     }
     @MainActor @discardableResult static func selectProfile(_ name: String, in store: TrafficStore) throws -> NetworkProfile {
@@ -427,6 +435,9 @@ struct KilobatCLI {
         ("speed-history", "Speed test records"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
         ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("quit", "Quit a process"),
+        ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
+        ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
+        ("block-host", "Block a domain or IP"), ("unblock-host", "Unblock a domain or IP"),
     ]
     static let commandValues: [String: [String]] = [
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["--csv", "--json", "--summary", "--days"],
@@ -437,7 +448,8 @@ struct KilobatCLI {
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
         "networks": ["forget", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on"], "quit": ["--force"],
         "settings": ["new-apps", "auto-travel", "scope", "alerts", "outage-trace", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers"],
-        "destinations": ["--pid", "--json"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse"],
+        "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
+        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
         "blocklist": ["status", "import", "clear"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
     ]
@@ -519,6 +531,10 @@ struct KilobatCLI {
       report [--csv|--json]  Export locally recorded usage history
         [--summary]         Daily totals and top apps instead of raw samples
         [--days 1…365]      Limit the window (30 days default; the app keeps up to a year)
+      bandwidth [app] [hour|day|week|month]  Sent and received for one app or all, with the peak
+        [--back N]          An earlier period: --back 1 is the previous hour, day, week or month
+        [--json]            Totals and per-bucket bytes
+      access-policy <bundle-id> [--json]  The connections an app's developer declares, and why
       health-history [--hours 1…720] [--json]  Router, internet and DNS checks over time
       networks [--json]     Networks seen, with remembered profile and budget
       networks forget <name>  Drop a network's remembered profile and budget
@@ -566,7 +582,12 @@ struct KilobatCLI {
       reset <bundle-id>     Remove an app's rule [--profile name]
       rules [--json]        Review a profile's rules [--profile name]
       limit [GB]            Read or set the session budget
-      settings [name [value]]  Read or change Kilobat's settings
+      settings [name [value]]  Read or change Kilobat's settings; new-apps allow|ask|block
+      approvals [--json]    Apps waiting for approval while new-apps is ask
+      approve|deny <app-id>  Allow or block a waiting app and save the rule
+        [--minutes 1…1440]  Decide for a while instead
+      block-host|unblock-host <domain|IP|CIDR>  Block for every app, *.example.com style
+        [--app <id>]        Only for one app, as a connection rule
       quit <PID> [--force]  Quit a process, e.g. one using the network
 
     Setup

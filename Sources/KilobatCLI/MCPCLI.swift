@@ -14,7 +14,8 @@ import KilobatCore
     Before a large download or upload or a long unattended run, call get_conditions: it reports metered links, Low Data Mode, VPN, battery and heat. \
     keep_awake stops idle sleep for a set time (closing the lid still sleeps the Mac); tell the user, ask first on battery, and call release_awake when done. \
     list_sessions shows earlier awake sessions and AI agent runs with the data they used. \
-    set_profile, set_app_rule, set_dns and set_budget change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
+    get_app_bandwidth shows one app's traffic over an hour, day, week or month; get_access_policy what an app says it connects to. \
+    set_profile, set_app_rule, set_new_app_mode, block_destination, decide_approval, set_dns and set_budget change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
     Rules are saved locally; blocking requires the Kilobat app with its network filter enabled. get_status reports `filteringActive` when the app is running.
     """
 
@@ -255,6 +256,60 @@ import KilobatCore
             guard let raw = arguments["gb"] as? NSNumber, !isBoolean(raw), case let gb = raw.doubleValue, gb.isFinite, (0.1...10_000).contains(gb) else { throw MCPToolError("gb must be a number from 0.1 to 10000.") }
             TrafficStore(startMonitoring: false).preferences.limitGB = gb
             return .json(try object(["sessionBudgetGB": gb, "saved": true]))
+        },
+        MCPTool(name: "get_app_bandwidth", title: "One app's bandwidth over time",
+                description: "Bytes one app sent and received in a calendar `range` (hour, day, week or month), split into buckets (minutes, hours, six-hour blocks or days), with totals and the peak rate and when it happened. Omit `app` for all traffic. `back` steps to earlier periods: 1 is the previous hour, day, week or month. Use the app names from get_usage_report `topApps` or get_status `apps[].name`; helpers count under the app that owns them. History is recorded while the Kilobat app runs. Same JSON as `kilobat bandwidth [app] <range> --back N --json`.",
+                inputSchema: schema(["app": ["type": "string", "description": "App name, e.g. Google Chrome."],
+                                     "range": ["type": "string", "enum": ["hour", "day", "week", "month"], "default": "day"],
+                                     "back": ["type": "integer", "minimum": 0, "maximum": 400, "default": 0]]),
+                annotations: readOnly) { arguments, _ in
+            let range = FirewallCLI.rangeNamed((arguments["range"] as? String) ?? "day") ?? .day
+            let app = (arguments["app"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return .json(try object(FirewallCLI.bandwidth(app: app, range: range, back: try integer(arguments, "back", in: 0...400) ?? 0)))
+        },
+        MCPTool(name: "get_access_policy", title: "Connections an app declares",
+                description: "What an app's developer says it connects to and why, from the Internet Access Policy file some apps ship (CleanShot X, Raycast, 1Password and others): `description`, `developer`, and `connections` with `hosts`, `port`, `purpose`, `denyConsequences` and whether each is `essential`. `declared` is false when the app ships none. Use it before blocking a domain an app needs. Same JSON as `kilobat access-policy <bundle-id> --json`.",
+                inputSchema: schema(["app": ["type": "string", "description": "Bundle ID such as com.raycast.macos, or an app path."]], required: ["app"]),
+                annotations: readOnly) { arguments, _ in
+            .json(try object(try FirewallCLI.policy(app: try string(arguments, "app"))))
+        },
+        MCPTool(name: "set_new_app_mode", title: "How new apps are treated",
+                description: "What Travel and Work do with apps that have no rule: `allow` lets them connect, `ask` holds their first connections until the user allows or blocks them in the Kilobat app (or you do with decide_approval), `block` blocks them silently. `allow_apple` lets Apple's own software through when asking or blocking. Unrestricted always allows." + confirm + " Takes effect only while the Kilobat app's network filter is enabled.",
+                inputSchema: schema(["mode": ["type": "string", "enum": ["allow", "ask", "block"]],
+                                     "allow_apple": ["type": "string", "enum": ["on", "off"]]]),
+                annotations: change) { arguments, _ in
+            let apple = (arguments["allow_apple"] as? String).map { $0 == "on" }
+            return .json(try object(try FirewallCLI.setMode(TrafficStore(startMonitoring: false), newApps: arguments["mode"] as? String, allowApple: apple)))
+        },
+        MCPTool(name: "list_approvals", title: "Apps waiting for approval",
+                description: "Apps the Kilobat filter is holding while new apps are asked about: `app` (rule key), `process`, `path`, `signer` and `signatureValid`, `pid`, `requests`, how many connections are `waiting`, and `destinations` (`host`, `address`, `port`). Held connections give up after a minute. Needs the Kilobat app running. Same JSON as `kilobat approvals --json`.",
+                annotations: readOnly) { _, _ in
+            .json(try FirewallCLI.encode(try await FirewallCLI.approvals()))
+        },
+        MCPTool(name: "decide_approval", title: "Allow or block a waiting app",
+                description: "Answers an approval from list_approvals: `allow` releases its held connections and saves an allow rule, `block` drops them and saves a block rule, in the active profile. Pass `minutes` to decide for a while only. Check the signature and destinations first, and never allow an app whose signature isn't valid without asking." + confirm,
+                inputSchema: schema(["app": ["type": "string"], "decision": ["type": "string", "enum": ["allow", "block"]],
+                                     "minutes": ["type": "integer", "minimum": 1, "maximum": 1440]], required: ["app", "decision"]),
+                annotations: change) { arguments, _ in
+            let app = try string(arguments, "app"), decision = try string(arguments, "decision")
+            guard ["allow", "block"].contains(decision) else { throw MCPToolError("decision must be allow or block.") }
+            return .json(try object(["app": app, "decided": try await FirewallCLI.decide(app, allowed: decision == "allow", minutes: try integer(arguments, "minutes", in: 1...1440))]))
+        },
+        MCPTool(name: "block_destination", title: "Block a domain or IP",
+                description: "Blocks or unblocks a `target` domain (subdomains included; *.example.com is accepted), IP address or CIDR range for every app, or with `app` for that app only as a connection rule in the active profile. Check get_access_policy first so you don't cut off a connection an app needs." + confirm + " Takes effect on new connections while the Kilobat app's network filter is enabled.",
+                inputSchema: schema(["target": ["type": "string", "description": "example.com, *.example.com, 203.0.113.5 or 203.0.113.0/24."],
+                                     "app": ["type": "string", "description": "Bundle ID or process:<name>; omit for every app."],
+                                     "action": ["type": "string", "enum": ["block", "unblock"], "default": "block"]], required: ["target"]),
+                annotations: change) { arguments, _ in
+            let app = (arguments["app"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return .json(try object(try FirewallCLI.blockDestination(try string(arguments, "target"), app: app, block: (arguments["action"] as? String ?? "block") != "unblock", store: TrafficStore(startMonitoring: false))))
+        },
+        MCPTool(name: "list_blocked_connections", title: "Recently blocked connections",
+                description: "Connections the Kilobat filter blocked in the last `days` (1 by default, up to 7), newest first: `date`, `app`, `endpoint`, `direction` and `reason` (app rule, blocklist entry, connection rule, budget, default deny or a block when asked). Metadata only. Same data as `kilobat blocked-history`.",
+                inputSchema: schema(["days": ["type": "integer", "minimum": 1, "maximum": 7, "default": 1]]),
+                annotations: readOnly) { arguments, _ in
+            let since = Date().addingTimeInterval(-Double(try integer(arguments, "days", in: 1...7) ?? 1) * 86_400)
+            return .json(try FirewallCLI.encode(FilterEventJournal().events.filter { $0.date >= since }))
         },
     ] }
 

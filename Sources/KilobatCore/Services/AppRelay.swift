@@ -6,7 +6,9 @@ import Foundation
 /// Read-only by design: a request carries an action name and a reply ID, never arguments.
 public enum AppRelay {
     public static let appBundleID = "co.seifi.kilobat"
-    public static let actions: Set<String> = ["scan", "connection"]
+    public static let actions: Set<String> = ["scan", "connection", "approvals", "decide"]
+    /// An action may carry arguments after a `|`, such as `decide|allow|com.example.App`.
+    static func known(_ action: String) -> Bool { actions.contains(String(action.prefix { $0 != "|" })) }
     static let request = Notification.Name("co.seifi.kilobat.relay.request")
     static var directory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/relay")
@@ -16,7 +18,7 @@ public enum AppRelay {
 
     /// Asks the running app and waits for its reply. Returns nil when the app is not running or does not answer in time.
     public static func ask(_ action: String, timeout: Duration = .seconds(8)) async -> Data? {
-        guard actions.contains(action), appRunning else { return nil }
+        guard known(action), appRunning else { return nil }
         let id = UUID().uuidString, reply = directory.appendingPathComponent(id + ".json")
         DistributedNotificationCenter.default().postNotificationName(request, object: action + ":" + id, userInfo: nil, deliverImmediately: true)
         let deadline = ContinuousClock.now + timeout
@@ -36,9 +38,10 @@ public enum AppRelay {
         // Replies the CLI gave up on.
         for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] { try? FileManager.default.removeItem(at: file) }
         return DistributedNotificationCenter.default().addObserver(forName: request, object: nil, queue: .main) { note in
-            guard let parts = (note.object as? String)?.split(separator: ":", maxSplits: 1), parts.count == 2,
-                  actions.contains(String(parts[0])), let id = UUID(uuidString: String(parts[1])) else { return }
-            let action = String(parts[0])
+            // The request id comes last: an action's arguments may themselves contain colons (process:name).
+            guard let object = note.object as? String, let colon = object.lastIndex(of: ":"),
+                  case let action = String(object[..<colon]), known(action),
+                  let id = UUID(uuidString: String(object[object.index(after: colon)...])) else { return }
             Task { @MainActor in
                 guard let data = await handler(action) else { return }
                 let file = directory.appendingPathComponent(id.uuidString + ".json")

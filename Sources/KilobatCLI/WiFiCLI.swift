@@ -259,9 +259,11 @@ import KilobatCore
     }
     static var defaults: UserDefaults { KilobatCLI.appDefaults }
     static let settingsList: [Setting] = [
-        Setting(key: "new-apps", values: "allow|block", detail: "What Travel and Work do with apps that have no rule",
-                read: { $0.preferences.defaultAllow ? "allow" : "block" },
-                write: { store, value in guard ["allow", "block"].contains(value) else { throw CLIError("Use allow or block.") }; store.preferences.defaultAllow = value == "allow" }),
+        Setting(key: "new-apps", values: "allow|ask|block", detail: "What Travel and Work do with apps that have no rule; ask holds them until you decide in the app",
+                read: { $0.preferences.askNewApps == true ? "ask" : $0.preferences.defaultAllow ? "allow" : "block" },
+                write: { store, value in _ = try FirewallCLI.setMode(store, newApps: value, allowApple: nil) }),
+        Setting(key: "apple-software", values: "on|off", detail: "Let Apple's own software connect when new apps are asked about or blocked",
+                read: { $0.preferences.allowApple == true ? "on" : "off" }, write: { store, value in store.preferences.allowApple = try toggle(value) }),
         Setting(key: "auto-travel", values: "on|off", detail: "Switch to Travel on metered networks such as a phone hotspot",
                 read: { $0.preferences.autoHotspot ? "on" : "off" }, write: { store, value in store.preferences.autoHotspot = try toggle(value) }),
         Setting(key: "scope", values: "external|wifi|wired", detail: "Which traffic counts toward per-app totals",

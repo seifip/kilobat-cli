@@ -30,6 +30,9 @@ public final class TrafficStore {
     private var pendingReceived: UInt64 = 0
     private var pendingSent: UInt64 = 0
     private var pendingApps: [String: UInt64] = [:]
+    private var pendingAppsSent: [String: UInt64] = [:]
+    /// The last five minutes of each app's rates, one sample a second, for sparklines and the bandwidth panel.
+    public private(set) var liveSeries: [String: LiveSeries] = [:]
     private var lastFlush = Date()
     private var identities: [Int32: (String, String, String?)] = [:]
     private let monitor = NettopMonitor()
@@ -218,12 +221,21 @@ public final class TrafficStore {
             index[id] = app
             incoming += down; outgoing += up
             // History counts helpers and services under the app that owns them, as the app list does.
-            pendingApps[owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name, default: 0] += down + up
+            let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
+            pendingApps[historyName, default: 0] += down + up
+            pendingAppsSent[historyName, default: 0] += up
         }
         for (id, paths) in owners {
             index[id]?.ownerPath = paths.count == 1 ? paths.first.flatMap { $0.isEmpty ? nil : $0 } : nil
         }
         apps = Array(index.values)
+        var series = liveSeries
+        for app in apps { series[app.id, default: LiveSeries()].append(down: app.downloadRate, up: app.uploadRate) }
+        for id in series.keys where index[id]?.processIDs.isEmpty != false {
+            series[id]?.append(down: 0, up: 0)
+            if series[id]?.isIdle == true { series[id] = nil }
+        }
+        liveSeries = series
         received += incoming; sent += outgoing
         pendingReceived += incoming; pendingSent += outgoing
         download = Double(incoming) / elapsed; upload = Double(outgoing) / elapsed
@@ -233,13 +245,13 @@ public final class TrafficStore {
     }
     public func flush() {
         guard recordHistory, pendingReceived + pendingSent > 0 else { return }
-        usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey))
+        usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent))
         let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
         usage = Self.compact(usage.filter { $0.date >= cutoff })
         persist(usage, as: "usage.json")
         networkSessions[networkKey] = NetworkSession(name: networkName, received: received, sent: sent)
         persist(networkSessions, as: "network-sessions.json")
-        pendingReceived = 0; pendingSent = 0; pendingApps = [:]; lastFlush = Date()
+        pendingReceived = 0; pendingSent = 0; pendingApps = [:]; pendingAppsSent = [:]; lastFlush = Date()
     }
     public func reloadPreferences() {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("preferences.json")),
@@ -270,7 +282,8 @@ public final class TrafficStore {
             let start = bucket(entries[0].date) ?? entries[0].date
             if entries.count == 1 && entries[0].date == start { return entries[0] }
             return UsageEntry(date: start, received: entries.reduce(0) { $0 + $1.received }, sent: entries.reduce(0) { $0 + $1.sent },
-                              apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey)
+                              apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey,
+                              appsSent: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.estimatedSent, uniquingKeysWith: +) })
         }
         return (merged + kept).sorted { $0.date < $1.date }
     }

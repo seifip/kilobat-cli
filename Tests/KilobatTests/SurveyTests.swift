@@ -60,7 +60,8 @@ struct DomainListTests {
         #expect(try DomainPolicy.parseList(Data(list.utf8)) == ["ads.example.com", "tracker.example.com"])
         #expect(throws: (any Error).self) { try DomainPolicy.parseList(Data("||example.com^".utf8)) }
         #expect(throws: (any Error).self) { try DomainPolicy.parseList(Data("https://example.com".utf8)) }
-        #expect(throws: (any Error).self) { try DomainPolicy.parseList(Data("123.45.67.89".utf8)) }
+        // A lone address is an entry of its own; addresses before names only point the names elsewhere.
+        #expect(try DomainPolicy.parseList(Data("123.45.67.89".utf8)) == ["123.45.67.89"])
     }
     @Test func remoteEndpointRequiresConnectedSocketAndKeepsIPv6() {
         let row = SocketDestination(pid: 1, process: "a", transport: "TCP", endpoint: "[::1]:50000->[2001:db8::1]:443", state: "ESTABLISHED", date: Date())

@@ -35,6 +35,8 @@ public struct UsageEntry: Codable, Identifiable {
     public let sent: UInt64
     public let apps: [String: UInt64]
     public var networkKey: String? = nil
+    /// Bytes each app sent; the rest of its total was received. Missing in history from before 1.2.
+    public var appsSent: [String: UInt64]? = nil
     public var total: UInt64 { received + sent }
 }
 
@@ -70,6 +72,8 @@ public struct SavedPreferences: Codable, Equatable {
     public var networkLimits: [String: Double]? = nil
     public var trafficScope: String? = nil
     public var blockedDomains: [String]? = nil
+    /// Domains, IPs and ranges blocked by hand for every app, kept apart from an imported list.
+    public var blockedHosts: [String]? = nil
     public var blocklistName: String? = nil
     public var domainExceptions: [String: [String]]? = nil
     /// The profile to restore when the metered network that switched to Travel goes away.
@@ -81,6 +85,10 @@ public struct SavedPreferences: Codable, Equatable {
     public var defaultAllow: Bool = false
     /// How long usage history is kept; nil means a year.
     public var historyDays: Int? = nil
+    /// Hold connections from apps without a rule until the user allows or blocks them.
+    public var askNewApps: Bool? = nil
+    /// Apple-signed software connects without a rule when new apps are blocked or asked about.
+    public var allowApple: Bool? = nil
 }
 
 public enum TrafficFormat {
