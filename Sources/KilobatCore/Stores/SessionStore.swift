@@ -45,6 +45,9 @@ public struct WorkSession: Codable, Identifiable, Equatable, Sendable {
 
     public var duration: TimeInterval { (end ?? Date()).timeIntervalSince(start) }
     public var total: UInt64 { received + sent }
+    /// Agents poll and sync in the background. A real turn uploads its context, so a run that moved under
+    /// 256 KB, or worked under a minute and moved under a megabyte, isn't worth keeping or announcing.
+    public var isBlip: Bool { kind == .agent && (total < 256_000 || (lastActive.timeIntervalSince(start) < 60 && total < 1_000_000)) }
     public var summary: String {
         let length = duration < 60 ? "under a minute" : Duration.seconds(duration.rounded()).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 2))
         var parts = [length,
@@ -105,7 +108,7 @@ public enum AgentCatalog {
         keepDisplayOn = defaults.bool(forKey: "awake.display")
         webhook = defaults.string(forKey: "awake.webhook") ?? ""
         if let directory, let data = try? Data(contentsOf: directory.appendingPathComponent("sessions.json")) {
-            history = (try? JSONDecoder().decode([WorkSession].self, from: data)) ?? []
+            history = ((try? JSONDecoder().decode([WorkSession].self, from: data)) ?? []).filter { !$0.isBlip }
         }
     }
 
@@ -199,6 +202,7 @@ public enum AgentCatalog {
         // Quiet time after the last traffic isn't work; end the run when it actually went quiet.
         session.end = reason == "Went quiet" ? session.lastActive : now
         session.ended = reason
+        guard !session.isBlip else { return }
         session.batteryEnd = PowerState.read().batteryPercent
         archive(session)
         let finished = reason == "Went quiet" ? "\(agent) went quiet" : "\(agent) stopped"

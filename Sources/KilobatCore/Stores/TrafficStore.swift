@@ -172,7 +172,7 @@ public final class TrafficStore {
         let app = NSRunningApplication(processIdentifier: process.pid)
         // nettop truncates names to 15 characters; the filter matches the full executable name.
         let executable = app?.bundleIdentifier == nil ? Self.executableName(pid: process.pid) ?? process.process : process.process
-        let name = app?.bundleIdentifier != nil ? app?.localizedName ?? process.process : executable
+        let name = app?.bundleIdentifier != nil ? app?.localizedName ?? Self.executableName(pid: process.pid) ?? process.process : executable
         let id = app?.bundleIdentifier ?? "process:\(executable)"
         let value = (id, name, app?.bundleURL?.path)
         identities[process.pid] = value
@@ -210,13 +210,15 @@ public final class TrafficStore {
             let (id, name, path) = identity(process)
             var app = index[id] ?? AppTraffic(id: id, name: name, bundlePath: path)
             app.processIDs.append(process.pid)
-            owners[id, default: []].insert(ProcessOwnership.applicationPath(pid: process.pid) ?? "")
+            let owner = ProcessOwnership.applicationPath(pid: process.pid)
+            owners[id, default: []].insert(owner ?? "")
             app.received += down; app.sent += up
             app.downloadRate += Double(down) / elapsed
             app.uploadRate += Double(up) / elapsed
             index[id] = app
             incoming += down; outgoing += up
-            pendingApps[name, default: 0] += down + up
+            // History counts helpers and services under the app that owns them, as the app list does.
+            pendingApps[owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name, default: 0] += down + up
         }
         for (id, paths) in owners {
             index[id]?.ownerPath = paths.count == 1 ? paths.first.flatMap { $0.isEmpty ? nil : $0 } : nil

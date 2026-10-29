@@ -62,9 +62,9 @@ import Testing
         let sessions = store(), start = Date()
         sessions.tick(apps: [traffic("process:claude", rate: 1_000)], interval: 2, now: start)
         #expect(sessions.agents.isEmpty)
-        sessions.tick(apps: [traffic("process:claude", rate: 5_000)], interval: 2, now: start + 2)
+        sessions.tick(apps: [traffic("process:claude", rate: 500_000)], interval: 2, now: start + 2)
         #expect(sessions.agents["Claude Code"] != nil)
-        sessions.tick(apps: [traffic("process:claude", rate: 5_000)], interval: 2, now: start + 4)
+        sessions.tick(apps: [traffic("process:claude", rate: 500_000)], interval: 2, now: start + 4)
         var now = start + 4
         while !sessions.agents.isEmpty && now < start + 600 {
             now += 2; sessions.tick(apps: [traffic("process:claude", rate: 0)], interval: 2, now: now)
@@ -73,19 +73,35 @@ import Testing
         #expect(run?.kind == .agent && run?.title == "Claude Code" && run?.ended == "Went quiet")
         // The run ends when it last moved data, not when the quiet minutes ran out.
         #expect(run?.end == start + 4)
-        #expect(run?.received == 9_000 && run?.sent == 1_000)
+        #expect(run?.received == 900_000 && run?.sent == 100_000)
         #expect(now >= start + 4 + 180)
     }
 
     @Test func agentRunEndsWhenTheProcessExits() {
         let sessions = store(), start = Date()
-        sessions.tick(apps: [traffic("process:codex", rate: 5_000)], interval: 2, now: start)
+        sessions.tick(apps: [traffic("process:codex", rate: 600_000)], interval: 2, now: start)
         #expect(sessions.agents["Codex"] != nil)
+        sessions.tick(apps: [traffic("process:codex", rate: 600_000)], interval: 2, now: start + 2)
         sessions.tick(apps: [], interval: 2, now: start + 2)
         #expect(sessions.agents.isEmpty && sessions.history.first?.ended == "Exited")
         // A process that is gone never starts a run.
         sessions.tick(apps: [traffic("process:codex", rate: 5_000, pid: 999_999)], interval: 2, now: start + 4)
         #expect(sessions.agents.isEmpty)
+    }
+
+    @Test func shortBurstsAreNotRuns() {
+        let sessions = store(), start = Date()
+        var ended: WorkSession?
+        sessions.onEnd = { ended = $0 }
+        sessions.tick(apps: [traffic("process:claude", rate: 5_000)], interval: 2, now: start)
+        sessions.tick(apps: [traffic("process:claude", rate: 5_000)], interval: 2, now: start + 2)
+        #expect(sessions.agents["Claude Code"] != nil)
+        var now = start + 2
+        while !sessions.agents.isEmpty && now < start + 600 {
+            now += 2; sessions.tick(apps: [traffic("process:claude", rate: 0)], interval: 2, now: now)
+        }
+        // Background polling neither lands in history nor notifies.
+        #expect(sessions.history.isEmpty && ended == nil)
     }
 
     @Test func historySurvivesARestart() throws {
