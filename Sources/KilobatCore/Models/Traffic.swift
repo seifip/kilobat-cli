@@ -57,6 +57,8 @@ public struct AppTraffic: Identifiable {
     public var rates: [Int32: ProcessRate] = [:]
     /// Where the executable of a command-line tool Kilobat doesn't recognise lives.
     public var executablePath: String? = nil
+    /// A proxy core or VPN tunnel: what it moves is other apps' traffic, counted for them.
+    public var carrier = false
     public var total: UInt64 { received + sent }
     /// What a budget counts for the app: everything but the local network.
     public var internet: UInt64 { total > local ? total - local : 0 }

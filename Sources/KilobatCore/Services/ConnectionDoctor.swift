@@ -46,8 +46,8 @@ public struct DoctorReport: Codable, Sendable {
     public let host: String
     public let app: String?
     public let verdict: String
-    public let next: String
-    public let steps: [DoctorStep]
+    public var next: String
+    public var steps: [DoctorStep]
     public var hops: [DoctorHop] = []
     public let date: Date
     public var client: DoctorClient? = nil
@@ -175,6 +175,34 @@ public enum ConnectionDoctor {
     /// `proxy` is a proxy address the app uses by its own setting, which Kilobat can't read; the request goes through it.
     /// `failedAt` is when the app failed, as the person says; it's recorded, and a passing check made later says it can't see that moment.
     public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
+        let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt)
+        guard !report.steps.isEmpty else { return report }
+        return await withProxyApp(report)
+    }
+
+    /// When a proxy app with a readable API runs, its mode and how its current nodes answer, as one more layer.
+    /// A failed request with a node that doesn't answer points at the node, not the site.
+    static func withProxyApp(_ report: DoctorReport) async -> DoctorReport {
+        let environment = await ProxyEnvironment.current()
+        guard let client = environment.running.first(where: { $0.controller != nil }), let api = ClashAPI(client),
+              let groups = try? await api.groups() else { return report }
+        let configs = try? await api.configs()
+        let mode = configs?.mode ?? client.mode, tun = configs?.tun ?? client.tun
+        var nodes: [(group: String, node: String, delay: Int?)] = []
+        for group in groups.prefix(3) { if let node = group.now, node != "DIRECT" { nodes.append((group.name, node, await api.delay(node))) } }
+        let dead = nodes.filter { $0.delay == nil }
+        var detail = "\(client.name)" + [mode.map { " in \($0) mode" }, tun == true ? ", TUN on" : nil].compactMap { $0 }.joined()
+        if nodes.isEmpty { detail += "; no proxy node is selected, so traffic goes direct." }
+        else { detail += ". " + nodes.map { "\($0.group) uses \($0.node): " + ($0.delay.map { "\($0) ms" } ?? "no answer") }.joined(separator: "; ") + "." }
+        var report = report
+        report.steps.append(DoctorStep(layer: "Proxy app", status: dead.isEmpty ? .ok : .warning, detail: detail))
+        if !report.ok, let node = dead.first {
+            report.next = "\(node.node) in \(client.name) doesn’t answer, so requests sent through it fail. Pick another node in its \(node.group) group, or update the subscription. " + report.next
+        }
+        return report
+    }
+
+    static func checks(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
         let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = requestURL(trimmed), let host = url.host, ExpertTools.validHost(host) else {
             return DoctorReport(target: requestURL(trimmed).map(ConnectionProbe.redacted) ?? trimmed, host: trimmed, app: app, verdict: "That doesn’t look like a website or host.", next: "Enter a domain such as example.com or a full https:// address.", steps: [], date: Date())

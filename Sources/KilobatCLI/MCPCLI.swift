@@ -331,6 +331,30 @@ import KilobatCore
             let object = try JSONSerialization.jsonObject(with: DiagnosticsCLI.encode(report))
             return .json(try MCPCLI.object(["text": report.text, "report": object]))
         },
+        MCPTool(name: "get_proxy_status", title: "Proxy apps and routes",
+                description: "Proxy apps on this Mac (Clash Verge, ClashX, mihomo, Mihomo Party, FlClash, Surge, sing-box, Stash, V2Ray or Xray, Shadowsocks and others) and the system proxy, read-only. `clients` lists each app: `running`, `ports`, `controller` (its API address; secrets are never returned), `mode` (rule, global or direct) and `tun`. `system` is macOS's proxy setting, with `dead` true when it points at this Mac and nothing answers, which breaks every app that follows it. `carriers` are processes that forward other apps' traffic (proxy cores, VPN tunnels); Kilobat counts that traffic for the apps, not the carrier. `findings` name problems and what to try: a dead system proxy, DNS or IPv6 that skip a VPN, a proxy and a VPN both taking traffic, global mode, and Kilobat's filter not seeing apps that use the system proxy. With `routes` true, also returns `routes`: for each live connection through a Clash-compatible API, the `app`, `host`, `rule`, `node` (DIRECT, REJECT or the proxy server) and `group`. Never change the proxy app's settings or nodes; tell the user what to change. Same as `kilobat proxy --json` and `kilobat proxy routes --json`.",
+                inputSchema: schema(["routes": ["type": "boolean", "default": false, "description": "Also list each app's live routes through the proxy."]]),
+                annotations: readOnly) { arguments, _ in
+            let check = await TunnelCheck.run()
+            let status = try JSONSerialization.jsonObject(with: DiagnosticsCLI.encode(ProxyCLI.statusObject(check)))
+            guard arguments["routes"] as? Bool == true else { return .json(try MCPCLI.object(["status": status])) }
+            let routes = (try? await ProxyCLI.makeRoutes()) ?? []
+            return .json(try MCPCLI.object(["status": status, "routes": try JSONSerialization.jsonObject(with: DiagnosticsCLI.encode(routes))]))
+        },
+        MCPTool(name: "test_proxy_nodes", title: "Test proxy nodes",
+                description: "For each running Clash-compatible proxy app, measures how fast the node each proxy group uses now answers: one small request through it to a 204 page (Google's generate_204), with a 5-second limit. Returns `client`, `group`, `node` and `delayMs`, null when the node doesn't answer. Use it when sites fail or feel slow only with the proxy on: a node with no answer or a delay in the seconds is the likely cause, and the user can pick another node in that group. It changes nothing. Same as `kilobat proxy test --json`.",
+                inputSchema: schema([:]), annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
+            var results: [ProxyCLI.NodeDelay] = []
+            for (client, api) in try await ProxyCLI.apis() {
+                for group in try await api.groups() { if let node = group.now { results.append(.init(client: client.name, group: group.name, node: node, delayMs: await api.delay(node))) } }
+            }
+            return .json(try DiagnosticsCLI.encode(results))
+        },
+        MCPTool(name: "check_vpn", title: "VPN leak and conflict check",
+                description: "Checks the VPN and proxies on this Mac from its routes and resolvers, read-only: `vpnState` (full, partial or off) and `vpn` (its name when macOS lists exactly one), `dnsServer` and `dnsInterface` (where name lookups go), `ipv6Interface` (where IPv6 leaves), and `findings`: DNS that skips the VPN (lookups go to the local network), IPv6 that skips it (sites over IPv6 see the real address), a proxy and a VPN both taking traffic, a dead system proxy. Each finding says what to try. It can't see inside the VPN app or prove privacy; say what was measured. Same as `kilobat vpn --json`.",
+                inputSchema: schema([:]), annotations: readOnly) { _, _ in
+            .json(try DiagnosticsCLI.encode(await TunnelCheck.run()))
+        },
         MCPTool(name: "keep_awake", title: "Keep the Mac awake",
                 description: "Stops this Mac from idle-sleeping for `minutes` (1–240) so a long build, download or agent run isn't cut off. Calling again replaces the previous hold; it ends early with release_awake or when this MCP server stops. Shows in `pmset -g assertions` as \"Kilobat: <reason>\". Changes no settings and is low risk: tell the user for how long, and on battery get their confirmation first. Closing the lid still sleeps the Mac unless `lid_closed` is true: then the Kilobat app's power helper keeps it running with the lid shut, which works only after the user allowed it in Kilobat Settings and approved the helper. A closed Mac in a bag can overheat and drains its battery, so get the user's explicit confirmation for lid_closed every time, saying for how long; Kilobat still lets it sleep at the user's battery floor, when it runs hot, and when the time is up. `lidHold` in the result says until when, and `lidFloor` at which battery percentage it gives up.",
                 inputSchema: schema(["minutes": ["type": "integer", "minimum": 1, "maximum": 240, "description": "How long to stay awake."],

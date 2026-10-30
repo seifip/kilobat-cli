@@ -378,10 +378,15 @@ public final class TrafficStore {
             app.downloadRate += rate.down
             app.uploadRate += rate.up
             index[id] = app
-            all += flow.total; local += flow.local; physicalLocal += flow.physicalLocal; tunnel += flow.tunnel; internet += flow.internet
+            // A proxy core or VPN tunnel forwards other apps' bytes, which those apps already count: it shows in the list
+            // and the live rates, but adds nothing to the Internet total or history a second time.
+            let carrier = ProxyRouting.shared.isCarrier(process.pid)
+            if carrier { index[id]?.carrier = true }
+            all += flow.total; local += flow.local; physicalLocal += flow.physicalLocal; tunnel += flow.tunnel
+            if !carrier { internet += flow.internet }
             // History counts helpers and services under the app that owns them, as the app list does; local bytes apart.
             let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
-            let counted = flow.total - flow.local
+            let counted = carrier ? ByteCount() : flow.total - flow.local
             pendingApps[historyName, default: 0] += counted.total
             pendingAppsSent[historyName, default: 0] += counted.sent
             if flow.local.total > 0 { pendingAppsLocal[historyName, default: 0] += flow.local.total }

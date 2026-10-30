@@ -239,7 +239,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         do { networks = try await probe.scan(); survey.saveScan(networks) }
         catch { self.error = error.localizedDescription }
     }
-    public func runSpeedTest() {
+    public func runSpeedTest(maximumBytes: Int = 80_000_000) {
         guard !speedRunning else { return }
         speedRunning = true
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
@@ -249,7 +249,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             guard let self else { return }
             defer { self.speedRunning = false }
             do {
-                let result = try await SpeedTest.run(streams: self.speedStreams, updates: { [weak self] update in
+                let result = try await SpeedTest.run(maximumBytes: maximumBytes, streams: self.speedStreams, updates: { [weak self] update in
                     Task { @MainActor in
                         guard let self, self.speedRunning else { return }
                         self.speedPhase = update.phase; self.speedFraction = update.fraction; self.speedBytes = update.bytes
@@ -268,6 +268,14 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         }
     }
     public func cancelSpeedTest() { speedTask?.cancel() }
+    /// Runs a test, or waits for the one already running, and returns its result: for Shortcuts.
+    public func speedTestResult(maximumBytes: Int = 80_000_000) async throws -> SpeedTestResult {
+        let previous = lastSpeed?.date
+        runSpeedTest(maximumBytes: maximumBytes)
+        await speedTask?.value
+        guard let result = lastSpeed, result.date != previous else { throw SpeedTestFailure(message: speedProgress) }
+        return result
+    }
     public func flushDNS() async {
         guard !flushingDNS else { return }
         flushingDNS = true; defer { flushingDNS = false }
@@ -315,4 +323,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         reportNotice = "Report copied."; reportNoticeTask?.cancel()
         reportNoticeTask = Task { [weak self] in do { try await Task.sleep(for: .seconds(3)); self?.reportNotice = nil } catch {} }
     }
+}
+
+/// A speed test that ended without a result, with the progress line that says why.
+public struct SpeedTestFailure: LocalizedError {
+    public let message: String
+    public var errorDescription: String? { message }
 }

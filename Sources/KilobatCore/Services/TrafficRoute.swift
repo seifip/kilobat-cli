@@ -18,6 +18,9 @@ public enum TrafficRoute: String, Codable, Sendable {
     }
 
     static func route(address: String, port: String, localPort: String, interface: Substring) -> TrafficRoute {
+        // An app talking to a local proxy (Clash, Surge, sing-box…) is reaching the Internet through it: those bytes
+        // are the app's, and the proxy's own connection out is not charged to it again.
+        if isLoopback(address) && ProxyRouting.shared.isProxyPort(port) { return .internet }
         if interface.hasPrefix("lo") || interface.hasPrefix("awdl") || interface.hasPrefix("llw") { return .local }
         if address == "*" { return localPorts.contains(localPort) ? .local : tunnelInterface(interface) ? .tunnel : .internet }
         if isLinkLocalOrLoopback(address) { return .local }
@@ -48,6 +51,8 @@ public enum TrafficRoute: String, Codable, Sendable {
         let lower = address.lowercased()
         return lower == "::1" || lower == "::" || lower.hasPrefix("fe8") || lower.hasPrefix("fe9") || lower.hasPrefix("fea") || lower.hasPrefix("feb") || lower.hasPrefix("ff")
     }
+
+    static func isLoopback(_ address: String) -> Bool { address.hasPrefix("127.") || address == "::1" || address == "localhost" }
 
     /// Private ranges (RFC 1918, IPv6 unique local) and everything `isLinkLocalOrLoopback` covers.
     public static func isPrivate(_ address: String) -> Bool {
