@@ -15,6 +15,7 @@ import KilobatCore
             try await channels(json: json)
         case "networks": try await networks(Array(rest.dropFirst()), json: json)
         case "health-history": try healthHistory(Array(rest.dropFirst()), json: json)
+        case "support-report": try await supportReport(Array(rest.dropFirst()), json: json)
         case "settings": try await settings(Array(rest.dropFirst()), json: json)
         case "low-latency": try await lowLatency(Array(rest.dropFirst()))
         case "quit": try await quit(Array(rest.dropFirst()))
@@ -280,6 +281,46 @@ import KilobatCore
             print("\(KilobatCLI.pad(time, 8))\(KilobatCLI.pad(row["health"] as? String ?? "", 9))\(ms(row["routerMs"]))   \(ms(row["internetMs"]))  \(ms(row["jitterMs"])) \(ms(row["dnsMs"]))  \(row["network"] as? String ?? "")")
         }
         if rows.count > 60 { print("… \(rows.count - 60) earlier samples; use --json for all.") }
+    }
+
+    /// A redacted report for an ISP or IT desk: findings, latency, outages, speed tests and an optional host check.
+    static func supportReport(_ args: [String], json: Bool) async throws {
+        let usage = "Use support-report [--hours 1…168] [--host <host>] [--markdown|--html] [--output <file>] [--json]."
+        var hours = 24, host: String?, format = "text", output: String?
+        var index = 0
+        while index < args.count {
+            switch args[index] {
+            case "--hours":
+                guard index + 1 < args.count, let value = Int(args[index + 1]), (1...168).contains(value) else { throw CLIError(usage) }
+                hours = value; index += 2
+            case "--host":
+                guard index + 1 < args.count, !args[index + 1].hasPrefix("-") else { throw CLIError(usage) }
+                host = args[index + 1]; index += 2
+            case "--output", "-o":
+                guard index + 1 < args.count else { throw CLIError(usage) }
+                output = args[index + 1]; index += 2
+            case "--markdown": format = "markdown"; index += 1
+            case "--html": format = "html"; index += 1
+            default: throw CLIError(usage)
+            }
+        }
+        let report = try await makeSupportReport(hours: hours, host: host)
+        let body: String
+        if json { body = String(decoding: try DiagnosticsCLI.encode(report), as: UTF8.self) }
+        else { body = format == "html" ? report.html : format == "markdown" ? report.markdown : report.text }
+        if let output {
+            let url = URL(fileURLWithPath: (output as NSString).expandingTildeInPath)
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            print("Saved \(url.path). It leaves out your network's name and every local address.")
+        } else { print(body) }
+    }
+
+    static func makeSupportReport(hours: Int, host: String?) async throws -> SupportReport {
+        let journal = NetworkJournal()
+        let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
+        let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
+        return SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
+                                  hours: hours, planMbps: plan, check: check)
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {
