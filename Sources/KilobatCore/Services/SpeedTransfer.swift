@@ -11,6 +11,9 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private var session: URLSession!
     private var task: URLSessionTask?
     private var cancelled = false
+    private var ray: String?
+    /// The Cloudflare data center that answered, from the `cf-ray` header's suffix ("8a1b…-FRA").
+    var dataCenter: String? { lock.withLock { ray }.flatMap(SpeedTest.dataCenter) }
 
     override init() {
         super.init()
@@ -40,7 +43,11 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-        lock.withLock { status = (response as? HTTPURLResponse)?.statusCode ?? 0 }
+        lock.withLock {
+            let http = response as? HTTPURLResponse
+            status = http?.statusCode ?? 0
+            if ray == nil { ray = http?.value(forHTTPHeaderField: "cf-ray") }
+        }
         completionHandler(.allow)
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {

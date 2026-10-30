@@ -130,8 +130,9 @@ struct BudgetAlertTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = TrafficStore(directory: directory, startMonitoring: false)
-        let now = Date()
-        store.usage = [UsageEntry(date: now.addingTimeInterval(-60), received: 900_000_000, sent: 0, apps: ["Dropbox": 300_000_000], networkKey: "phone")]
+        // A minute ago, but never before midnight, which would put it in yesterday's daily cycle.
+        let now = Date(), recent = max(now.addingTimeInterval(-60), Calendar.current.startOfDay(for: now))
+        store.usage = [UsageEntry(date: recent, received: 900_000_000, sent: 0, apps: ["Dropbox": 300_000_000], networkKey: "phone")]
         store.networkKey = "phone"; store.networkName = "Phone"
         store.preferences.limitGB = 1
         store.preferences.budgetCycle = BudgetCycle(period: .daily)
@@ -172,7 +173,7 @@ struct QuotaPolicyTests {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = TrafficStore(directory: directory, startMonitoring: false)
-        store.usage = [UsageEntry(date: Date().addingTimeInterval(-60), received: 0, sent: 0, apps: ["Example": 2_000_000_000], networkKey: "phone", appsSent: ["Example": 100_000_000])]
+        store.usage = [UsageEntry(date: max(Date().addingTimeInterval(-60), Calendar.current.startOfDay(for: Date())), received: 0, sent: 0, apps: ["Example": 2_000_000_000], networkKey: "phone", appsSent: ["Example": 100_000_000])]
         store.networkKey = "phone"
         store.preferences.quotas = [AppQuota(name: "Example", apps: ["com.example.App", "com.example.Helper"], bytes: 1_000_000_000, network: "phone")]
         #expect(store.quotaReached == ["com.example.App", "com.example.Helper"])

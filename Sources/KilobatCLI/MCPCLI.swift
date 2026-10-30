@@ -9,7 +9,9 @@ import KilobatCore
     Kilobat reads this Mac's network: per-app traffic, Wi-Fi signal, router, internet and DNS latency, nearby networks and speed. \
     For slow or flaky internet, start with diagnose_network, then get_status to see which apps use bandwidth. \
     For Wi-Fi problems use get_wifi, scan_wifi and suggest_wifi_channel; for drops, get_network_history. \
-    Run run_speedtest only when capacity or bufferbloat matters, and ask first on metered connections. \
+    Run run_speedtest only when capacity or bufferbloat matters, and ask first on metered connections. When two results differ, compare_speed_tests lists what changed between them. \
+    For where traffic leaves (VPN or not) use get_exit_path; ask for public_ip only when the user wants it, since that contacts Cloudflare, and never present a VPN or an exit country as proof of privacy. \
+    For slow hops along a route over time, trace_route with rounds and get_route_history; for the local network alone, run_lan_test against a device running iperf3 -s. \
     When calls, game streaming or remote desktops stutter but speed looks fine, run run_stutter_test, then get_nearby_radios for AirDrop and Bluetooth. \
     When one site, API or app can't connect, diagnose_connection finds the layer that stops it. \
     Before a large download or upload or a long unattended run, call get_conditions: it reports metered links, Low Data Mode, VPN, battery and heat. \
@@ -82,14 +84,16 @@ import KilobatCore
             .json(try DiagnosticsCLI.scanJSON(try await WiFiCLI.nearbyNetworks()))
         },
         MCPTool(name: "run_speedtest", title: "Speed and bufferbloat test",
-                description: "Measures download and upload Mbps against Cloudflare plus latency under load (`bufferbloat`: Low, Moderate, High or Inconclusive; `addedLatencyMs`). Also returns `voiceCalls`, `videoCalls` and `streaming` verdicts (the highest quality the bandwidth supports, and whether it may stutter) and `callWarnings` explaining any caution. Takes up to about 30 seconds and transfers up to `budget_mb` of data (80 MB by default). On a metered or hotspot connection, get the user's confirmation first and pass a small budget such as 10. Same JSON as `kilobat speedtest --json`.",
-                inputSchema: schema(["budget_mb": ["type": "integer", "minimum": 1, "maximum": 80, "default": 80, "description": "Maximum data to transfer, in megabytes."]]),
+                description: "Measures download and upload Mbps against Cloudflare plus latency under load (`bufferbloat`: Low, Moderate, High or Inconclusive; `addedLatencyMs`). Also returns `voiceCalls`, `videoCalls` and `streaming` verdicts (the highest quality the bandwidth supports, and whether it may stutter) and `callWarnings` explaining any caution. Takes up to about 30 seconds and transfers up to `budget_mb` of data (80 MB by default). On a metered or hotspot connection, get the user's confirmation first and pass a small budget such as 10. `measurements` also records `streams`, `server` (the Cloudflare data center) and `context` (interface, connection kind, VPN, Wi-Fi band, channel, signal and link rate, and `otherBytes` this Mac moved during the test), and `method` says how it measured. One connection (the default) reads lower than Ookla, fast.com or networkQuality on fast or distant links because those open several; pass `parallel` for four connections at once when the user compares with such a site. Same JSON as `kilobat speedtest --json`.",
+                inputSchema: schema(["budget_mb": ["type": "integer", "minimum": 1, "maximum": 80, "default": 80, "description": "Maximum data to transfer, in megabytes."],
+                                     "parallel": ["type": "boolean", "default": false, "description": "Four connections at once instead of one, sharing the same data budget."]]),
                 annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: false, openWorld: true)) { arguments, context in
             let budget = try integer(arguments, "budget_mb", in: 1...80) ?? 80
+            let parallel = try boolean(arguments, "parallel") ?? false
             let (messages, relay) = AsyncStream.makeStream(of: String.self)
             let forward = Task { for await message in messages { context.progress(message) } }
             defer { relay.finish() }
-            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000) { relay.yield($0) }
+            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000, streams: parallel ? SpeedTest.parallelStreams : 1) { relay.yield($0) }
             relay.finish(); await forward.value
             return .json(try DiagnosticsCLI.speedJSON(result))
         },
@@ -212,13 +216,68 @@ import KilobatCore
             .json(try DiagnosticsCLI.encode(try await ExpertCLI.namedDevices()))
         },
         MCPTool(name: "trace_route", title: "Trace the route to a host",
-                description: "A 12-hop route probe to `host`, as plain text. A latency jump that persists to the last hop is real; a single slow hop that recovers is usually a router deprioritizing probes. Takes up to about 30 seconds. Same output as `kilobat trace <host>`.",
-                inputSchema: schema(["host": ["type": "string", "description": "Hostname or IP address."]], required: ["host"]),
-                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
+                description: "A 12-hop route probe to `host`, as plain text. A latency jump that persists to the last hop is real; a single slow hop that recovers is usually a router deprioritizing probes. Each trace is saved. Pass `rounds` (2–5) to trace several times with three probes a hop, like mtr: the text then ends with each hop's loss, best, average, worst and last delay over every saved trace to that host and a line on where the delay starts. Takes up to about 30 seconds a round. Same output as `kilobat trace <host> [--rounds N]`.",
+                inputSchema: schema(["host": ["type": "string", "description": "Hostname or IP address."],
+                                     "rounds": ["type": "integer", "minimum": 1, "maximum": 5, "default": 1, "description": "Traces to run in a row."]], required: ["host"]),
+                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, context in
             let host = try string(arguments, "host")
-            let result = try await ExpertTools.route(to: host)
-            SurveyJournal().saveRoute(host: host, output: result)
-            return .text(result)
+            let rounds = try integer(arguments, "rounds", in: 1...5) ?? 1
+            let journal = SurveyJournal()
+            guard rounds > 1 else {
+                let result = try await ExpertTools.route(to: host)
+                journal.saveRoute(host: host, output: result)
+                return .text(result)
+            }
+            var last = ""
+            try await ExpertTools.routeRounds(to: host, rounds: rounds) { output in
+                journal.saveRoute(host: host, output: output); last = output
+                context.progress("Trace \(journal.routes.filter { $0.host == host }.count) saved")
+            }
+            return .text(last + "\n\n" + RouteHistory(host: host, routes: journal.routes).text)
+        },
+        MCPTool(name: "get_route_history", title: "Route to a host over time",
+                description: "Every saved trace to `host` combined hop by hop, like mtr: `hops` (`ttl`, `addresses` seen there, most often first, `replies` and `probes`, `bestMs`, `averageMs`, `worstMs`, `lastMs`, `changed` when different routers answered in different runs), `runs`, `first` and `last`, `pathChanges` (runs whose routers differ from the run before) and `verdict`, where the delay starts. A hop that skips replies while later hops answer is a router rate-limiting probes, not loss. Without `host`, returns `hosts`, the hosts with saved traces. Same JSON as `kilobat route-history --host <host> --json`.",
+                inputSchema: schema(["host": ["type": "string", "description": "A host traced before."]]),
+                annotations: readOnly) { arguments, _ in
+            let routes = SurveyJournal().routes
+            guard let host = (arguments["host"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else { return .json(try object(["hosts": RouteHistory.hosts(routes)])) }
+            let history = RouteHistory(host: host, routes: routes)
+            guard history.runs > 0 else { throw MCPToolError("No saved traces to \(host). Run trace_route first.") }
+            return .json(try DiagnosticsCLI.encode(history))
+        },
+        MCPTool(name: "compare_speed_tests", title: "Why two speed tests differ",
+                description: "Sets two speed tests the Kilobat app saved side by side and lists what was different between them, each with a plain-English note on how it can change a result: `network`, `time` (evening or hours apart), `server` (Cloudflare data center), `method` (one connection or several), `connection` (Wi-Fi, Ethernet, VPN), `vpn`, Wi-Fi `band`, `signal` and `linkRate`, `otherTraffic` on this Mac during the test, idle `latency` and `dataLimit`. Returns `first` and `second` (the earlier test first), `downloadChangePercent`, `uploadChangePercent`, `differences` (`factor`, `first`, `second`, `note`), `unknown` (factors one of the tests didn't record, such as tests saved by an older version) and `summary`. Name tests by `first` and `second`: an id from get_network_history speed_tests, or a place where 1 is the newest; the newest two by default. It lists recorded differences; never claim one of them caused the change, or that a result is wrong. Same JSON as `kilobat speed-compare --json`.",
+                inputSchema: schema(["first": ["type": "string", "description": "A test id, or its place (1 is the newest)."],
+                                     "second": ["type": "string", "description": "A test id, or its place (1 is the newest)."]]),
+                annotations: readOnly) { arguments, _ in
+            let tests = NetworkJournal().speedTests
+            let a = (arguments["first"] as? String) ?? (arguments["first"] as? NSNumber).map { $0.stringValue }
+            let b = (arguments["second"] as? String) ?? (arguments["second"] as? NSNumber).map { $0.stringValue }
+            let pair: (SavedSpeedTest, SavedSpeedTest)
+            if a == nil && b == nil {
+                guard let latest = SpeedComparison.latestPair(tests) else { throw MCPToolError("Fewer than two saved speed tests. The Kilobat app saves the tests it runs.") }
+                pair = latest
+            } else {
+                guard let a, let b, let one = SpeedComparison.find(a, in: tests), let two = SpeedComparison.find(b, in: tests), one.id != two.id else {
+                    throw MCPToolError("Pass both first and second: two different test ids, or places where 1 is the newest.")
+                }
+                pair = (one, two)
+            }
+            return .json(try DiagnosticsCLI.encode(SpeedComparison(pair.0, pair.1)))
+        },
+        MCPTool(name: "get_exit_path", title: "Where traffic leaves: VPN and public IP",
+                description: "Where this Mac's traffic leaves, read on the Mac: the default route's `interface`, `tunnel`, `vpn` (full: the default route goes through a tunnel; partial: a VPN is connected but the default route doesn't use it, so only some destinations go through it; off), `vpnName` (when macOS lists exactly one VPN connected) and `vpnConnected` (every VPN configuration macOS lists as connected). Pass `public_ip` true to also ask Cloudflare which address it sees (`publicIP`) and look up the country it is registered to in Kilobat's local DB-IP data (`publicIPCountry`, `publicIPCountryName`). That sends one request to Cloudflare, so only pass it when the user asks for their public IP or VPN exit. Report it as measured, e.g. \"traffic leaves through utun3 (WireGuard), exit IP registered in Germany\": the registry country isn't where the user or server is, and neither it nor a VPN shows that a connection is private, anonymous or secure. Same JSON as `kilobat ip [--public] --json`.",
+                inputSchema: schema(["public_ip": ["type": "boolean", "default": false, "description": "Also ask Cloudflare for the public IP. Contacts a third party."]]),
+                annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
+            let lookup = try boolean(arguments, "public_ip") ?? false
+            return .json(try object(ExpertCLI.exitJSON(await ExitPath.current(lookup: lookup), lookedUp: lookup)))
+        },
+        MCPTool(name: "run_lan_test", title: "Throughput to a device on the network",
+                description: "Five seconds of iperf3 between this Mac and `host`, a device the user runs `iperf3 -s` on, to measure the local network (Wi-Fi, cabling, a mesh link) apart from the internet. `reverse` true has the server send. Returns `receivedMbps`, `sentMbps`, `bytes`, `seconds`, `streams`, `retransmits` (TCP retransmissions on the sending side, when known) and `direction`. Needs iperf3 installed on this Mac by the user; Kilobat never installs it, and the error says how. Moves a lot of data on the local network for five seconds, which can slow other devices meanwhile; it doesn't use the internet unless `host` is on it. Get the user's confirmation first, with the host they named. Same JSON as `kilobat lan-test <host> --json`.",
+                inputSchema: schema(["host": ["type": "string", "description": "Hostname or IP address of the device running iperf3 -s."],
+                                     "reverse": ["type": "boolean", "default": false, "description": "Measure the server sending to this Mac."]], required: ["host"]),
+                annotations: MCPToolAnnotations(readOnly: false, destructive: false, idempotent: false, openWorld: true)) { arguments, _ in
+            .json(try DiagnosticsCLI.encode(try await ExpertTools.lanSpeed(host: try string(arguments, "host"), reverse: try boolean(arguments, "reverse") ?? false)))
         },
         MCPTool(name: "list_networks", title: "Known networks",
                 description: "Networks Kilobat has seen, with `key`, `name`, the `profile` and `budgetGB` remembered for each (null if none), data used in the current session there, `current`, the data `cost` the user set (automatic, metered or unmetered) and `metered`, `osMetered` and `meteredSource` (macOS only reports the current network). Same JSON as `kilobat networks --json`.",
@@ -226,7 +285,7 @@ import KilobatCore
             .json(try JSONSerialization.data(withJSONObject: await WiFiCLI.networkRows(TrafficStore(startMonitoring: false)), options: [.sortedKeys, .withoutEscapingSlashes]))
         },
         MCPTool(name: "get_conditions", title: "Conditions for a long run",
-                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (what Kilobat acts on), `osMetered` (what macOS says) and `meteredSource` (macOS, or you when the user set the network's data cost), `lowDataMode`, `vpn` and `vpnInterface`, `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake), `updaters` (`pauseOnMetered`, the setting, and `paused`, whether the filter pauses updaters on this network now; get_updaters has the detail) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
+                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (what Kilobat acts on), `osMetered` (what macOS says) and `meteredSource` (macOS, or you when the user set the network's data cost), `lowDataMode`, `vpn` (the default route goes through a tunnel), `vpnInterface`, `vpnName` and `vpnConnected` (VPNs macOS lists as connected, which may carry only some destinations; get_exit_path has the detail), `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake), `awakeOnPower` (`enabled`, `display`, `active`: the user's own Stay awake while plugged in setting, which no tool changes), `updaters` (`pauseOnMetered`, the setting, and `paused`, whether the filter pauses updaters on this network now; get_updaters has the detail) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
             .json(try object(await AwakeCLI.conditions(holdUntil: hold?.until)))
         },
@@ -461,6 +520,11 @@ import KilobatCore
         guard !isBoolean(raw), let value = (raw as? NSNumber).flatMap({ Int(exactly: $0.doubleValue) }), range.contains(value) else {
             throw MCPToolError("'\(key)' must be an integer from \(range.lowerBound) to \(range.upperBound).")
         }
+        return value
+    }
+    static func boolean(_ arguments: [String: Any], _ key: String) throws -> Bool? {
+        guard let raw = arguments[key], !(raw is NSNull) else { return nil }
+        guard isBoolean(raw), let value = raw as? Bool else { throw MCPToolError("'\(key)' must be true or false.") }
         return value
     }
     static func object(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) }

@@ -18,6 +18,8 @@ public struct PowerState: Codable, Equatable, Sendable {
                 if let current = description[kIOPSCurrentCapacityKey] as? Int, let maximum = description[kIOPSMaxCapacityKey] as? Int, maximum > 0 { percent = current * 100 / maximum }
                 if let state = description[kIOPSPowerSourceStateKey] as? String { onAC = state == kIOPSACPowerValue }
             }
+            // What the Mac draws from now: AC Power, Battery Power or UPS Power. A Mac without a battery reports AC Power.
+            if let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String? { onAC = type == kIOPSACPowerValue }
         }
         return PowerState(batteryPercent: percent, onAC: onAC, thermal: Self.thermal(ProcessInfo.processInfo.thermalState),
                           lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled)

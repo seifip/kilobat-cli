@@ -152,7 +152,16 @@ public enum AgentCatalog {
     public var lid: (any LidHolding)? { didSet { lid?.request(lidRequest) } }
     public var notify: Bool { didSet { defaults.set(notify, forKey: "awake.notify") } }
     public var quietMinutes: Int { didSet { defaults.set(quietMinutes, forKey: "awake.quietMinutes") } }
-    public var keepDisplayOn: Bool { didSet { defaults.set(keepDisplayOn, forKey: "awake.display"); assertion = nil; updateAssertion() } }
+    /// One screen choice for everything the app holds awake: timers, downloads, agents, the app in front and plugged in.
+    public var keepDisplayOn: Bool {
+        didSet {
+            defaults.set(keepDisplayOn, forKey: "awake.display")
+            updateAssertion()
+            if let condition = frontmost, condition.display != keepDisplayOn {
+                watchFrontmost(FrontmostCondition(app: condition.app, name: condition.name, display: keepDisplayOn, until: condition.until), current: frontmostActive ? condition.app : nil)
+            }
+        }
+    }
     /// An ntfy topic or any webhook that receives a summary when a session ends.
     public var webhook: String { didSet { defaults.set(webhook, forKey: "awake.webhook") } }
     public var onEnd: ((WorkSession) -> Void)?
@@ -164,15 +173,25 @@ public enum AgentCatalog {
     public private(set) var frontmostActive = false
     /// How the last condition ended: "Keynote quit", "Battery at 18%".
     public private(set) var frontmostEnded: String?
-    /// The app's choice for its conditions: keep the screen on too, or only the Mac. Changing it applies to the one set now.
-    public var frontmostDisplay: Bool {
+
+    /// Off by default: plugging in the power adapter starts an indefinite awake session, and unplugging ends it.
+    /// Only a session it started: one the person started, a transfer, a frontmost condition or an agent run is left alone.
+    public var awakeOnPower: Bool {
         didSet {
-            defaults.set(frontmostDisplay, forKey: "awake.frontmostDisplay")
-            if let condition = frontmost, condition.display != frontmostDisplay {
-                watchFrontmost(FrontmostCondition(app: condition.app, name: condition.name, display: frontmostDisplay, until: condition.until), current: frontmostActive ? condition.app : nil)
-            }
+            defaults.set(awakeOnPower, forKey: "awake.power")
+            guard awakeOnPower != oldValue else { return }
+            // Once watching, the watcher stays: a plug-in while the setting is off still clears an earlier Turn Off.
+            if awakeOnPower { watchPower() } else if awakeByPower { finish(reason: "Turned off", now: Date()) }
         }
     }
+    /// The awake session was started by plugging in, not by the person, so unplugging ends it.
+    public private(set) var awakeByPower = false
+    /// The person turned the plugged-in session off; it starts again at the next plug-in, not before. Kept across
+    /// relaunches until the Mac restarts, since Kilobat can't see a plug-in while it isn't running.
+    public private(set) var powerSuppressed: Bool { didSet { defaults.set(powerSuppressed ? Date() : nil, forKey: "awake.powerOff") } }
+    public static let pluggedInTitle = "While plugged in"
+    /// The awake session's title: "While plugged in" for one the power adapter started, else its mode's.
+    public var awakeTitle: String? { awakeByPower ? Self.pluggedInTitle : mode?.title }
 
     /// Below this a download or an agent counts as quiet.
     public static let quietRate: Double = 16_000
@@ -181,14 +200,19 @@ public enum AgentCatalog {
     static let busyCores = 0.05
     var probe = ProcessProbe.live
     var readPower: () -> PowerState = { PowerState.read() }
-    /// Off in tests, which report activations themselves.
+    /// Off in tests, which report activations and power changes themselves.
     var observesWorkspace = true
+    /// Whether the shared assertion keeps the screen on too.
+    private(set) var displayHeld = false
     private let defaults: UserDefaults
     private let directory: URL?
     private var assertion: SleepAssertion?
     /// The frontmost condition's own assertion, so focus changes never touch the one sessions and agents share.
     private var frontmostAssertion: SleepAssertion?
     private var frontmostWatcher: FrontmostWatcher?
+    private var powerWatcher: PowerSourceWatcher?
+    /// On the power adapter at the last reading; nil until awake-on-power is first on.
+    private var onAC: Bool?
     private var samples: [Double] = []
     private var lastDestinationSample = Date.distantPast
     private var hostNames: [String: String] = [:]
@@ -224,7 +248,8 @@ public enum AgentCatalog {
         notify = defaults.object(forKey: "awake.notify") as? Bool ?? true
         quietMinutes = defaults.object(forKey: "awake.quietMinutes") as? Int ?? 3
         keepDisplayOn = defaults.bool(forKey: "awake.display")
-        frontmostDisplay = defaults.object(forKey: "awake.frontmostDisplay") as? Bool ?? true
+        awakeOnPower = defaults.bool(forKey: "awake.power")
+        powerSuppressed = (defaults.object(forKey: "awake.powerOff") as? Date).map { $0 > Date() - ProcessInfo.processInfo.systemUptime } ?? false
         webhook = defaults.string(forKey: "awake.webhook") ?? ""
         if let directory, let data = try? Data(contentsOf: directory.appendingPathComponent("sessions.json")) {
             history = ((try? JSONDecoder().decode([WorkSession].self, from: data)) ?? []).filter { !$0.isBlip }
@@ -235,15 +260,43 @@ public enum AgentCatalog {
     public var holdingFrontmost: Bool { frontmostAssertion != nil }
     public var busyAgents: [WorkSession] { agents.values.sorted { $0.start < $1.start } }
 
-    public func start(_ mode: AwakeMode, now: Date = Date()) {
+    public func start(_ mode: AwakeMode, now: Date = Date()) { begin(mode, byPower: false, now: now) }
+    private func begin(_ mode: AwakeMode, byPower: Bool, now: Date) {
         if awake != nil { finish(reason: "Replaced", now: now) }
-        self.mode = mode
+        self.mode = mode; awakeByPower = byPower
         samples = []; quietSince = nil
-        awake = WorkSession(kind: .awake, title: mode.title, start: now, batteryStart: PowerState.read().batteryPercent, lastActive: now)
+        awake = WorkSession(kind: .awake, title: byPower ? Self.pluggedInTitle : mode.title, start: now, batteryStart: PowerState.read().batteryPercent, lastActive: now)
         updateAssertion(now: now); requestAlertsIfNeeded()
     }
     /// Turning it off ends the awake session and the frontmost condition; agent runs keep their own setting.
-    public func stop(now: Date = Date()) { finish(reason: "Turned off", now: now); endFrontmost("Turned off") }
+    /// A plugged-in session turned off stays off until the adapter is plugged in again.
+    public func stop(now: Date = Date()) {
+        if awakeByPower { powerSuppressed = true }
+        finish(reason: "Turned off", now: now); endFrontmost("Turned off")
+    }
+
+    /// Starts following the power adapter, when awake-on-power is on: the app calls this at launch, and turning the
+    /// setting on calls it too. Already plugged in, it starts the session now, unless the person turned it off during this plug-in.
+    public func watchPower(now: Date = Date()) {
+        guard awakeOnPower else { return }
+        if observesWorkspace && powerWatcher == nil { powerWatcher = PowerSourceWatcher { [weak self] in self?.powerChanged() } }
+        if onAC == nil { onAC = readPower().onAC }
+        if onAC == false { powerSuppressed = false }
+        startForPower(now: now)
+    }
+    /// The Mac switched between the adapter and its battery. Plugging in starts the session and clears an earlier
+    /// Turn Off; unplugging ends only a session it started.
+    public func powerChanged(now: Date = Date()) {
+        let plugged = readPower().onAC
+        guard plugged != onAC else { return }
+        onAC = plugged; powerSuppressed = false
+        if plugged { startForPower(now: now) } else if awakeByPower { finish(reason: "Unplugged", now: now) }
+    }
+    /// A session the person started, or a transfer, is never replaced.
+    private func startForPower(now: Date) {
+        guard awakeOnPower, onAC == true, !powerSuppressed, awake == nil else { return }
+        begin(.indefinite, byPower: true, now: now)
+    }
 
     /// Keeps the Mac awake whenever the condition's app is in front, until it quits, its time is up, the battery
     /// reaches the floor or it's turned off. Replaces an earlier condition; awake sessions and agent runs go on as they were.
@@ -537,10 +590,10 @@ public enum AgentCatalog {
         guard var session = awake else { return }
         session.end = now; session.ended = reason
         session.batteryEnd = PowerState.read().batteryPercent
-        awake = nil; mode = nil; samples = []; watchedRate = 0; quietSince = nil
+        awake = nil; mode = nil; awakeByPower = false; samples = []; watchedRate = 0; quietSince = nil
         updateAssertion(now: now)
         archive(session)
-        if reason != "Turned off" && reason != "Replaced" {
+        if !["Turned off", "Replaced", "Unplugged"].contains(reason) {
             alert(reason == "Went quiet" ? "Done. Your Mac can sleep again" : "Awake timer ended", "Stayed awake " + session.summary, session: session)
         }
     }
@@ -555,11 +608,13 @@ public enum AgentCatalog {
         let working = busyAgents.filter {
             switch $0.state { case .waitingForYou?: keepAwakeWhileWaiting; case .stalled?: false; default: true }
         }
-        let wanted = mode != nil || (keepAwakeForAgents && !working.isEmpty)
-        if wanted && assertion == nil {
-            let reason = mode.map { "Kilobat: " + $0.title } ?? "Kilobat: " + Array(Set(working.map(\.title))).sorted().joined(separator: ", ") + " working"
-            assertion = SleepAssertion(reason: reason, display: keepDisplayOn)
-        } else if !wanted { assertion?.release(); assertion = nil }
+        let agentsWant = keepAwakeForAgents && !working.isEmpty, wanted = mode != nil || agentsWant
+        let display = keepDisplayOn
+        if wanted && (assertion == nil || displayHeld != display) {
+            let reason = awakeTitle.map { "Kilobat: " + $0 } ?? "Kilobat: " + Array(Set(working.map(\.title))).sorted().joined(separator: ", ") + " working"
+            assertion?.release()
+            assertion = SleepAssertion(reason: reason, display: display); displayHeld = assertion != nil && display
+        } else if !wanted { assertion?.release(); assertion = nil; displayHeld = false }
         updateLid(now: now)
     }
 
@@ -590,7 +645,8 @@ public enum AgentCatalog {
         lidOwners = lidOwners.filter { probe.alive($0.key) && $0.value.until > now }
         var ends: [Date] = [], reasons: [String] = []
         if allowLidClosed {
-            if let mode, lidClosedForAwake {
+            // The plugged-in session never holds the lid.
+            if let mode, lidClosedForAwake, !awakeByPower {
                 if case .timer(let until) = mode { ends.append(until) } else { ends.append(.distantFuture) }
                 reasons.append("Awake " + mode.title.prefix(1).lowercased() + mode.title.dropFirst())
             }

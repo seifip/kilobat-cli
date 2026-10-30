@@ -15,7 +15,7 @@ import KilobatCore
             try await channels(json: json)
         case "networks": try await networks(Array(rest.dropFirst()), json: json)
         case "health-history": try healthHistory(Array(rest.dropFirst()), json: json)
-        case "settings": try settings(Array(rest.dropFirst()), json: json)
+        case "settings": try await settings(Array(rest.dropFirst()), json: json)
         case "low-latency": try await lowLatency(Array(rest.dropFirst()))
         case "quit": try await quit(Array(rest.dropFirst()))
         default: throw CLIError("Unknown command.")
@@ -299,6 +299,8 @@ import KilobatCore
         let read: @MainActor (TrafficStore) -> String
         let write: @MainActor (TrafficStore, String) throws -> Void
         var appRestart = false
+        /// Asked of the running app after the change is saved, so it applies at once.
+        var relay: (@MainActor () -> String)? = nil
     }
     static func toggle(_ value: String) throws -> Bool {
         switch value.lowercased() { case "on", "true", "yes": return true; case "off", "false", "no": return false; default: throw CLIError("Use on or off.") }
@@ -321,6 +323,11 @@ import KilobatCore
                 read: { _ in defaults.bool(forKey: "networkAlerts") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "networkAlerts") }, appRestart: true),
         Setting(key: "outage-trace", values: "on|off", detail: "Run a route trace automatically during outages",
                 read: { _ in defaults.bool(forKey: "automaticOutageTrace") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "automaticOutageTrace") }, appRestart: true),
+        Setting(key: "public-ip", values: "on|off", detail: "Have the app ask Cloudflare for your public IP on network changes and every 30 minutes (off by default)",
+                read: { _ in defaults.bool(forKey: "publicIPLookup") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "publicIPLookup") }, appRestart: true),
+        Setting(key: "speed-streams", values: "single|parallel", detail: "Speed tests in the app: one connection, or four at once",
+                read: { _ in defaults.integer(forKey: "speedStreams") > 1 ? "parallel" : "single" },
+                write: { _, value in guard ["single", "parallel"].contains(value) else { throw CLIError("Use single or parallel.") }; defaults.set(value == "parallel" ? SpeedTest.parallelStreams : 1, forKey: "speedStreams") }, appRestart: true),
         Setting(key: "check-interval", values: "12…3600", detail: "Seconds between background health checks",
                 read: { _ in String(max(12, defaults.integer(forKey: "diagnosticInterval"))) },
                 write: { _, value in guard let seconds = Int(value), (12...3600).contains(seconds) else { throw CLIError("Use 12 to 3600 seconds.") }; defaults.set(seconds, forKey: "diagnosticInterval") }, appRestart: true),
@@ -333,22 +340,30 @@ import KilobatCore
         Setting(key: "plan-mbps", values: "0…10000", detail: "Your plan's download speed, to compare speed tests against (0 hides it)",
                 read: { _ in defaults.double(forKey: "speed.planMbps").formatted() },
                 write: { _, value in guard let mbps = Double(value), (0...10_000).contains(mbps) else { throw CLIError("Use 0 to 10000.") }; defaults.set(mbps, forKey: "speed.planMbps") }),
-        Setting(key: "menu-bar", values: "icon|speed|download,upload,latency", detail: "What the menu bar item shows",
-                read: { _ in let shown = ["speed", "download", "upload", "latency"].filter { defaults.bool(forKey: "menu." + $0) }; return shown.isEmpty ? "icon" : shown.joined(separator: ",") },
+        Setting(key: "menu-bar", values: "icon|speed|download,upload,latency,vpn", detail: "What the menu bar item shows; vpn shows On, Split or Off and, with public-ip on, the exit IP's registry country",
+                read: { _ in let shown = ["speed", "download", "upload", "latency", "vpn"].filter { defaults.bool(forKey: "menu." + $0) }; return shown.isEmpty ? "icon" : shown.joined(separator: ",") },
                 write: { _, value in
                     let items = value == "icon" ? [] : value.split(separator: ",").map(String.init)
-                    guard items.allSatisfy(["speed", "download", "upload", "latency"].contains) else { throw CLIError("Use icon, or a comma list of speed, download, upload and latency.") }
-                    for item in ["speed", "download", "upload", "latency"] { defaults.set(items.contains(item), forKey: "menu." + item) }
+                    guard items.allSatisfy(["speed", "download", "upload", "latency", "vpn"].contains) else { throw CLIError("Use icon, or a comma list of speed, download, upload, latency and vpn.") }
+                    for item in ["speed", "download", "upload", "latency", "vpn"] { defaults.set(items.contains(item), forKey: "menu." + item) }
                 }),
         Setting(key: "units", values: "bytes|bits", detail: "Show rates in bytes or bits per second",
                 read: { _ in defaults.bool(forKey: "menu.bits") ? "bits" : "bytes" },
                 write: { _, value in guard ["bytes", "bits"].contains(value) else { throw CLIError("Use bytes or bits.") }; defaults.set(value == "bits", forKey: "menu.bits") }),
         Setting(key: "group-helpers", values: "on|off", detail: "Group helper processes under their app",
                 read: { _ in defaults.object(forKey: "apps.groupHelpers") as? Bool ?? true ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "apps.groupHelpers") }),
+        Setting(key: "awake-on-power", values: "on|off", detail: "Stay awake while plugged in, until unplugged; keep-screen-on decides the screen",
+                read: { _ in defaults.bool(forKey: "awake.power") ? "on" : "off" },
+                write: { _, value in defaults.set(try toggle(value), forKey: "awake.power") },
+                relay: { defaults.bool(forKey: "awake.power") ? "power|on" : "power|off" }),
+        Setting(key: "keep-screen-on", values: "on|off", detail: "Keep the screen on too for everything the app keeps awake",
+                read: { _ in defaults.bool(forKey: "awake.display") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "awake.display") }),
     ]
 
-    static func settings(_ args: [String], json: Bool) throws {
+    static func settings(_ args: [String], json: Bool) async throws {
         let store = TrafficStore(startMonitoring: false)
+        // A flag belongs to the value: settings awake-on-power on --display.
+        var args = args
         switch args.count {
         case 0:
             if json { try printObject(Dictionary(uniqueKeysWithValues: settingsList.map { ($0.key, $0.read(store)) })); return }
@@ -359,7 +374,10 @@ import KilobatCore
             if args.count == 1 { print(json ? "\"\(setting.read(store))\"" : setting.read(store)); return }
             try setting.write(store, args[1])
             defaults.synchronize()
-            print("✓ \(setting.key) = \(setting.read(store))\(setting.appRestart && AppRelay.appRunning ? " · takes effect when Kilobat restarts" : "")")
+            // Without an answer, the app picks the change up when it next opens.
+            var later = setting.appRestart && AppRelay.appRunning
+            if let relay = setting.relay, AppRelay.appRunning { later = await AppRelay.ask(relay(), timeout: .seconds(3)) == nil }
+            print("✓ \(setting.key) = \(setting.read(store))\(later ? " · takes effect when Kilobat restarts" : "")")
         default: throw CLIError("Use settings [name [value]].")
         }
     }

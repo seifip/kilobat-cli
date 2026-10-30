@@ -130,12 +130,12 @@ import Testing
 
     @Test func theScreenChoiceAppliesToTheConditionSetNow() {
         let sessions = store()
-        sessions.frontmostDisplay = true
+        sessions.keepDisplayOn = true
         sessions.watchFrontmost(keynote, current: "com.apple.Keynote", now: start)
-        sessions.frontmostDisplay = false
+        sessions.keepDisplayOn = false
         #expect(sessions.frontmost?.display == false && sessions.frontmostActive && sessions.holdingFrontmost)
         sessions.activated("com.apple.Safari")
-        sessions.frontmostDisplay = true
+        sessions.keepDisplayOn = true
         #expect(sessions.frontmost?.display == true && !sessions.holdingFrontmost)
     }
 }

@@ -74,12 +74,56 @@ import KilobatCore
             let rows = ExpertTools.interfaces()
             if args.contains("--json") { try json(rows) } else { for row in rows { print("\(row.name)\t\(row.up ? "up" : "down")\t↓ \(row.received)\t↑ \(row.sent)\(row.vpn ? "\tVPN (overlaps physical counters)" : "")") } }
         case "trace":
-            guard args.count == 2 else { throw CLIError("Use trace <host>.") }; let result = try await ExpertTools.route(to: args[1]); SurveyJournal().saveRoute(host: args[1], output: result); print(result)
+            let usage = "Use trace <host> [--rounds 2…10] [--json]."
+            let rest = try positional(args, ["--rounds", "--json"], valued: ["--rounds"])
+            guard rest.count == 1, let host = rest.first else { throw CLIError(usage) }
+            var rounds = 1
+            if let index = args.firstIndex(of: "--rounds") {
+                guard index + 1 < args.count, let value = Int(args[index + 1]), (2...10).contains(value) else { throw CLIError(usage) }
+                rounds = value
+            }
+            let journal = SurveyJournal()
+            if rounds == 1 && !args.contains("--json") { let result = try await ExpertTools.route(to: host); journal.saveRoute(host: host, output: result); print(result); return }
+            try await ExpertTools.routeRounds(to: host, rounds: rounds) { output in
+                journal.saveRoute(host: host, output: output)
+                FileHandle.standardError.write(Data("Trace \(journal.routes.filter { $0.host == host }.count) saved.\n".utf8))
+            }
+            let history = RouteHistory(host: host, routes: journal.routes)
+            if args.contains("--json") { try json(history) } else { print(history.text) }
+        case "ip":
+            try allow(["--public", "--json"])
+            let path = await ExitPath.current(lookup: args.contains("--public"))
+            if args.contains("--json") { print(String(decoding: try JSONSerialization.data(withJSONObject: exitJSON(path, lookedUp: args.contains("--public")), options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)); return }
+            print(path.summary + ".")
+            if !path.connected.isEmpty { print("Connected VPNs: " + path.connected.joined(separator: ", ")) }
+            if let address = path.publicAddress { print("Public IP: \(address.address)" + (address.countryName.map { ", registered in \($0)" } ?? "")); print(ExitPath.registryNote) }
+            else if args.contains("--public") { print("Cloudflare didn't say which address it saw.") }
+            else { print("Add --public to ask Cloudflare for your public IP. " + ExitPath.lookupNote) }
+        case "speed-compare":
+            let keys = try positional(args, ["--json"])
+            let tests = NetworkJournal().speedTests
+            let pair: (SavedSpeedTest, SavedSpeedTest)
+            switch keys.count {
+            case 0:
+                guard let latest = SpeedComparison.latestPair(tests) else { throw CLIError("Two saved speed tests are needed. Run them in the Kilobat app, which keeps them with their context.") }
+                pair = latest
+            case 2:
+                guard let a = SpeedComparison.find(keys[keys.startIndex], in: tests), let b = SpeedComparison.find(keys[keys.startIndex + 1], in: tests), a.id != b.id else {
+                    throw CLIError("Name two different tests by place (1 is the newest) or by id from speed-history.")
+                }
+                pair = (a, b)
+            default: throw CLIError("Use speed-compare [<test> <test>] [--json]: places (1 is the newest) or ids from speed-history; the newest two by default.")
+            }
+            let comparison = SpeedComparison(pair.0, pair.1)
+            if args.contains("--json") { try json(comparison) } else { print(comparison.text) }
         case "dns-benchmark": try allow(["--json"]); try json(await ExpertTools.benchmarkDNS())
         case "dns-profile":
             guard args.count == 2 else { throw CLIError("Use dns-profile <https-endpoint> > Kilobat-DNS.mobileconfig. Review and install manually.") }; print(String(decoding: try ExpertTools.encryptedDNSProfile(url: args[1]), as: UTF8.self))
         case "lan-test":
-            guard args.count == 2 || (args.count == 3 && args[2] == "--reverse") else { throw CLIError("Use lan-test <server> [--reverse]. Requires iperf3 and a second local endpoint.") }; print(try await ExpertTools.lanSpeed(host: args[1], reverse: args.contains("--reverse")))
+            let hosts = try positional(args, ["--reverse", "--json"])
+            guard hosts.count == 1 else { throw CLIError("Use lan-test <server> [--reverse] [--json]. Needs iperf3 on this Mac and iperf3 -s on the server; Kilobat installs nothing.") }
+            let result = try await ExpertTools.lanSpeed(host: hosts[hosts.startIndex], reverse: args.contains("--reverse"))
+            if args.contains("--json") { try json(result) } else { print(result.summary) }
         case "spots":
             let journal = SurveyJournal(), args = args.filter { $0 != "--json" }
             switch args.count > 1 ? args[1] : nil {
@@ -96,7 +140,14 @@ import KilobatCore
             default: throw CLIError("Use spots, spots save <name> or spots remove <id>.")
             }
         case "scan-history": try allow(["--json"]); try json(SurveyJournal().scans)
-        case "route-history": try allow(["--json"]); try json(SurveyJournal().routes)
+        case "route-history":
+            try allow(["--host", "--json"], valued: ["--host"])
+            let routes = SurveyJournal().routes
+            guard let index = args.firstIndex(of: "--host") else { try json(routes); return }
+            guard index + 1 < args.count else { throw CLIError("Use route-history [--host <host>] [--json]. Hosts: " + RouteHistory.hosts(routes).joined(separator: ", ")) }
+            let history = RouteHistory(host: args[index + 1], routes: routes)
+            guard history.runs > 0 else { throw CLIError("No saved traces to \(args[index + 1]). Run kilobat trace \(args[index + 1]) --rounds 3.") }
+            if args.contains("--json") { try json(history) } else { print(history.text) }
         case "outages", "speed-history":
             try allow(["--days", "--json"], valued: ["--days"])
             var since = Date.distantPast
@@ -108,6 +159,29 @@ import KilobatCore
             if command == "outages" { try json(journal.events.filter { $0.start >= since }) } else { try json(journal.speedTests.filter { $0.result.date >= since }) }
         default: throw CLIError("Unknown expert command.")
         }
+    }
+
+    /// The arguments that aren't flags (or a flag's value), after checking every flag is one of `flags`.
+    static func positional(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws -> [String] {
+        var rest: [String] = [], index = 1
+        while index < args.count {
+            let arg = args[index]
+            if arg.hasPrefix("--") {
+                guard flags.contains(arg) else { throw CLIError("Unexpected '\(arg)'. Run kilobat \(args[0]) --help.") }
+                index += valued.contains(arg) ? 2 : 1
+            } else { rest.append(arg); index += 1 }
+        }
+        return rest
+    }
+
+    /// Where traffic leaves, for `kilobat ip --json` and MCP get_exit_path. `lookedUp` says whether Cloudflare was asked.
+    static func exitJSON(_ path: ExitPath, lookedUp: Bool) -> [String: Any] {
+        let address = path.publicAddress
+        return ["date": ISO8601DateFormatter().string(from: path.date), "interface": path.interface ?? NSNull(), "tunnel": path.tunnel, "vpn": path.vpn.rawValue,
+                "vpnName": path.vpnName ?? NSNull(), "vpnConnected": path.connected, "publicIP": address?.address ?? NSNull(),
+                "publicIPCountry": address?.country ?? NSNull(), "publicIPCountryName": address?.countryName ?? NSNull(),
+                "publicIPSource": lookedUp ? "Cloudflare (\(ExitPath.traceURL.absoluteString))" : NSNull(), "lookedUp": lookedUp,
+                "summary": path.summary, "note": lookedUp ? ExitPath.registryNote : "Read from this Mac's routes and VPN list; nothing was sent anywhere."]
     }
 
     /// Neighbor cache with the names the user gave devices in the app.

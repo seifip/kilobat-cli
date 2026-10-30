@@ -55,25 +55,28 @@ enum DiagnosticsCLI {
             var budget = 80
             var index = 1
             while index < args.count {
-                if args[index] == "--json" { index += 1; continue }
+                if args[index] == "--json" || args[index] == "--parallel" { index += 1; continue }
                 guard args[index] == "--budget-mb", index + 1 < args.count,
                       let amount = Int(args[index + 1]), (1...80).contains(amount) else {
-                    throw CLIError("Use speedtest [--json] [--budget-mb 1…80]. Uses at most 80 MB by default.")
+                    throw CLIError("Use speedtest [--parallel] [--json] [--budget-mb 1…80]. Uses at most 80 MB by default.")
                 }
                 budget = amount; index += 2
             }
-            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000) { progress in
+            let streams = args.contains("--parallel") ? SpeedTest.parallelStreams : 1
+            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000, streams: streams) { progress in
                 FileHandle.standardError.write(Data((progress + "\n").utf8))
             }
             if args.contains("--json") { print(String(decoding: try speedJSON(result), as: UTF8.self)) }
             else {
-                print(String(format: "↓ %.1f Mbps   ↑ %.1f Mbps", result.downloadMbps, result.uploadMbps))
+                print(String(format: "↓ %.1f Mbps   ↑ %.1f Mbps", result.downloadMbps, result.uploadMbps) + "   \(result.server ?? "Cloudflare") · \(streams == 1 ? "1 connection" : "\(streams) connections")"
+                      + (result.context?.vpn.map { " · through \($0)" } ?? ""))
                 print("Bufferbloat: \(result.bufferbloat)")
                 if let latency = result.addedLatency { print(String(format: "Added latency: %.1f ms", latency)) }
                 else { print("Insufficient sustained load or ping replies for a reliable bufferbloat comparison.") }
                 print("Video calls: \(result.videoReadiness)   Streaming: \(result.streamingReadiness)")
                 for warning in result.callCautionReasons { print("  ! \(warning)") }
                 print("\(TrafficFormat.bytes(UInt64(result.transferredBytes))) transferred to/from Cloudflare")
+                print("How it measures: " + SpeedTest.method(streams: result.streams))
             }
         case "dns":
             guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|flush]. Changes require administrator approval.") }
@@ -99,7 +102,8 @@ enum DiagnosticsCLI {
     }
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
         try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
-                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, callWarnings: result.callCautionReasons))
+                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, callWarnings: result.callCautionReasons,
+                               method: SpeedTest.method(streams: result.streams)))
     }
     static func setDNS(_ name: String) async throws -> (DNSProvider, String) {
         guard let provider = DNSProvider.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }), let service = await DiagnosticProbe().snapshot().networkService else {
@@ -147,5 +151,6 @@ enum DiagnosticsCLI {
         let videoCalls: String
         let streaming: String
         let callWarnings: [String]
+        let method: String
     }
 }

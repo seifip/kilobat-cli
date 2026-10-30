@@ -102,6 +102,11 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         if degraded == 3 { notify("Connection quality dropped", "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).") }
         events = Array(events.suffix(500)); save(events, "events.json")
     }
+    /// A change worth a line in the event log, such as a VPN going on or off. Never an alert.
+    public func record(kind: String, detail: String, network: String, date: Date = Date()) {
+        events.append(NetworkEvent(start: date, end: date, network: network, kind: kind, detail: detail))
+        events = Array(events.suffix(500)); save(events, "events.json")
+    }
     public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false) {
         speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? "Unknown network", networkChanged: networkChanged, result: test))
         speedTests = Array(speedTests.suffix(200)); save(speedTests, "speed-tests.json")

@@ -20,7 +20,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -29,7 +29,7 @@ struct KilobatCLI {
         switch command {
         case "blocklist", "domain-exception", "remember-network", "scope": try await PolicyCLI.run(args)
         case "bandwidth", "access-policy", "block-host", "unblock-host", "approvals", "approve", "deny": try await FirewallCLI.run(args)
-        case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history": try await ExpertCLI.run(args)
+        case "remove-connection-rule", "blocked-history", "http-check", "router-counters", "connection-rule", "connection-rules", "signature", "discover", "bonjour", "capture", "wake", "destinations", "devices", "interfaces", "trace", "dns-benchmark", "dns-profile", "lan-test", "outages", "speed-history", "spots", "scan-history", "route-history", "ip", "speed-compare": try await ExpertCLI.run(args)
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
         case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
         case "limit", "quota": try await QuotaCLI.run(args)
@@ -171,7 +171,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.6.0"
+    static let version = "0.7.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -323,7 +323,7 @@ struct KilobatCLI {
         if let budget = app["budgetGB"] { fields["sessionBudgetGB"] = budget }
         if let used = app["budgetUsed"] { fields["budgetUsed"] = used }
         if let bytes = app["sessionBytes"] { fields["networkSessionBytes"] = bytes }
-        for key in ["metered", "osMetered", "meteredSource"] { if let value = app[key] { fields[key] = value } }
+        for key in ["metered", "osMetered", "meteredSource", "vpn", "vpnInterface", "vpnName"] { if let value = app[key] { fields[key] = value } }
         if let bytes = app["localBytes"] { fields["networkLocalBytes"] = bytes }
         if let bytes = app["unattributedBytes"] { fields["networkUnattributedBytes"] = bytes }
         return fields
@@ -438,19 +438,19 @@ struct KilobatCLI {
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
         ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS"),
         ("awake", "Keep the Mac awake, network-aware"), ("sessions", "Awake sessions and AI agent runs"),
-        ("agent-event", "Report an agent's state from its hooks"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"),
+        ("agent-event", "Report an agent's state from its hooks"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"), ("ip", "Where traffic leaves: interface, VPN, public IP"),
         ("completion", "Shell completion script"), ("update", "Update the CLI"), ("help", "Show help"),
         ("blocked-history", "Blocked-flow metadata"), ("connection-rules", "List destination rules"),
         ("connection-rule", "Save a destination rule"), ("remove-connection-rule", "Remove a destination rule"),
         ("destinations", "Observed process sockets"), ("devices", "Local devices and services"),
-        ("interfaces", "Physical and VPN counters"), ("trace", "Route probe"), ("dns-benchmark", "Resolver timings"),
+        ("interfaces", "Physical and VPN counters"), ("trace", "Route probe, once or several times"), ("dns-benchmark", "Resolver timings"),
         ("dns-profile", "Export an encrypted-DNS profile"), ("lan-test", "iperf3 LAN test"), ("blocklist", "Manage a domain list"),
         ("domain-exception", "Save a domain exception"), ("remember-network", "Remember profile and budget"),
         ("scope", "Set monitoring scope"), ("http-check", "HTTP timing breakdown"), ("router-counters", "UPnP router counters"),
         ("signature", "Inspect process signing"), ("bonjour", "Browse Bonjour services"), ("discover", "Host discovery"),
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
-        ("scan-history", "Saved scans"), ("route-history", "Saved routes"), ("outages", "Outage records"),
-        ("speed-history", "Speed test records"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
+        ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
+        ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
         ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"),
         ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
@@ -462,14 +462,14 @@ struct KilobatCLI {
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
         "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
         "sessions": ["--days", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
-        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb"],
+        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
         "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
         "stutter": ["--seconds", "--target", "router", "internet", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
-        "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers"],
+        "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
-        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse"],
+        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
         "blocklist": ["status", "import", "clear"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
     ]
@@ -575,7 +575,12 @@ struct KilobatCLI {
       channels [--json]     Congestion per channel and the least crowded one
       speedtest [--json]    Speed, loaded latency, call and streaming verdicts
         [--budget-mb 1…80]  Maximum data use (80 MB default)
-      stutter [--json]      Ping every 50 ms to find latency spikes and how regular they are
+        [--parallel]        Four connections at once, as most speed-test sites use, instead of one
+      speed-compare [<test> <test>] [--json]  What differed between two saved tests: network, time, server,
+                            connections, Wi-Fi band and signal, VPN, other traffic; the newest two by default
+      ip [--json]           Where traffic leaves: the default route's interface and any VPN, read on this Mac
+        [--public]          Also ask Cloudflare for the public IP, with its registry country
+      stutter [--json]     Ping every 50 ms to find latency spikes and how regular they are
         [--seconds 10…60]   Test length (20 s default)
         [--target router|internet|<host>]  What to ping (the router by default)
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
@@ -612,6 +617,8 @@ struct KilobatCLI {
         [--display]         Keep the screen on too; otherwise only the Mac stays awake and the screen may dim
         [--for 90m|2h]      End after a while, even with the app in front
         [--json]            JSON summary; switching away lets the Mac sleep, it ends when the app quits or at 20% battery
+      settings awake-on-power on|off  The app stays awake while plugged in and lets go when unplugged
+        [--display]         Keep the screen on too; Turn Off in the app holds until the next plug-in
       sessions [--days 1…365] [--json]  Awake sessions and AI agent runs the app recorded
       agent-event <kind>    For an agent's hooks: start, working, waiting, done or failed
         [--agent name]      claude, codex, gemini…; found from the hook's process if left out
@@ -674,9 +681,12 @@ struct KilobatCLI {
       devices name <MAC> <name>           Name a device; an empty name removes it
       interfaces [--json]                 Separate physical / VPN counters
       trace <host>                        Bounded 12-hop route probe
+        [--rounds 2…10]                   Trace several times, 3 probes a hop, and show each hop's loss and delay
+        [--json]                          The hop-by-hop summary as JSON
       dns-benchmark                       Resolver timings as JSON
       dns-profile <https-endpoint>        Export encrypted-DNS profile XML
-      lan-test <server> [--reverse]       Five-second iperf3 LAN test
+      lan-test <server> [--reverse]       Five-second iperf3 test to a device running iperf3 -s
+        [--json]                          Mbps, bytes and retransmissions; needs iperf3 installed by you
       blocklist status|import <path>|clear  Manage a domain list
       domain-exception <app> <domain>     Save a domain exception
       remember-network                    Remember current profile and budget
@@ -690,6 +700,7 @@ struct KilobatCLI {
       wake <MAC-address>                  Send a local Wake-on-LAN packet
       spots [save <name>|remove <id>]     Saved Wi-Fi spots (JSON)
       scan-history / route-history        Saved scans and routes (JSON)
+        [--host <host>]                   One host's traces hop by hop: loss, best, average, worst, route changes
       outages / speed-history [--days N]  Persisted records (JSON)
 
     Live screens: q quit · s sort · f filter · / search.

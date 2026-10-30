@@ -11,6 +11,21 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public var automaticTrace = UserDefaults.standard.bool(forKey: "automaticOutageTrace") { didSet { UserDefaults.standard.set(automaticTrace, forKey: "automaticOutageTrace") } }
     public var checkInterval = max(12, UserDefaults.standard.integer(forKey: "diagnosticInterval")) { didSet { UserDefaults.standard.set(checkInterval, forKey: "diagnosticInterval") } }
+    /// Connections a speed test opens at once: 1, or SpeedTest.parallelStreams.
+    public var speedStreams = max(1, UserDefaults.standard.integer(forKey: "speedStreams")) { didSet { UserDefaults.standard.set(speedStreams, forKey: "speedStreams") } }
+    /// Off unless the person turns it on: the public address takes a request to Cloudflare.
+    public var publicLookup = UserDefaults.standard.bool(forKey: "publicIPLookup") {
+        didSet {
+            UserDefaults.standard.set(publicLookup, forKey: "publicIPLookup")
+            if publicLookup { Task { await refreshExit(force: true) } } else { exitPath?.publicAddress = nil; lookupError = nil }
+        }
+    }
+    /// Where traffic leaves: the default route, VPN and, with `publicLookup`, the public address.
+    public private(set) var exitPath: ExitPath?
+    public private(set) var lookingUp = false
+    public private(set) var lookupError: String?
+    private var exitNetwork: String?
+    private var lookupAttempt: Date?
     private var tracedIncident: UUID?
     public var nextScheduledTest: Date?
     private var scheduleConnected = false
@@ -184,6 +199,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let other = await secondary
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
         snapshot = sample; onSnapshot?(sample)
+        await refreshExit()
         if !sleeping {
             journal.ingest(sample, secondary: other, httpReachable: fallback, interval: Double(max(60, checkInterval)))
             if automaticTrace, let incident = journal.events.last(where: { $0.kind == "Unreachable" && $0.end == nil }), tracedIncident != incident.id {
@@ -194,6 +210,26 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             }
         }
         diagnosing = false
+    }
+    /// Reads the route and VPN list (local), asks Cloudflare for the public address when that's on and due,
+    /// and logs a VPN going on or off and a changed public address.
+    public func refreshExit(force: Bool = false) async {
+        guard !lookingUp else { return }
+        var path = await ExitPath.current()
+        let network = snapshot?.networkKey
+        // After a failed lookup (Cloudflare blocked, a captive portal) wait five minutes rather than retrying every check.
+        let backingOff = lookupError != nil && lookupAttempt.map { Date().timeIntervalSince($0) < 300 } == true
+        if force || (!backingOff && ExitPath.lookupDue(enabled: publicLookup, previous: exitPath, current: path, network: network, previousNetwork: exitNetwork)) {
+            if publicLookup, path.interface != nil {
+                lookingUp = true; lookupAttempt = Date(); defer { lookingUp = false }
+                do { path.publicAddress = try await ExitPath.publicAddress(); lookupError = nil }
+                catch { lookupError = "Couldn’t get the public IP: \(error.localizedDescription)" }
+            }
+        } else if path.interface == exitPath?.interface, path.vpn == exitPath?.vpn { path.publicAddress = exitPath?.publicAddress }
+        // Lookup could have been turned off while Cloudflare answered.
+        if !publicLookup { path.publicAddress = nil }
+        for change in path.changes(since: exitPath) { journal.record(kind: change.kind, detail: change.detail, network: snapshot?.networkName ?? "Unknown network") }
+        exitPath = path; exitNetwork = network
     }
     public func scan() async {
         guard !scanning else { return }
@@ -213,7 +249,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             guard let self else { return }
             defer { self.speedRunning = false }
             do {
-                let result = try await SpeedTest.run(updates: { [weak self] update in
+                let result = try await SpeedTest.run(streams: self.speedStreams, updates: { [weak self] update in
                     Task { @MainActor in
                         guard let self, self.speedRunning else { return }
                         self.speedPhase = update.phase; self.speedFraction = update.fraction; self.speedBytes = update.bytes

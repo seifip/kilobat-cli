@@ -47,7 +47,7 @@ public struct DeviceObservation: Codable, Identifiable, Sendable {
     }
     public func removeSpot(_ id: UUID) { spots.removeAll { $0.id == id }; write(spots, "spots.json") }
     public func saveScan(_ networks: [NearbyNetwork]) { scans.append(SavedScan(date: Date(), networks: networks)); scans = Array(scans.suffix(30)); write(scans, "scans.json") }
-    public func saveRoute(host: String, output: String) { routes.append(SavedRoute(date: Date(), host: host, output: output)); routes = Array(routes.suffix(50)); write(routes, "routes.json") }
+    public func saveRoute(host: String, output: String) { routes.append(SavedRoute(date: Date(), host: host, output: output)); routes = Array(routes.suffix(200)); write(routes, "routes.json") }
     private func read<T: Decodable>(_ name: String) -> T? { guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)) else { return nil }; return try? JSONDecoder().decode(T.self, from: data) }
     private func write<T: Encodable>(_ value: T, _ name: String) {
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); try JSONEncoder().encode(value).write(to: directory.appendingPathComponent(name), options: .atomic); error = nil }

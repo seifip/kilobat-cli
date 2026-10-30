@@ -87,7 +87,9 @@ import KilobatCore
             let battery = (power["batteryPercent"] as? Int).map { " · battery \($0)%" } ?? ""
             print("  Power     \((power["onAC"] as? Bool) == true ? "On power" : "On battery")\(battery) · \(power["thermal"] as? String ?? "unknown") heat\((power["lowPowerMode"] as? Bool) == true ? " · Low Power Mode" : "")")
             let reasons = value["awakeReasons"] as? [String] ?? []
-            print("  Awake     \(reasons.isEmpty ? "Kilobat isn’t keeping the Mac awake" : reasons.joined(separator: ", "))")
+            let plugged = value["awakeOnPower"] as? [String: Any]
+            let onPower = (plugged?["enabled"] as? Bool) == true && (plugged?["active"] as? Bool) != true ? " · stays awake whenever plugged in" : ""
+            print("  Awake     \(reasons.isEmpty ? "Kilobat isn’t keeping the Mac awake" : reasons.joined(separator: ", "))\(onPower)")
             let hold = value["lidHold"] as? [String: Any], until = (hold?["until"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
             print("  Lid       " + (until.map { "Can close: Kilobat keeps the Mac running until " + $0.formatted(date: .omitted, time: .shortened) } ?? ((value["lidClosedAllowed"] as? Bool) == true ? "Allowed for agent runs; closing it now sleeps the Mac" : "Closing it sleeps the Mac")))
             let updaters = value["updaters"] as? [String: Any]
@@ -328,7 +330,7 @@ import KilobatCore
     /// Whether now suits a long run or a big transfer, with one line of advice for an agent. `holdUntil` is the MCP server's own keep_awake.
     static func conditions(holdUntil: Date? = nil) async -> [String: Any] {
         async let path = currentPath()
-        async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3)
+        async let exit = ExitPath.current()
         async let ping = DiagnosticProbe.ping("1.1.1.1", count: 4, interval: 0.25)
         async let assertions = CommandRunner.run("/usr/bin/pmset", ["-g", "assertions"], timeout: 3)
         async let answer = AppRelay.ask("connection", timeout: .seconds(3))
@@ -337,8 +339,8 @@ import KilobatCore
         let store = TrafficStore(startMonitoring: false), cost = WiFiCLI.currentCost(store, app: app), metered = cost.metered(os: link.expensive)
         // Paused only while the app's network filter enforces it.
         let updatersPaused = UpdaterPause.active(store.preferences, metered: metered) && app?["filteringActive"] as? Bool == true
-        let interface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first
-        let vpn = interface.flatMap { ["utun", "ipsec", "ppp"].contains(where: $0.hasPrefix) ? $0 : nil }
+        let exitPath = await exit
+        let vpn = exitPath.tunnel ? exitPath.interface : nil
         let reasons = Array(Set(DiagnosticProbe.matches(#"named: "(Kilobat[^"]*)""#, in: await assertions.output))).sorted()
 
         var advice: [String] = []
@@ -349,18 +351,22 @@ import KilobatCore
         if link.connected, let average = internet.average {
             if (internet.lossPercent ?? 0) >= 5 || average > 150 { advice.append("Unstable internet (\(Int(average)) ms, \(Int(internet.lossPercent ?? 0))% loss): expect slow transfers and retries.") }
         } else if link.connected { advice.append("The internet didn’t answer a ping; some networks block it. If requests fail, run diagnose_connection.") }
-        if let vpn { advice.append("Traffic goes through a VPN (\(vpn)); some hosts may be blocked or slower.") }
+        if let vpn { advice.append("Traffic goes through a VPN (\(exitPath.vpnName.map { "\($0), \(vpn)" } ?? vpn)); some hosts may be blocked or slower.") }
+        else if exitPath.vpn == .partial { advice.append("\(exitPath.vpnName ?? "A VPN") is connected but the default route doesn't use it; only some destinations go through it.") }
         if !power.onAC { advice.append("On battery" + (power.batteryPercent.map { " at \($0)%" } ?? "") + ((power.batteryPercent ?? 100) < 25 ? ": plug in before a long run." : ".")) }
         if power.lowPowerMode { advice.append("Low Power Mode is on: builds and transfers run slower.") }
         if ["serious", "critical"].contains(power.thermal) { advice.append("The Mac is running hot (\(power.thermal)): heavy work will be throttled.") }
         if advice.isEmpty { advice.append("Good conditions: online, unmetered, on power.") }
 
-        return cost.fields(os: link.expensive).merging(["connected": link.connected, "network": link.kind, "interface": link.interface ?? NSNull(), "lowDataMode": link.constrained,
-                "vpn": vpn != nil, "vpnInterface": vpn ?? NSNull(),
+        let vpnFields: [String: Any] = ["vpn": vpn != nil, "vpnInterface": vpn ?? NSNull(), "vpnName": exitPath.vpnName ?? NSNull(), "vpnConnected": exitPath.connected]
+        return cost.fields(os: link.expensive).merging(vpnFields) { $1 }.merging(["connected": link.connected, "network": link.kind, "interface": link.interface ?? NSNull(), "lowDataMode": link.constrained,
                 "internetLatencyMs": internet.average.map { WiFiCLI.tenths($0) } ?? NSNull(), "internetLossPercent": internet.lossPercent ?? NSNull(),
                 "power": ["batteryPercent": power.batteryPercent ?? NSNull(), "onAC": power.onAC, "thermal": power.thermal, "lowPowerMode": power.lowPowerMode] as [String: Any],
                 "keptAwake": !reasons.isEmpty || holdUntil != nil, "awakeReasons": reasons,
                 "awakeUntil": holdUntil.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
+                // The setting is saved; whether its session is running now only the app knows.
+                "awakeOnPower": ["enabled": KilobatCLI.appDefaults.bool(forKey: "awake.power"), "display": KilobatCLI.appDefaults.bool(forKey: "awake.display"),
+                                 "active": app?["awakeByPower"] as? Bool ?? false] as [String: Any],
                 // Only the app knows; it reports both when it runs.
                 "lidClosedAllowed": app?["lidClosedAllowed"] as? Bool ?? false, "lidHold": app?["lidHold"] ?? NSNull(),
                 "updaters": ["pauseOnMetered": UpdaterPause.enabled(store.preferences), "paused": updatersPaused] as [String: Any],

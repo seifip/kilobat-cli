@@ -86,6 +86,12 @@ public struct SpeedTestResult: Codable, Sendable {
     public let downloadSeconds: Double
     public let uploadSeconds: Double
     public let transferredBytes: Int
+    /// Connections open at once: 1 for the default single-stream test, several for the parallel one. Nil on tests saved before it was recorded.
+    public var streams: Int? = nil
+    /// The test server: Cloudflare and the airport code of the data center that answered, such as "Cloudflare FRA".
+    public var server: String? = nil
+    /// The link, VPN and other traffic during the test, kept so two tests can be told apart.
+    public var context: SpeedTestContext? = nil
     // Bandwidth tiers: Published conferencing and streaming bandwidth requirements.
     // Latency/loss checks are conservative Kilobat heuristics, not a call-quality guarantee.
     public var callCautionReasons: [String] {
@@ -133,5 +139,34 @@ public struct SpeedTestResult: Codable, Sendable {
     public var bufferbloat: String {
         guard let addedLatency else { return "Inconclusive" }
         return addedLatency < 15 ? "Low" : addedLatency < 60 ? "Moderate" : "High"
+    }
+}
+
+/// What a speed test ran over, beside its numbers. Nil fields weren't known (no Wi-Fi, or a test saved before they were recorded).
+public struct SpeedTestContext: Codable, Sendable, Equatable {
+    /// The default route's interface, such as en0 or utun3.
+    public var interface: String?
+    /// Wi-Fi, Ethernet, VPN or Other.
+    public var kind: String?
+    /// The VPN the default route went through: its name, or the tunnel interface. Nil when the test didn't go through one.
+    public var vpn: String?
+    public var ssid: String?
+    public var band: String?
+    public var channel: Int?
+    public var rssi: Int?
+    public var transmitMbps: Double?
+    /// Bytes this Mac's network ports (Wi-Fi and Ethernet) carried during the test beyond the test's own; through a VPN this includes its overhead.
+    public var otherBytes: Int?
+    public init(interface: String? = nil, kind: String? = nil, vpn: String? = nil, ssid: String? = nil, band: String? = nil, channel: Int? = nil,
+                rssi: Int? = nil, transmitMbps: Double? = nil, otherBytes: Int? = nil) {
+        self.interface = interface; self.kind = kind; self.vpn = vpn; self.ssid = ssid; self.band = band; self.channel = channel
+        self.rssi = rssi; self.transmitMbps = transmitMbps; self.otherBytes = otherBytes
+    }
+    /// The link the test ran over, from the default route and the Wi-Fi radio. Through a VPN on Wi-Fi the radio still carries the tunnel.
+    public init(exit: ExitPath, radio: RadioSample) {
+        let wifi = radio.interface != nil && radio.rssi != nil
+        let kind: String? = exit.tunnel ? "VPN" : exit.interface == nil ? nil : exit.interface == radio.interface ? "Wi-Fi" : exit.interface?.hasPrefix("en") == true ? "Ethernet" : "Other"
+        self.init(interface: exit.interface, kind: kind, vpn: exit.tunnel ? exit.vpnName ?? exit.interface : nil, ssid: wifi ? radio.ssid : nil,
+                  band: wifi ? radio.band : nil, channel: wifi ? radio.channel : nil, rssi: wifi ? radio.rssi : nil, transmitMbps: wifi ? radio.transmitMbps : nil)
     }
 }
