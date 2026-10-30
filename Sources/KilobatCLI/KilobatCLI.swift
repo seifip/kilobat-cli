@@ -171,7 +171,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.7.0"
+    static let version = "0.7.1"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -301,12 +301,19 @@ struct KilobatCLI {
         // Internet bytes only, from the Wi-Fi and Ethernet counters when `countsInterfaces`. An app's sessionBytes is everything it moved, split into internetBytes and localBytes (LAN, AirDrop), with tunnelBytes inside a VPN.
         // A system download service's onBehalfOf lists the apps the filter saw it download for; null without the filter.
         let downloadsFor = (app?["downloadsFor"] as? [String: [String]]) ?? [:], filtered = app?["filteringActive"] as? Bool == true
+        let groups = Dictionary(AppTrafficGroup.make(store.filteredApps, grouped: true).flatMap { group in group.members.map { ($0.id, group) } }) { first, _ in first }
         var data: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date()), "sampleSeconds": WiFiCLI.tenths(Date().timeIntervalSince(store.startedAt)), "mode": "observer", "filteringActive": NSNull(), "connected": store.connected, "network": store.networkKind, "metered": store.metered, "osMetered": store.osExpensive, "meteredSource": "macOS", "profile": store.preferences.profile.rawValue.lowercased(), "downloadBytesPerSecond": store.download, "uploadBytesPerSecond": store.upload, "sessionBytes": store.total, 
                                    "localBytes": store.local, "tunnelBytes": store.tunnel, "unattributedBytes": store.unattributedBytes, "countsInterfaces": store.countsInterfaces,
                                    "apps": store.filteredApps.map { traffic in
             var row: [String: Any] = ["id": traffic.id, "name": traffic.name, "downloadBytesPerSecond": traffic.downloadRate, "uploadBytesPerSecond": traffic.uploadRate, "sessionBytes": traffic.total,
                                       "internetBytes": traffic.internet, "localBytes": traffic.local, "tunnelBytes": traffic.tunnel, "allowedRule": store.isAllowed(traffic.id), "processIDs": traffic.processIDs]
             if let path = traffic.executablePath { row["executablePath"] = path }
+            if let path = traffic.bundlePath { row["bundlePath"] = path }
+            // The app it belongs to, grouped as the app's list groups helpers under their owner.
+            if let group = groups[traffic.id] {
+                row["groupID"] = group.id; row["groupName"] = group.summary.name
+                if let path = group.summary.bundlePath { row["groupPath"] = path }
+            }
             if let service = SystemDownloads.service(for: traffic) {
                 row["systemDownload"] = service.detail
                 row["onBehalfOf"] = filtered ? (downloadsFor[service.process] ?? []) : NSNull()
@@ -462,7 +469,7 @@ struct KilobatCLI {
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
         "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
         "sessions": ["--days", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
-        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
+        "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
         "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
@@ -576,6 +583,7 @@ struct KilobatCLI {
       speedtest [--json]    Speed, loaded latency, call and streaming verdicts
         [--budget-mb 1…80]  Maximum data use (80 MB default)
         [--parallel]        Four connections at once, as most speed-test sites use, instead of one
+        [--progress]        A JSON line per update on stderr: phase, fraction, live Mbps
       speed-compare [<test> <test>] [--json]  What differed between two saved tests: network, time, server,
                             connections, Wi-Fi band and signal, VPN, other traffic; the newest two by default
       ip [--json]           Where traffic leaves: the default route's interface and any VPN, read on this Mac

@@ -55,15 +55,24 @@ enum DiagnosticsCLI {
             var budget = 80
             var index = 1
             while index < args.count {
-                if args[index] == "--json" || args[index] == "--parallel" { index += 1; continue }
+                if ["--json", "--parallel", "--progress"].contains(args[index]) { index += 1; continue }
                 guard args[index] == "--budget-mb", index + 1 < args.count,
                       let amount = Int(args[index + 1]), (1...80).contains(amount) else {
-                    throw CLIError("Use speedtest [--parallel] [--json] [--budget-mb 1…80]. Uses at most 80 MB by default.")
+                    throw CLIError("Use speedtest [--parallel] [--json] [--progress] [--budget-mb 1…80]. Uses at most 80 MB by default.")
                 }
                 budget = amount; index += 2
             }
             let streams = args.contains("--parallel") ? SpeedTest.parallelStreams : 1
-            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000, streams: streams) { progress in
+            // --progress: one JSON line per update on stderr, for tools that draw the test live.
+            let live = args.contains("--progress")
+            let result = try await SpeedTest.run(maximumBytes: budget * 1_000_000, streams: streams, updates: { update in
+                guard live else { return }
+                var line: [String: Any] = ["phase": update.phase.rawValue, "fraction": update.fraction, "bytes": update.bytes]
+                if let megabits = update.megabits { line["mbps"] = megabits }
+                if let data = try? JSONSerialization.data(withJSONObject: line, options: [.sortedKeys]) {
+                    FileHandle.standardError.write(data + Data("\n".utf8))
+                }
+            }) { progress in
                 FileHandle.standardError.write(Data((progress + "\n").utf8))
             }
             if args.contains("--json") { print(String(decoding: try speedJSON(result), as: UTF8.self)) }
@@ -102,8 +111,9 @@ enum DiagnosticsCLI {
     }
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
         try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
-                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, callWarnings: result.callCautionReasons,
-                               method: SpeedTest.method(streams: result.streams)))
+                               idleLatencyMs: result.baseline.average, jitterMs: result.baseline.jitter,
+                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, agents: result.agentReadiness,
+                               callWarnings: result.callCautionReasons, method: SpeedTest.method(streams: result.streams)))
     }
     static func setDNS(_ name: String) async throws -> (DNSProvider, String) {
         guard let provider = DNSProvider.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }), let service = await DiagnosticProbe().snapshot().networkService else {
@@ -147,9 +157,12 @@ enum DiagnosticsCLI {
         let measurements: SpeedTestResult
         let bufferbloat: String
         let addedLatencyMs: Double?
+        let idleLatencyMs: Double?
+        let jitterMs: Double?
         let voiceCalls: String
         let videoCalls: String
         let streaming: String
+        let agents: String
         let callWarnings: [String]
         let method: String
     }
