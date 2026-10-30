@@ -64,27 +64,30 @@ public struct RouteHistory: Codable, Sendable {
     /// The first hop where the average rises by 30 ms or more and stays up to the last hop that answers.
     static func verdict(_ hops: [Hop], runs: Int) -> String {
         let answering = hops.filter { $0.averageMs != nil }
-        guard let end = answering.last, let endMs = end.averageMs else { return runs == 0 ? "No saved traces to this host." : "No hop answered. Some networks block traceroute probes." }
+        guard let end = answering.last, let endMs = end.averageMs else { return runs == 0 ? String(localized: "No saved traces to this host.") : String(localized: "No hop answered. Some networks block traceroute probes.") }
         var previous: Double?
         for hop in answering {
             guard let ms = hop.averageMs else { continue }
             if let before = previous, ms - before >= 30, endMs >= ms - 10 {
-                let place = hop.ttl == 1 ? "at the first hop, the router" : "at hop \(hop.ttl) (\(hop.addresses.first ?? "no reply"))"
-                return String(format: "Delay rises %@: +%.0f ms over the hop before, and stays up to the last hop that answers.", place, ms - before)
+                let rise = String(format: "%.0f", ms - before)
+                if hop.ttl == 1 { return String(localized: "Delay rises at the first hop, the router: +\(rise) ms over the hop before, and stays up to the last hop that answers.") }
+                let address = hop.addresses.first ?? String(localized: "no reply")
+                return String(localized: "Delay rises at hop \(hop.ttl) (\(address)): +\(rise) ms over the hop before, and stays up to the last hop that answers.")
             }
             previous = ms
         }
         let lossy = hops.filter { $0.lossPercent >= 20 && $0.ttl < end.ttl }
         if !lossy.isEmpty, end.lossPercent < 20 {
-            return "No hop adds lasting delay. Hops \(lossy.map { String($0.ttl) }.joined(separator: ", ")) skip some replies, but later hops answer, so that's the routers rate-limiting probes, not loss."
+            return String(localized: "No hop adds lasting delay. Hops \(lossy.map { String($0.ttl) }.joined(separator: ", ")) skip some replies, but later hops answer, so that's the routers rate-limiting probes, not loss.")
         }
-        if end.lossPercent >= 20 { return String(format: "The last hop that answers missed %.0f%% of probes. Loss that carries on to the end is real; check it with a few more traces.", end.lossPercent) }
-        return "No hop adds lasting delay along this route."
+        if end.lossPercent >= 20 { return String(localized: "The last hop that answers missed \(String(format: "%.0f", end.lossPercent))% of probes. Loss that carries on to the end is real; check it with a few more traces.") }
+        return String(localized: "No hop adds lasting delay along this route.")
     }
 
     /// A table for the terminal.
     public var text: String {
-        var lines = ["\(host) · \(runs) trace\(runs == 1 ? "" : "s")" + (first.map { " since \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "") + (pathChanges > 0 ? " · route changed \(pathChanges) time\(pathChanges == 1 ? "" : "s")" : ""),
+        let traces = first.map { String(localized: "\(runs) traces since \($0.formatted(date: .abbreviated, time: .shortened))") } ?? String(localized: "\(runs) traces")
+        var lines = ["\(host) · " + traces + (pathChanges > 0 ? " · " + String(localized: "route changed \(pathChanges) times") : ""),
                      "Hop  Address            Loss   Best    Avg  Worst   Last"]
         func ms(_ value: Double?) -> String { value.map { String(format: "%5.0f", $0) } ?? "    —" }
         for hop in hops {

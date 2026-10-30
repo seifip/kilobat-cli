@@ -44,7 +44,7 @@ public enum ExpertTools {
         var args = ["+c", "0", "-nP", "-iTCP", "-iUDP", "-FpcPfnT"]
         if let pid { args += ["-a", "-p", String(pid)] }
         let result = await CommandRunner.run("/usr/sbin/lsof", args, timeout: 8)
-        guard result.status == 0 || result.status == 1 else { throw DiagnosticError("Socket inventory unavailable: \(result.output)") }
+        guard result.status == 0 || result.status == 1 else { throw DiagnosticError(String(localized: "Socket inventory unavailable: \(result.output)")) }
         return parseSockets(result.output)
     }
     public static func parseSockets(_ output: String, date: Date = Date()) -> [SocketDestination] {
@@ -74,10 +74,10 @@ public enum ExpertTools {
         if remote.hasPrefix("["), let end = remote.firstIndex(of: "]") { address = String(remote[remote.index(after: remote.startIndex)..<end]) }
         else if remote.filter({ $0 == ":" }).count == 1 { address = remote.components(separatedBy: ":").first ?? remote }
         else { address = remote }
-        guard validHost(address), address != "*" else { return "No remote address to resolve." }
+        guard validHost(address), address != "*" else { return String(localized: "No remote address to resolve.") }
         let result = await CommandRunner.run("/usr/bin/dig", ["-x", address, "+short", "+tries=1", "+time=2"], timeout: 3)
         let name = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "No reverse DNS name. IP ownership is unknown." : "Reverse DNS: " + name + " (not proof of ownership or the requested domain)"
+        return name.isEmpty ? String(localized: "No reverse DNS name. IP ownership is unknown.") : String(localized: "Reverse DNS: \(name) (not proof of ownership or the requested domain)")
     }
     public static func devices() async -> [LANDevice] {
         let result = await CommandRunner.run("/usr/sbin/arp", ["-an"], timeout: 5)
@@ -92,14 +92,14 @@ public enum ExpertTools {
     }
     public static func bonjour() async -> String {
         let result = await CommandRunner.run("/usr/bin/dns-sd", ["-B", "_services._dns-sd._udp", "local."], timeout: 5)
-        return result.output.isEmpty ? "No Bonjour service types observed. Local Network permission may be required." : result.output
+        return result.output.isEmpty ? String(localized: "No Bonjour service types observed. Local Network permission may be required.") : result.output
     }
     /// `queries` probes per hop: 1 for a quick look, 3 for the repeated traces route history compares.
     public static func route(to host: String, queries: Int = 1) async throws -> String {
-        guard validHost(host) else { throw DiagnosticError("Enter a hostname or IP address, without a URL or options.") }
+        guard validHost(host) else { throw DiagnosticError(String(localized: "Enter a hostname or IP address, without a URL or options.")) }
         let queries = min(max(queries, 1), 3)
         let result = await CommandRunner.run("/usr/sbin/traceroute", ["-n", "-m", "12", "-q", String(queries), "-w", "1", host], timeout: Double(12 * queries + 6))
-        return result.output + "\nIntermediate routers may ignore probes; * alone is not evidence of packet loss."
+        return result.output + "\n" + String(localized: "Intermediate routers may ignore probes; * alone is not evidence of packet loss.")
     }
     /// Several traces in a row with three probes per hop, handing each one over as it finishes so it can be saved.
     public static func routeRounds(to host: String, rounds: Int, each: @escaping @MainActor (String) -> Void) async throws {
@@ -134,18 +134,18 @@ public enum ExpertTools {
     }
     /// Five seconds of iperf3 against a server the person names and runs (`iperf3 -s`); `reverse` has the server send.
     public static func lanSpeed(host: String, reverse: Bool = false) async throws -> LANTestResult {
-        guard validHost(host) else { throw DiagnosticError("Enter the hostname or IP address of the device running iperf3 -s.") }
-        guard let executable = iperf3() else { throw DiagnosticError("iperf3 isn't installed on this Mac. Install it yourself (brew install iperf3), then run iperf3 -s on a second device. Kilobat never installs anything.") }
+        guard validHost(host) else { throw DiagnosticError(String(localized: "Enter the hostname or IP address of the device running iperf3 -s.")) }
+        guard let executable = iperf3() else { throw DiagnosticError(String(localized: "iperf3 isn't installed on this Mac. Install it yourself (brew install iperf3), then run iperf3 -s on a second device. Kilobat never installs anything.")) }
         let result = await CommandRunner.run(executable, ["-c", host, "-t", "5", "--connect-timeout", "3000", "-J"] + (reverse ? ["-R"] : []), timeout: 12)
         do { return try LANTestResult.parse(Data(result.output.utf8), host: host, reverse: reverse) }
         catch let error as DiagnosticError where result.status != 0 && !error.message.hasPrefix("iperf3:") {
-            throw DiagnosticError(result.output.isEmpty ? "The LAN test failed. Check that iperf3 -s runs on \(host) and its firewall lets port 5201 in." : result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw DiagnosticError(result.output.isEmpty ? String(localized: "The LAN test failed. Check that iperf3 -s runs on \(host) and its firewall lets port 5201 in.") : result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
     public static func encryptedDNSProfile(url: String) throws -> Data {
-        guard let endpoint = URL(string: url), endpoint.scheme == "https", endpoint.host != nil, endpoint.user == nil, endpoint.password == nil else { throw DiagnosticError("Enter an HTTPS DNS-over-HTTPS endpoint.") }
+        guard let endpoint = URL(string: url), endpoint.scheme == "https", endpoint.host != nil, endpoint.user == nil, endpoint.password == nil else { throw DiagnosticError(String(localized: "Enter an HTTPS DNS-over-HTTPS endpoint.")) }
         let payload: [String: Any] = ["PayloadType": "com.apple.dnsSettings.managed", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns.settings", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "DNSSettings": ["DNSProtocol": "HTTPS", "ServerURL": url]]
-        let profile: [String: Any] = ["PayloadType": "Configuration", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "PayloadDescription": "DNS-over-HTTPS. Review and install in System Settings. Remove this profile to restore previous DNS behavior. VPN/split DNS and captive portals may require disabling it.", "PayloadContent": [payload]]
+        let profile: [String: Any] = ["PayloadType": "Configuration", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "PayloadDescription": String(localized: "DNS-over-HTTPS. Review and install in System Settings. Remove this profile to restore previous DNS behavior. VPN/split DNS and captive portals may require disabling it."), "PayloadContent": [payload]]
         return try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
     }
 }

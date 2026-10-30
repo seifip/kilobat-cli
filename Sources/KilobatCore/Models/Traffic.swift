@@ -100,14 +100,18 @@ public struct UsageEntry: Codable, Identifiable {
 public enum NetworkProfile: String, Codable, CaseIterable, Identifiable {
     case travel = "Travel", work = "Work", unrestricted = "Unrestricted"
     public var id: String { rawValue }
+    /// The name as shown; `rawValue` is what rules and preferences store.
+    public var title: String {
+        switch self { case .travel: String(localized: "Travel", comment: "Profile name"); case .work: String(localized: "Work", comment: "Profile name"); case .unrestricted: String(localized: "Unrestricted", comment: "Profile name") }
+    }
     public var symbol: String {
         switch self { case .travel: "suitcase.rolling"; case .work: "laptopcomputer"; case .unrestricted: "globe" }
     }
     public var subtitle: String {
         switch self {
-        case .travel: "Only the essentials. Save your mobile data."
-        case .work: "Keep your work flowing. Pause distractions."
-        case .unrestricted: "Monitor every app. Allow every connection."
+        case .travel: String(localized: "Only the essentials. Save your mobile data.")
+        case .work: String(localized: "Keep your work flowing. Pause distractions.")
+        case .unrestricted: String(localized: "Monitor every app. Allow every connection.")
         }
     }
 }
@@ -126,7 +130,9 @@ public struct NetworkSession: Codable, Sendable {
 public enum NetworkCost: String, CaseIterable, Identifiable, Sendable {
     case automatic, metered, unmetered
     public var id: String { rawValue }
-    public var title: String { rawValue.capitalized }
+    public var title: String {
+        switch self { case .automatic: String(localized: "Automatic"); case .metered: String(localized: "Metered"); case .unmetered: String(localized: "Unmetered") }
+    }
     public func metered(os: Bool) -> Bool { self == .automatic ? os : self == .metered }
     /// For JSON: `metered` is what Kilobat acts on, `osMetered` what macOS says and `meteredSource` which of the two decided.
     public func fields(os: Bool) -> [String: Any] { ["metered": metered(os: os), "osMetered": os, "meteredSource": self == .automatic ? "macOS" : "you"] }
@@ -178,7 +184,7 @@ public enum TrafficFormat {
         if value < 1000 { return "\(value) B" } // ByteCountFormatter spells these out as "617 bytes"
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .decimal)
     }
-    public static func rate(_ value: Double) -> String { guard value.isFinite, value >= 0, value < Double(UInt64.max) else { return "—" }; return bytes(UInt64(value)) + "/s" }
+    public static func rate(_ value: Double) -> String { guard value.isFinite, value >= 0, value < Double(UInt64.max) else { return "—" }; return String(localized: "\(bytes(UInt64(value)))/s", comment: "A data rate, e.g. 3.2 MB/s") }
 }
 
 /// Compact usage history for scripts and agents: raw samples can run to megabytes. Totals and top apps count

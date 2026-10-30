@@ -11,17 +11,17 @@ public enum SystemDownloads {
     }
 
     public static let services: [Service] = [
-        Service(process: "nsurlsessiond", identifier: "com.apple.nsurlsessiond", detail: "Background transfers apps hand to macOS: podcasts, music, app content."),
-        Service(process: "mobileassetd", identifier: "com.apple.mobileassetd", detail: "System assets such as Apple Intelligence and Siri models, voices, fonts and dictionaries."),
-        Service(process: "com.apple.MobileAsset.DownloadService.Builtin", identifier: "com.apple.MobileAsset.DownloadService.Builtin", detail: "Downloads system assets for mobileassetd."),
-        Service(process: "softwareupdated", identifier: "com.apple.softwareupdated", detail: "macOS updates and Rapid Security Responses."),
-        Service(process: "appstored", identifier: "com.apple.appstored", detail: "App Store downloads and app updates."),
-        Service(process: "appstoreagent", identifier: "com.apple.appstoreagent", detail: "App Store downloads and app updates."),
-        Service(process: "storedownloadd", identifier: "com.apple.storedownloadd", detail: "App Store downloads and app updates."),
-        Service(process: "cloudd", identifier: "com.apple.cloudd", detail: "iCloud sync for apps that use CloudKit."),
-        Service(process: "bird", identifier: "com.apple.bird", detail: "iCloud Drive file sync."),
-        Service(process: "fileproviderd", identifier: "com.apple.fileproviderd", detail:"Files for cloud storage apps built on File Provider."),
-        Service(process: "AssetCache", identifier: "com.apple.AssetCache", detail: "Content Caching: Apple downloads kept for other devices on this network.")
+        Service(process: "nsurlsessiond", identifier: "com.apple.nsurlsessiond", detail: String(localized: "Background transfers apps hand to macOS: podcasts, music, app content.")),
+        Service(process: "mobileassetd", identifier: "com.apple.mobileassetd", detail: String(localized: "System assets such as Apple Intelligence and Siri models, voices, fonts and dictionaries.")),
+        Service(process: "com.apple.MobileAsset.DownloadService.Builtin", identifier: "com.apple.MobileAsset.DownloadService.Builtin", detail: String(localized: "Downloads system assets for mobileassetd.")),
+        Service(process: "softwareupdated", identifier: "com.apple.softwareupdated", detail: String(localized: "macOS updates and Rapid Security Responses.")),
+        Service(process: "appstored", identifier: "com.apple.appstored", detail: String(localized: "App Store downloads and app updates.")),
+        Service(process: "appstoreagent", identifier: "com.apple.appstoreagent", detail: String(localized: "App Store downloads and app updates.")),
+        Service(process: "storedownloadd", identifier: "com.apple.storedownloadd", detail: String(localized: "App Store downloads and app updates.")),
+        Service(process: "cloudd", identifier: "com.apple.cloudd", detail: String(localized: "iCloud sync for apps that use CloudKit.")),
+        Service(process: "bird", identifier: "com.apple.bird", detail: String(localized: "iCloud Drive file sync.")),
+        Service(process: "fileproviderd", identifier: "com.apple.fileproviderd", detail: String(localized: "Files for cloud storage apps built on File Provider.")),
+        Service(process: "AssetCache", identifier: "com.apple.AssetCache", detail: String(localized: "Content Caching: Apple downloads kept for other devices on this network."))
     ]
 
     /// The service an app row is, by its `process:` id or its name.

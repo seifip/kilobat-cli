@@ -13,7 +13,7 @@ public struct FrontmostCondition: Codable, Equatable, Sendable {
     public init(app: String, name: String, display: Bool, until: Date? = nil) {
         self.app = app; self.name = name; self.display = display; self.until = until
     }
-    public var title: String { "While \(name) is in front" }
+    public var title: String { String(localized: "While \(name) is in front") }
 }
 
 /// Which app came to the front and which quit, from the workspace's own activation events. No polling,

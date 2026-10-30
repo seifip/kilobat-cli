@@ -44,25 +44,31 @@ public struct StutterResult: Codable, Sendable {
 
     public var verdict: String {
         let peak = max.map { String(format: "%.0f ms", $0) } ?? "—"
-        let loss = pingLimited ? " \(local ? "The router" : "It") answered only some of the fast pings; that's rate limiting, not lost traffic."
-            : lossPercent >= 2 ? String(format: " %.0f%% of pings got no reply.", lossPercent) : ""
-        let place = local ? " on your local network" : ""
+        let loss = pingLimited ? " " + (local ? String(localized: "The router answered only some of the fast pings; that's rate limiting, not lost traffic.")
+                                              : String(localized: "It answered only some of the fast pings; that's rate limiting, not lost traffic."))
+            : lossPercent >= 2 ? " " + String(localized: "\(String(format: "%.0f", lossPercent))% of pings got no reply.") : ""
         switch pattern {
         case .noReplies:
-            return local ? "Your router didn't answer. Some routers ignore ping; try the internet target." : "No replies from \(host). It may not answer ping."
+            return local ? String(localized: "Your router didn't answer. Some routers ignore ping; try the internet target.") : String(localized: "No replies from \(host). It may not answer ping.")
         case .steady:
-            return (local ? "No spikes on your local network. If calls still stutter, the cause is likely beyond your network or in the app." : "No spikes. If calls still stutter, the cause is likely in the app or the service.") + loss
+            return (local ? String(localized: "No spikes on your local network. If calls still stutter, the cause is likely beyond your network or in the app.")
+                          : String(localized: "No spikes. If calls still stutter, the cause is likely in the app or the service.")) + loss
         case .few:
-            return "A few brief spikes\(place), up to \(peak). That happens on Wi-Fi now and then and rarely explains steady stutter." + loss
+            return (local ? String(localized: "A few brief spikes on your local network, up to \(peak). That happens on Wi-Fi now and then and rarely explains steady stutter.")
+                          : String(localized: "A few brief spikes, up to \(peak). That happens on Wi-Fi now and then and rarely explains steady stutter.")) + loss
         case .periodic:
-            let every = periodSeconds.map(StutterTest.every) ?? "at a regular interval"
+            let every = periodSeconds.map(StutterTest.every) ?? String(localized: "at a regular interval")
+            guard local else {
+                return String(localized: "Regular spikes \(every), up to \(peak).") + " " + String(localized: "Test your router too: if they show there, they start on your Wi-Fi.") + loss
+            }
             let link: String
-            if let awdl, awdl.available, !awdl.up { link = " AirDrop/AWDL was paused, so it isn't the cause here." }
-            else if let awdl, awdl.up, !awdl.users.isEmpty { link = " That pattern often comes from AirDrop/AWDL scanning, and the AirDrop link was in use by \(NearbyRadios.list(awdl.users)). Try the low-latency pause and run the test again." }
-            else { link = " That pattern often comes from AirDrop/AWDL scanning. Try the low-latency pause and run the test again." }
-            return "Regular spikes \(every)\(place), up to \(peak)." + (local ? link : " Test your router too: if they show there, they start on your Wi-Fi.") + loss
+            if let awdl, awdl.available, !awdl.up { link = String(localized: "AirDrop/AWDL was paused, so it isn't the cause here.") }
+            else if let awdl, awdl.up, !awdl.users.isEmpty { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning, and the AirDrop link was in use by \(NearbyRadios.list(awdl.users)). Try the low-latency pause and run the test again.") }
+            else { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning. Try the low-latency pause and run the test again.") }
+            return String(localized: "Regular spikes \(every) on your local network, up to \(peak).") + " " + link + loss
         case .irregular:
-            return "Spikes at irregular times\(place), up to \(peak). " + (local ? "A busy network, interference or weak signal is more likely than a scan cycle." : "Test your router too: if they don't show there, they come from beyond your network.") + loss
+            return (local ? String(localized: "Spikes at irregular times on your local network, up to \(peak).") + " " + String(localized: "A busy network, interference or weak signal is more likely than a scan cycle.")
+                          : String(localized: "Spikes at irregular times, up to \(peak).") + " " + String(localized: "Test your router too: if they don't show there, they come from beyond your network.")) + loss
         }
     }
 }
@@ -127,7 +133,7 @@ public enum StutterTest {
         return best?.period
     }
     public static func every(_ seconds: Double) -> String {
-        abs(seconds - 1) < 0.15 ? "about every second" : String(format: seconds < 10 ? "about every %.1f s" : "about every %.0f s", seconds)
+        abs(seconds - 1) < 0.15 ? String(localized: "about every second") : String(localized: "about every \(String(format: seconds < 10 ? "%.1f" : "%.0f", seconds)) s")
     }
     public static func analyze(_ samples: [Double?], target: String, host: String, interval: Double = interval, awdl: AWDLStatus? = nil, date: Date = Date()) -> StutterResult {
         let sorted = samples.compactMap { $0 }.sorted()
@@ -152,11 +158,11 @@ public enum StutterTest {
         switch target {
         case "router":
             let route = await CommandRunner.run("/sbin/route", ["-n", "get", "default"])
-            guard let gateway = DiagnosticProbe.matches("gateway:\\s+([^\\s]+)", in: route.output).first else { throw DiagnosticError("No router found. Connect to a network, or test the internet instead.") }
+            guard let gateway = DiagnosticProbe.matches("gateway:\\s+([^\\s]+)", in: route.output).first else { throw DiagnosticError(String(localized: "No router found. Connect to a network, or test the internet instead.")) }
             return gateway
         case "internet": return "1.1.1.1"
         default:
-            guard !target.hasPrefix("-"), !target.isEmpty, target.allSatisfy({ $0.isLetter || $0.isNumber || ".-:".contains($0) }) else { throw DiagnosticError("Use router, internet, or a host name or IP address.") }
+            guard !target.hasPrefix("-"), !target.isEmpty, target.allSatisfy({ $0.isLetter || $0.isNumber || ".-:".contains($0) }) else { throw DiagnosticError(String(localized: "Use router, internet, or a host name or IP address.")) }
             return target
         }
     }
@@ -188,10 +194,10 @@ public enum StutterTest {
     public static func comparison(before: StutterResult, after: StutterResult) -> String {
         let was = before.spikes.count, now = after.spikes.count
         let worst = { (result: StutterResult) in result.max.map { String(format: "%.0f ms", $0) } ?? "—" }
-        if was < 3 { return "There were few spikes to begin with (\(was) before, \(now) with the pause), so this can't tell much." }
-        if now <= was / 3 { return "With the pause on, spikes dropped from \(was) to \(now) and the worst ping from \(worst(before)) to \(worst(after)). Keep it on for your call or stream." }
-        if now * 3 >= was * 2 { return "Spikes stayed (\(was) before, \(now) with the pause), so AirDrop/AWDL is unlikely to be the cause here. You can restore it." }
-        return "Spikes went from \(was) to \(now) with the pause. Run the test once more to be sure."
+        if was < 3 { return String(localized: "There were few spikes to begin with (\(was) before, \(now) with the pause), so this can't tell much.") }
+        if now <= was / 3 { return String(localized: "With the pause on, spikes dropped from \(was) to \(now) and the worst ping from \(worst(before)) to \(worst(after)). Keep it on for your call or stream.") }
+        if now * 3 >= was * 2 { return String(localized: "Spikes stayed (\(was) before, \(now) with the pause), so AirDrop/AWDL is unlikely to be the cause here. You can restore it.") }
+        return String(localized: "Spikes went from \(was) to \(now) with the pause. Run the test once more to be sure.")
     }
 }
 

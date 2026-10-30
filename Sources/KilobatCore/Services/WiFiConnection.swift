@@ -67,10 +67,10 @@ private enum WiFiError: LocalizedError {
     case unavailable, rescan, notConnected, notDisconnected
     var errorDescription: String? {
         switch self {
-        case .unavailable: "No Wi-Fi interface is available."
-        case .rescan: "This network is no longer available. Refresh and try again."
-        case .notConnected: "The Mac did not join the selected network. Try again or open Wi-Fi Settings."
-        case .notDisconnected: "macOS kept the connection active. Use Wi-Fi Settings to disconnect."
+        case .unavailable: String(localized: "No Wi-Fi interface is available.")
+        case .rescan: String(localized: "This network is no longer available. Refresh and try again.")
+        case .notConnected: String(localized: "The Mac did not join the selected network. Try again or open Wi-Fi Settings.")
+        case .notDisconnected: String(localized: "macOS kept the connection active. Use Wi-Fi Settings to disconnect.")
         }
     }
 }

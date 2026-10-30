@@ -38,7 +38,7 @@ public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
         public let address: String?
         public let port: String?
         public init(host: String?, address: String?, port: String?) { self.host = host; self.address = address; self.port = port }
-        public var label: String { (host ?? address ?? "Unknown") + (port.map { ":" + $0 } ?? "") }
+        public var label: String { (host ?? address ?? String(localized: "Unknown", comment: "An unknown connection destination")) + (port.map { ":" + $0 } ?? "") }
     }
     /// The rule key: a bundle or signing identifier.
     public let app: String

@@ -42,7 +42,7 @@ public actor DiagnosticProbe {
                            channel: channel?.channelNumber, band: Self.band(channel?.channelBand))
     }
     public func scan() throws -> [NearbyNetwork] {
-        guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else { throw DiagnosticError("Wi-Fi is unavailable or switched off.") }
+        guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else { throw DiagnosticError(String(localized: "Wi-Fi is unavailable or switched off.")) }
         return try wifi.scanForNetworks(withSSID: nil).enumerated().map { index, network in
             NearbyNetwork(id: network.bssid ?? "hidden-\(index)", ssid: network.ssid ?? "Hidden network",
                           rssi: network.rssiValue, noise: network.noiseMeasurement,

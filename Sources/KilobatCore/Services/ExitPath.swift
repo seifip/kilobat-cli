@@ -46,32 +46,39 @@ public struct ExitPath: Codable, Sendable, Equatable {
 
     /// "utun3 (Tailscale)", "Wi-Fi (en0)", or the interface alone.
     public var interfaceLabel: String {
-        guard let interface else { return "no default route" }
-        if tunnel { return interface + (vpnName.map { " (\($0))" } ?? " (a VPN or tunnel)") }
+        guard let interface else { return String(localized: "no default route") }
+        if tunnel { return vpnName.map { "\(interface) (\($0))" } ?? String(localized: "\(interface) (a VPN or tunnel)") }
         // Some ports already carry the device: "Ethernet Adapter (en3)".
         return port.map { $0.contains("(\(interface))") ? $0 : "\($0) (\(interface))" } ?? interface
     }
 
     /// One line, saying only what was measured: "Traffic leaves through utun3 (Tailscale) · exit IP in Germany (registry data)".
     public var summary: String {
-        guard interface != nil else { return "No default route: this Mac isn't sending traffic to the internet." }
-        var line = "Traffic leaves through \(interfaceLabel)"
-        if vpn == .partial { line += " · \(vpnName ?? "a VPN") is connected but the default route doesn't use it, so only some destinations go through it" }
-        if let address = publicAddress {
-            line += address.countryName.map { " · exit IP in \($0) (registry data)" } ?? " · exit IP \(address.address), no registry country"
+        guard interface != nil else { return String(localized: "No default route: this Mac isn't sending traffic to the internet.") }
+        var parts = [String(localized: "Traffic leaves through \(interfaceLabel)")]
+        if vpn == .partial {
+            parts.append(vpnName.map { String(localized: "\($0) is connected but the default route doesn't use it, so only some destinations go through it") }
+                         ?? String(localized: "a VPN is connected but the default route doesn't use it, so only some destinations go through it"))
         }
-        return line
+        if let address = publicAddress {
+            parts.append(address.countryName.map { String(localized: "exit IP in \($0) (registry data)") } ?? String(localized: "exit IP \(address.address), no registry country"))
+        }
+        return parts.joined(separator: " · ")
     }
 
     /// The menu bar's short form: "On", "Split" or "Off", with the registry country code when the address was looked up.
     public var badge: String {
-        let state = switch vpn { case .full: "On"; case .partial: "Split"; case .off: "Off" }
+        let state = switch vpn {
+        case .full: String(localized: "On", comment: "VPN state in the menu bar")
+        case .partial: String(localized: "Split", comment: "VPN state in the menu bar: only some traffic goes through it")
+        case .off: String(localized: "Off", comment: "VPN state in the menu bar")
+        }
         return state + (publicAddress?.country.map { " " + $0 } ?? "")
     }
 
     /// What the registry country means, worded the same everywhere it's shown.
-    public static let registryNote = "The country is where the address is registered (DB-IP data, looked up on this Mac), not where you or the server are, and neither it nor a VPN shows that a connection is private or anonymous."
-    public static let lookupNote = "Asks Cloudflare (www.cloudflare.com/cdn-cgi/trace) which address your traffic comes from. Cloudflare sees that request, as any website you visit would."
+    public static let registryNote = String(localized: "The country is where the address is registered (DB-IP data, looked up on this Mac), not where you or the server are, and neither it nor a VPN shows that a connection is private or anonymous.")
+    public static let lookupNote = String(localized: "Asks Cloudflare (www.cloudflare.com/cdn-cgi/trace) which address your traffic comes from. Cloudflare sees that request, as any website you visit would.")
 
     // MARK: Reading
 
@@ -116,7 +123,7 @@ public struct ExitPath: Codable, Sendable, Equatable {
         defer { session.invalidateAndCancel() }
         let (data, response) = try await session.data(from: traceURL)
         guard (response as? HTTPURLResponse)?.statusCode == 200, let address = traceAddress(String(decoding: data, as: UTF8.self)) else {
-            throw DiagnosticError("Cloudflare didn't say which address it saw. Try again later.")
+            throw DiagnosticError(String(localized: "Cloudflare didn't say which address it saw. Try again later."))
         }
         return PublicAddress(address: address, country: GeoIP.shared.country(address)?.code)
     }
@@ -138,14 +145,18 @@ public struct ExitPath: Codable, Sendable, Equatable {
         var changes: [(kind: String, detail: String)] = []
         if previous.vpn != vpn {
             switch vpn {
-            case .full: changes.append(("VPN on", "Traffic now leaves through \(interfaceLabel)."))
-            case .partial: changes.append(("VPN on", "\(vpnName ?? "A VPN") connected; the default route still leaves through \(interface ?? "the network"), so only some destinations use it."))
-            case .off: changes.append(("VPN off", "Traffic now leaves through \(interfaceLabel)" + (previous.vpnName.map { "; \($0) is no longer connected." } ?? ".")))
+            case .full: changes.append(("VPN on", String(localized: "Traffic now leaves through \(interfaceLabel).")))
+            case .partial:
+                let route = interface ?? String(localized: "the network")
+                changes.append(("VPN on", vpnName.map { String(localized: "\($0) connected; the default route still leaves through \(route), so only some destinations use it.") }
+                                ?? String(localized: "A VPN connected; the default route still leaves through \(route), so only some destinations use it.")))
+            case .off: changes.append(("VPN off", previous.vpnName.map { String(localized: "Traffic now leaves through \(interfaceLabel); \($0) is no longer connected.") }
+                                       ?? String(localized: "Traffic now leaves through \(interfaceLabel).")))
             }
         }
         if let before = previous.publicAddress, let after = publicAddress, before.address != after.address {
-            func place(_ address: PublicAddress) -> String { address.address + (address.countryName.map { " (\($0), registry data)" } ?? "") }
-            changes.append(("Public IP changed", "From \(place(before)) to \(place(after))."))
+            func place(_ address: PublicAddress) -> String { address.countryName.map { String(localized: "\(address.address) (\($0), registry data)") } ?? address.address }
+            changes.append(("Public IP changed", String(localized: "From \(place(before)) to \(place(after)).")))
         }
         return changes
     }

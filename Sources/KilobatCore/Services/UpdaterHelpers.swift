@@ -22,22 +22,22 @@ public enum UpdaterHelpers {
     public static let reason = "Updater paused on a metered network"
 
     public static let helpers: [Helper] = [
-        Helper(id: "google", name: "Google Updater", detail: "Updates Chrome and other Google apps, including the older Keystone agent.", downloads: true,
+        Helper(id: "google", name: "Google Updater", detail: String(localized: "Updates Chrome and other Google apps, including the older Keystone agent."), downloads: true,
                identifiers: ["com.google.GoogleUpdater", "com.google.Keystone", "com.google.Keystone.Agent"], identifierPrefixes: [],
                processes: ["GoogleUpdater", "GoogleSoftwareUpdate", "GoogleSoftwareUpdateAgent"]),
-        Helper(id: "microsoft", name: "Microsoft AutoUpdate", detail: "Updates Office, Teams and other Microsoft apps.", downloads: true,
+        Helper(id: "microsoft", name: "Microsoft AutoUpdate", detail: String(localized: "Updates Office, Teams and other Microsoft apps."), downloads: true,
                identifiers: ["com.microsoft.autoupdate2", "com.microsoft.autoupdate.fba", "com.microsoft.autoupdate.cli"], identifierPrefixes: [],
                processes: ["Microsoft AutoUpdate", "Microsoft Update Assistant", "msupdate"]),
-        Helper(id: "macos", name: "macOS Software Update", detail: "macOS updates and Rapid Security Responses.", downloads: true,
+        Helper(id: "macos", name: "macOS Software Update", detail: String(localized: "macOS updates and Rapid Security Responses."), downloads: true,
                identifiers: ["com.apple.softwareupdated"], identifierPrefixes: [], processes: ["softwareupdated"]),
-        Helper(id: "app-store", name: "App Store downloads", detail: "App Store app updates and downloads; the App Store app itself still opens.", downloads: true,
+        Helper(id: "app-store", name: "App Store downloads", detail: String(localized: "App Store app updates and downloads; the App Store app itself still opens."), downloads: true,
                identifiers: ["com.apple.appstored", "com.apple.appstoreagent", "com.apple.storedownloadd"], identifierPrefixes: [],
                processes: ["appstored", "appstoreagent", "storedownloadd"]),
-        Helper(id: "sparkle-downloader", name: "Sparkle downloader", detail: "Downloads updates for sandboxed apps that hand them to Sparkle’s download service.", downloads: true,
+        Helper(id: "sparkle-downloader", name: "Sparkle downloader", detail: String(localized: "Downloads updates for sandboxed apps that hand them to Sparkle’s download service."), downloads: true,
                identifiers: ["org.sparkle-project.DownloaderService", "org.sparkle-project.Downloader"], identifierPrefixes: [], processes: []),
-        Helper(id: "sparkle", name: "Sparkle installer", detail: "Autoupdate and Updater.app install and relaunch apps that use Sparkle, after the app downloaded the update.", downloads: false,
+        Helper(id: "sparkle", name: "Sparkle installer", detail: String(localized: "Autoupdate and Updater.app install and relaunch apps that use Sparkle, after the app downloaded the update."), downloads: false,
                identifiers: ["Autoupdate", "org.sparkle-project.Sparkle.Updater"], identifierPrefixes: ["Autoupdate-"], processes: ["Autoupdate"]),
-        Helper(id: "squirrel", name: "Squirrel ShipIt", detail: "Installs updates for Electron apps after the app downloaded them.", downloads: false,
+        Helper(id: "squirrel", name: "Squirrel ShipIt", detail: String(localized: "Installs updates for Electron apps after the app downloaded them."), downloads: false,
                identifiers: ["ShipIt"], identifierPrefixes: [], processes: ["ShipIt"]),
     ]
 

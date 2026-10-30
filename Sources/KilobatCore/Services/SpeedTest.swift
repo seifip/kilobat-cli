@@ -17,19 +17,19 @@ public enum SpeedTest {
     public static func run(maximumBytes: Int = 80_000_000, streams: Int = 1, updates: @escaping @Sendable (SpeedTestUpdate) -> Void = { _ in }, progress: @escaping @Sendable (String) -> Void) async throws -> SpeedTestResult {
         let streams = min(max(streams, 1), 8)
         updates(SpeedTestUpdate(phase: .latency, fraction: 0, megabits: nil, bytes: 0))
-        progress("Measuring idle latency…")
+        progress(String(localized: "Measuring idle latency…"))
         async let exit = ExitPath.current()
         async let radio = DiagnosticProbe().radio()
         let baseline = await DiagnosticProbe.ping("1.1.1.1", count: 5)
         var context = SpeedTestContext(exit: await exit, radio: await radio)
         let before = InterfaceCounters.read()
         try Task.checkCancellation()
-        progress(streams == 1 ? "Measuring download and loaded latency…" : "Measuring download over \(streams) connections and loaded latency…")
+        progress(streams == 1 ? String(localized: "Measuring download and loaded latency…") : String(localized: "Measuring download over \(streams) connections and loaded latency…"))
         async let downPing = DiagnosticProbe.ping("1.1.1.1", count: 20)
         let down = try await transfer(upload: false, cap: max(1, maximumBytes * 4 / 5), streams: streams, updates: updates)
         let downloadLoaded = trim(await downPing, duration: down.seconds)
         try Task.checkCancellation()
-        progress(streams == 1 ? "Measuring upload and loaded latency…" : "Measuring upload over \(streams) connections and loaded latency…")
+        progress(streams == 1 ? String(localized: "Measuring upload and loaded latency…") : String(localized: "Measuring upload over \(streams) connections and loaded latency…"))
         async let upPing = DiagnosticProbe.ping("1.1.1.1", count: 20)
         let up = try await transfer(upload: true, cap: max(1, maximumBytes / 5), streams: streams, updates: updates)
         let uploadLoaded = trim(await upPing, duration: up.seconds)
@@ -65,11 +65,11 @@ public enum SpeedTest {
     /// How Kilobat's test measures, and why another speed test can show a different number.
     public static func method(streams: Int?) -> String {
         let how = (streams ?? 1) > 1
-            ? "\(streams!) HTTPS connections at once to Cloudflare’s nearest data center, 8 seconds each way and at most 80 MB in all."
-            : "One HTTPS connection at a time to Cloudflare’s nearest data center, 8 seconds each way and at most 80 MB."
-        return how + " Latency is a ping to 1.1.1.1 before and during the transfers."
+            ? String(localized: "\(streams!) HTTPS connections at once to Cloudflare’s nearest data center, 8 seconds each way and at most 80 MB in all.")
+            : String(localized: "One HTTPS connection at a time to Cloudflare’s nearest data center, 8 seconds each way and at most 80 MB.")
+        return how + " " + String(localized: "Latency is a ping to 1.1.1.1 before and during the transfers.")
     }
-    public static let otherTests = "Speedtest by Ookla, fast.com and macOS’s networkQuality open several connections at once, pick their own servers and run until the speed settles, so on fast or distant links they usually show more than one connection gets. One connection is closer to what a single download gets; several are closer to what the link can carry. Run both here to see how much that matters on your connection."
+    public static let otherTests = String(localized: "Speedtest by Ookla, fast.com and macOS’s networkQuality open several connections at once, pick their own servers and run until the speed settles, so on fast or distant links they usually show more than one connection gets. One connection is closer to what a single download gets; several are closer to what the link can carry. Run both here to see how much that matters on your connection.")
 
     private static func trim(_ ping: PingResult, duration: Double) -> PingResult {
         guard let offsets = ping.sampleOffsets, offsets.count == ping.samples.count else {
@@ -128,7 +128,7 @@ public enum SpeedTest {
                                 updates(SpeedTestUpdate(phase: phase, fraction: fraction, megabits: rate, bytes: total))
                             }
                         }
-                        guard received == count else { throw DiagnosticError("The server returned an unexpected transfer size. Test discarded.") }
+                        guard received == count else { throw DiagnosticError(String(localized: "The server returned an unexpected transfer size. Test discarded.")) }
                         tally.complete(stream, received)
                         bytes += received
                         let elapsed = max(0.001, Date().timeIntervalSince(start))

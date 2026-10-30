@@ -46,7 +46,7 @@ import Observation
                 } catch { self.finish(id, error: error.localizedDescription) }
             }
         }
-        Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.finish(id, error: "Filter event connection timed out.") }
+        Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.finish(id, error: String(localized: "Filter event connection timed out.")) }
     }
     private func finish(_ id: UUID, error: String?) {
         guard requestID == id else { return }

@@ -69,7 +69,7 @@ final class SpeedTransfer: NSObject, URLSessionDataDelegate, @unchecked Sendable
             return result
         }
         if let error { result.0?.resume(throwing: error) }
-        else if !(200..<300).contains(result.2) { result.0?.resume(throwing: DiagnosticError("The test server returned HTTP \(result.2). Try again.")) }
+        else if !(200..<300).contains(result.2) { result.0?.resume(throwing: DiagnosticError(String(localized: "The test server returned HTTP \(result.2). Try again."))) }
         else { result.0?.resume(returning: result.1) }
     }
 }

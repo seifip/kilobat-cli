@@ -9,7 +9,7 @@ public struct RouterReading: Codable, Sendable {
 public enum RouterCounters {
     public static func read(controlURL: String) async throws -> RouterReading {
         guard let url = URL(string: controlURL), ["http", "https"].contains(url.scheme), let host = url.host, url.user == nil, url.password == nil,
-              let address = IPv4PrivateAddress(host) else { throw DiagnosticError("Enter your router's private IPv4 UPnP WANCommonInterfaceConfig control URL, with no credentials.") }
+              let address = IPv4PrivateAddress(host) else { throw DiagnosticError(String(localized: "Enter your router's private IPv4 UPnP WANCommonInterfaceConfig control URL, with no credentials.")) }
         _ = address
         async let received = counter("GetTotalBytesReceived", field: "NewTotalBytesReceived", url: url)
         async let sent = counter("GetTotalBytesSent", field: "NewTotalBytesSent", url: url)
@@ -28,7 +28,7 @@ public enum RouterCounters {
         request.setValue("\"\(service)#\(action)\"", forHTTPHeaderField: "SOAPAction")
         request.httpBody = Data("<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:\(action) xmlns:u=\"\(service)\"/></s:Body></s:Envelope>".utf8)
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 65536 else { throw DiagnosticError("Router does not expose this counter at that control URL.") }
+        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 65536 else { throw DiagnosticError(String(localized: "Router does not expose this counter at that control URL.")) }
         return try parse(data, field: field)
     }
     public static func parse(_ data: Data, field: String) throws -> UInt64 {
@@ -40,7 +40,7 @@ public enum RouterCounters {
             func parser(_ parser: XMLParser, didEndElement name: String, namespaceURI: String?, qualifiedName: String?) { inside = false }
         }
         let reader = Reader(field), parser = XMLParser(data: data); parser.delegate = reader; parser.shouldResolveExternalEntities = false
-        guard parser.parse(), let value = UInt64(reader.value.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw DiagnosticError("Router returned no valid byte counter.") }
+        guard parser.parse(), let value = UInt64(reader.value.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw DiagnosticError(String(localized: "Router returned no valid byte counter.")) }
         return value
     }
 }

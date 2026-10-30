@@ -11,7 +11,16 @@ enum ConnectionProbe {
         let kind: String
         let expensive: Bool
         var vpn: Bool { kind == "VPN" }
-        var label: String { "\(kind) (\(name)\(expensive ? ", metered" : ""))" }
+        /// `kind` stays English, as it's compared; `label` is how it's shown.
+        var label: String {
+            let shown = switch kind {
+            case "Cellular": String(localized: "Cellular", comment: "A network interface's kind")
+            case "this Mac": String(localized: "this Mac", comment: "A network interface's kind: loopback")
+            case "Other": String(localized: "Other", comment: "A network interface's kind")
+            default: kind
+            }
+            return expensive ? String(localized: "\(shown) (\(name), metered)") : "\(shown) (\(name))"
+        }
 
         init(name: String, kind: String, expensive: Bool = false) { self.name = name; self.kind = kind; self.expensive = expensive }
         init(_ interface: NWInterface, expensive: Bool) {
@@ -72,7 +81,7 @@ enum ConnectionProbe {
         parameters.preferNoProxies = true
         if let interface { parameters.requiredInterface = interface }
         (parameters.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options)?.version = version
-        guard let port = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { return Attempt(outcome: .failed("invalid port")) }
+        guard let port = NWEndpoint.Port(rawValue: UInt16(clamping: port)) else { return Attempt(outcome: .failed(String(localized: "invalid port"))) }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
         return await withCheckedContinuation { continuation in
             @Sendable func finish(_ outcome: Attempt.Outcome) {
@@ -109,8 +118,8 @@ enum ConnectionProbe {
         case .posix(.ETIMEDOUT): .timedOut
         case .posix(let code): .failed(String(cString: strerror(code.rawValue)).lowercased())
         case .dns(let code) where code == -65554: .noAddress
-        case .dns(let code): .failed("DNS error \(code)")
-        case .tls(let status): .tlsFailed((SecCopyErrorMessageString(status, nil) as String?).map { $0.prefix(1).lowercased() + $0.dropFirst() } ?? "error \(status)")
+        case .dns(let code): .failed(String(localized: "DNS error \(code)"))
+        case .tls(let status): .tlsFailed((SecCopyErrorMessageString(status, nil) as String?).map { $0.prefix(1).lowercased() + $0.dropFirst() } ?? String(localized: "error \(status)"))
         default: .failed(error.debugDescription)
         }
     }
@@ -398,7 +407,7 @@ enum ConnectionProbe {
     struct Resolver: Sendable, Equatable {
         let server: String
         var domain: String?
-        var description: String { server + (domain.map { ", the private resolver for \($0)" } ?? "") }
+        var description: String { domain.map { String(localized: "\(server), the private resolver for \($0)") } ?? server }
     }
 
     /// A split-DNS resolver whose domain matches the host, the longest match first, else the default one.

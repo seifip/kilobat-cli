@@ -3,25 +3,26 @@ import Foundation
 /// Explicit expert operations; no capture or scan runs as part of background monitoring.
 public enum DiagnosticHandoff {
     public static func httpTiming(url: String) async throws -> String {
-        guard let endpoint = URL(string: url), ["http", "https"].contains(endpoint.scheme), endpoint.host != nil, endpoint.user == nil, endpoint.password == nil else { throw DiagnosticError("Use an HTTP or HTTPS URL without credentials.") }
+        guard let endpoint = URL(string: url), ["http", "https"].contains(endpoint.scheme), endpoint.host != nil, endpoint.user == nil, endpoint.password == nil else { throw DiagnosticError(String(localized: "Use an HTTP or HTTPS URL without credentials.")) }
         let format = "HTTP %{http_code}\nDNS %{time_namelookup}s\nConnect %{time_connect}s\nTLS %{time_appconnect}s\nFirst byte %{time_starttransfer}s\nTotal %{time_total}s\n"
         let result = await CommandRunner.run("/usr/bin/curl", ["--head", "--silent", "--show-error", "--max-time", "10", "--output", "/dev/null", "--write-out", format, "--", url], timeout: 12)
         guard result.status == 0 else { throw DiagnosticError(result.output) }
-        return result.output + "Cumulative request timings; no decryption proxy or response body captured."
+        return result.output + String(localized: "Cumulative request timings; no decryption proxy or response body captured.")
     }
     public static func browseBonjour(type: String) async throws -> String {
-        guard type.range(of: #"^_[a-zA-Z0-9-]+\._(tcp|udp)$"#, options: .regularExpression) != nil else { throw DiagnosticError("Use a Bonjour service type such as _ipp._tcp.") }
+        guard type.range(of: #"^_[a-zA-Z0-9-]+\._(tcp|udp)$"#, options: .regularExpression) != nil else { throw DiagnosticError(String(localized: "Use a Bonjour service type such as _ipp._tcp.")) }
         let result = await CommandRunner.run("/usr/bin/dns-sd", ["-B", type, "local."], timeout: 6)
-        return result.output.isEmpty ? "No service instances observed. Check Local Network permission." : result.output
+        return result.output.isEmpty ? String(localized: "No service instances observed. Check Local Network permission.") : result.output
     }
     public static func signature(pid: Int32) async throws -> String {
-        guard pid > 0 else { throw DiagnosticError("Invalid process ID.") }
+        guard pid > 0 else { throw DiagnosticError(String(localized: "Invalid process ID.")) }
         let files = await CommandRunner.run("/usr/sbin/lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"], timeout: 4)
-        guard let executable = files.output.split(separator: "\n").first(where: { $0.hasPrefix("n/") }) else { throw DiagnosticError("Executable path unavailable; the process may have exited.") }
+        guard let executable = files.output.split(separator: "\n").first(where: { $0.hasPrefix("n/") }) else { throw DiagnosticError(String(localized: "Executable path unavailable; the process may have exited.")) }
         let path = String(executable.dropFirst())
         let result = await CommandRunner.run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", path], timeout: 8)
         let details = await CommandRunner.run("/usr/bin/codesign", ["-d", "--verbose=2", path], timeout: 8)
-        return "\(path)\nVerification: \(result.status == 0 ? "passed" : "failed or unsigned")\n\(result.output)\n\(details.output)\nA valid signature identifies signed code; it does not establish that its network activity is safe."
+        let verification = result.status == 0 ? String(localized: "Verification: passed") : String(localized: "Verification: failed or unsigned")
+        return [path, verification, result.output, details.output, String(localized: "A valid signature identifies signed code; it does not establish that its network activity is safe.")].joined(separator: "\n")
     }
     public static func discoverHosts(target: String) async throws -> String {
         // Deliberately restrict discovery to private IPv4 ranges, with at most 256 addresses.
@@ -29,13 +30,13 @@ public enum DiagnosticHandoff {
         let octets = pieces.first?.split(separator: ".").compactMap { Int($0) } ?? []
         guard pieces.count <= 2, octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }),
               octets[0] == 10 || (octets[0] == 192 && octets[1] == 168) || (octets[0] == 172 && (16...31).contains(octets[1])),
-              pieces.count == 1 || Int(pieces[1]).map({ (24...32).contains($0) }) == true else { throw DiagnosticError("Enter a private IPv4 address or a /24…/32 private subnet.") }
-        guard let binary = ["/opt/homebrew/bin/nmap", "/usr/local/bin/nmap"].first(where: FileManager.default.isExecutableFile) else { throw DiagnosticError("Install nmap separately to use host discovery. No scanner is bundled.") }
+              pieces.count == 1 || Int(pieces[1]).map({ (24...32).contains($0) }) == true else { throw DiagnosticError(String(localized: "Enter a private IPv4 address or a /24…/32 private subnet.")) }
+        guard let binary = ["/opt/homebrew/bin/nmap", "/usr/local/bin/nmap"].first(where: FileManager.default.isExecutableFile) else { throw DiagnosticError(String(localized: "Install nmap separately to use host discovery. No scanner is bundled.")) }
         let result = await CommandRunner.run(binary, ["-sn", "-n", "--max-retries", "1", "--host-timeout", "3s", target], timeout: 30)
-        return result.output.isEmpty ? "No discovery output. Check local network access." : result.output
+        return result.output.isEmpty ? String(localized: "No discovery output. Check local network access.") : result.output
     }
     public static func capture(interface: String, destination: URL) async throws {
-        guard ExpertTools.interfaces().contains(where: { $0.name == interface }), destination.isFileURL else { throw DiagnosticError("Select an existing interface and a local output file.") }
+        guard ExpertTools.interfaces().contains(where: { $0.name == interface }), destination.isFileURL else { throw DiagnosticError(String(localized: "Select an existing interface and a local output file.")) }
         // Bounded packet count plus an independent 15-second deadline. Payloads are
         // truncated to 96 bytes; even headers may contain private information.
         let quote = DNSService.shellQuote
@@ -50,7 +51,7 @@ public enum DiagnosticHandoff {
         /usr/bin/base64 -i "$capture_file"
         """
         let encoded = try await NetworkTools.administrator(command)
-        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters), data.count >= 24 else { throw DiagnosticError("Capture produced no valid file.") }
+        guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters), data.count >= 24 else { throw DiagnosticError(String(localized: "Capture produced no valid file.")) }
         try data.write(to: destination, options: .atomic)
     }
 }

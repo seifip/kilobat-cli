@@ -12,7 +12,8 @@ public struct LidLease: Codable, Equatable, Sendable {
     }
     /// "until 18:30 · releases at 20% battery".
     public var summary: String {
-        "until " + until.formatted(date: .omitted, time: .shortened) + " · " + (onlyOnAC ? "on power only" : "releases at \(batteryFloor)% battery")
+        let time = until.formatted(date: .omitted, time: .shortened)
+        return onlyOnAC ? String(localized: "until \(time) · on power only") : String(localized: "until \(time) · releases at \(batteryFloor)% battery")
     }
 }
 

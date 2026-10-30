@@ -14,18 +14,19 @@ public struct LANTestResult: Codable, Sendable, Equatable {
     public let retransmits: Int?
 
     public var summary: String {
-        let verb = direction == "upload" ? "This Mac → \(host)" : "\(host) → this Mac"
-        return String(format: "%@: %.0f Mbps received over %.0f s", verb, receivedMbps, seconds) + (streams > 1 ? " on \(streams) streams" : "")
-            + (retransmits.map { " · \($0) retransmissions" } ?? "") + " · \(TrafficFormat.bytes(UInt64(max(0, bytes)))) moved"
-            + ". Measures the path between the two devices, not your internet connection."
+        let mbps = String(format: "%.0f", receivedMbps), time = String(format: "%.0f", seconds), moved = TrafficFormat.bytes(UInt64(max(0, bytes)))
+        var text = direction == "upload" ? String(localized: "This Mac → \(host): \(mbps) Mbps received over \(time) s") : String(localized: "\(host) → this Mac: \(mbps) Mbps received over \(time) s")
+        if streams > 1 { text += " " + String(localized: "on \(streams) streams") }
+        if let retransmits { text += " · " + String(localized: "\(retransmits) retransmissions") }
+        return text + " · " + String(localized: "\(moved) moved") + ". " + String(localized: "Measures the path between the two devices, not your internet connection.")
     }
 
     /// Reads iperf3's JSON. An `error` in it becomes the thrown message.
     public static func parse(_ data: Data, host: String, reverse: Bool) throws -> LANTestResult {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DiagnosticError("iperf3 didn't return a result.") }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw DiagnosticError(String(localized: "iperf3 didn't return a result.")) }
         if let error = object["error"] as? String { throw DiagnosticError("iperf3: \(error)") }
         guard let end = object["end"] as? [String: Any], let sent = end["sum_sent"] as? [String: Any], let received = end["sum_received"] as? [String: Any] else {
-            throw DiagnosticError("iperf3's result has no totals.")
+            throw DiagnosticError(String(localized: "iperf3's result has no totals."))
         }
         func number(_ dictionary: [String: Any], _ key: String) -> Double { (dictionary[key] as? NSNumber)?.doubleValue ?? 0 }
         let start = object["start"] as? [String: Any], test = start?["test_start"] as? [String: Any]

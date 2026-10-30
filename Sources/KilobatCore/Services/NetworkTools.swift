@@ -17,7 +17,7 @@ public enum NetworkTools {
 /// One AWDL pause: how long it may last and what ends it. Pure, so the restore rules are testable.
 public struct LowLatencyHold: Codable, Sendable, Equatable {
     public static let longest: TimeInterval = 4 * 3600
-    public static let lengths: [(title: String, seconds: TimeInterval)] = [("15 minutes", 900), ("1 hour", 3600), ("2 hours", 7200)]
+    public static let lengths: [(title: String, seconds: TimeInterval)] = [(String(localized: "15 minutes"), 900), (String(localized: "1 hour"), 3600), (String(localized: "2 hours"), 7200)]
     public let started: Date
     public let expires: Date
     public let appPID: Int32?
@@ -38,9 +38,9 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
     /// Two-second watchdog ticks before the hard limit.
     public var ticks: Int { Int((expires.timeIntervalSince(started) / 2).rounded(.up)) }
     public func label(now: Date = Date()) -> String {
-        if let appName { return "until \(appName) quits" }
+        if let appName { return String(localized: "until \(appName) quits") }
         let minutes = Int((expires.timeIntervalSince(now) / 60).rounded(.up))
-        return minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min left" : "\(max(1, minutes)) min left"
+        return minutes >= 60 ? String(localized: "\(minutes / 60) h \(minutes % 60) min left") : String(localized: "\(max(1, minutes)) min left")
     }
     /// "15m", "1h", "2h" or "90m"; nil above four hours.
     public static func seconds(_ text: String) -> TimeInterval? {
@@ -97,7 +97,7 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
     public func enable(seconds: TimeInterval? = 900, app: (pid: Int32, name: String)? = nil) async {
         guard !busy, !active else { return }
         busy = true; defer { busy = false }
-        guard await Self.isUp() == true else { error = "AWDL is unavailable or already paused. Kilobat has not changed it."; return }
+        guard await Self.isUp() == true else { error = String(localized: "AWDL is unavailable or already paused. Kilobat has not changed it."); return }
         let hold = LowLatencyHold(seconds: seconds, app: app)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-awdl-\(UUID().uuidString)")
         do {
@@ -124,7 +124,7 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
             hold.saveMarker()
             try await NetworkTools.administrator(command)
             try await Task.sleep(for: .seconds(1))
-            guard await Self.isUp() == false else { throw DiagnosticError("AWDL did not pause. No low-latency mode is active.") }
+            guard await Self.isUp() == false else { throw DiagnosticError(String(localized: "AWDL did not pause. No low-latency mode is active.")) }
             active = true; self.hold = hold
             watcher = Task { [weak self] in
                 while !Task.isCancelled {
@@ -159,7 +159,7 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
         busy = true; defer { busy = false }
         release()
         try? await Task.sleep(for: .seconds(3))
-        guard await Self.isUp() == true else { error = "AWDL has not restored yet. Retry Restore AWDL; macOS may ask for administrator approval."; return }
+        guard await Self.isUp() == true else { error = String(localized: "AWDL has not restored yet. Retry Restore AWDL; macOS may ask for administrator approval."); return }
         finish()
     }
     public func restore() async {
@@ -181,7 +181,7 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
         case .none: return
         case .clear: LowLatencyHold.clearMarker()
         case .restore:
-            do { try await Self.forceRestore(reason: "Kilobat restores AirDrop (AWDL), which stayed paused after an earlier low-latency session ended unexpectedly.") }
+            do { try await Self.forceRestore(reason: String(localized: "Kilobat restores AirDrop (AWDL), which stayed paused after an earlier low-latency session ended unexpectedly.")) }
             catch { self.error = error.localizedDescription }
         }
     }

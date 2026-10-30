@@ -14,7 +14,7 @@ public final class TrafficStore {
     public var connected = false
     /// What macOS says about the current path; `metered` is what Kilobat acts on.
     public var osExpensive = false
-    public var networkKind = "Connecting"
+    public var networkKind = String(localized: "Connecting")
     public var ready = false
     public var error: String?
     public var search = ""
@@ -195,6 +195,12 @@ public final class TrafficStore {
     /// Rule keys of apps whose quota for this network is used up, for the filter.
     public var quotaReached: [String] {
         Array(Set((preferences.quotas ?? []).filter { $0.applies(to: networkKey) && quotaUsed($0) >= $0.bytes }.flatMap(\.apps))).sorted()
+    }
+    /// Today's Internet bytes on every network, with what isn't saved yet, and the same by hour.
+    public func today(now: Date = Date(), calendar: Calendar = .current) -> (received: UInt64, sent: UInt64, hours: [UInt64]) {
+        let entries = usage.filter { $0.date >= calendar.startOfDay(for: now) && $0.date <= now }
+        return (entries.reduce(pendingReceived) { $0 + $1.received }, entries.reduce(pendingSent) { $0 + $1.sent },
+                WidgetSnapshot.hours(entries, pending: pendingReceived + pendingSent, now: now, calendar: calendar))
     }
     public func uploadAnomalies(now: Date = Date()) -> [UploadAnomaly] { UploadAnomaly.detect(usage, pending: pendingAppsSent, now: now) }
     public var allowedCount: Int { apps.filter { isAllowed($0.id) }.count }
@@ -494,7 +500,7 @@ public final class TrafficStore {
     }
     private func persist<T: Encodable>(_ value: T, as name: String) {
         do { try JSONEncoder().encode(value).write(to: directory.appendingPathComponent(name), options: .atomic) }
-        catch { self.error = "Could not save local data: \(error.localizedDescription)" }
+        catch { self.error = String(localized: "Could not save local data: \(error.localizedDescription)") }
     }
     public func exportCSV() {
         flush()

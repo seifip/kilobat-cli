@@ -12,10 +12,10 @@ public enum AwakeMode: Codable, Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .timer(let until): "Until " + until.formatted(date: .omitted, time: .shortened)
-        case .untilQuiet(nil, _): "Until downloads finish"
-        case .untilQuiet(_, let name): "Until \(name) finishes"
-        case .indefinite: "Until you turn it off"
+        case .timer(let until): String(localized: "Until \(until.formatted(date: .omitted, time: .shortened))")
+        case .untilQuiet(nil, _): String(localized: "Until downloads finish")
+        case .untilQuiet(_, let name): String(localized: "Until \(name) finishes")
+        case .indefinite: String(localized: "Until you turn it off")
         }
     }
 }
@@ -70,8 +70,12 @@ public struct WorkSession: Codable, Identifiable, Equatable, Sendable {
     /// "codex 0.52.0 from npm (node 22.3.0) · /opt/homebrew/bin/codex is another install".
     public var install: String? {
         guard let executable else { return nil }
-        var text = URL(fileURLWithPath: executable).lastPathComponent + (version.map { " " + $0 } ?? "") + (origin.map { " from " + $0 } ?? " at " + executable)
-        if let others = otherInstalls, !others.isEmpty { text += " · " + others.joined(separator: ", ") + (others.count == 1 ? " is another install" : " are other installs") }
+        let name = URL(fileURLWithPath: executable).lastPathComponent + (version.map { " " + $0 } ?? "")
+        var text = origin.map { String(localized: "\(name) from \($0)", comment: "An agent's executable and where it was installed from, e.g. “codex 0.52.0 from npm”") } ?? String(localized: "\(name) at \(executable)")
+        if let others = otherInstalls, !others.isEmpty {
+            let list = others.joined(separator: ", ")
+            text += " · " + (others.count == 1 ? String(localized: "\(list) is another install") : String(localized: "\(list) are other installs"))
+        }
         return text
     }
     mutating func describe(_ install: AgentInstall) {
@@ -88,11 +92,11 @@ public struct WorkSession: Codable, Identifiable, Equatable, Sendable {
         return (hooks != true && total < 256_000) || (worked < 60 && total < 1_000_000)
     }
     public var summary: String {
-        let length = duration < 60 ? "under a minute" : Duration.seconds(duration.rounded()).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 2))
+        let length = duration < 60 ? String(localized: "under a minute") : Duration.seconds(duration.rounded()).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 2))
         var parts = [length,
                      "↓ " + TrafficFormat.bytes(received) + "  ↑ " + TrafficFormat.bytes(sent)]
-        if !events.isEmpty { parts.append(events.count == 1 ? "1 network change" : "\(events.count) network changes") }
-        if let start = batteryStart, let end = batteryEnd, start > end { parts.append("battery −\(start - end)%") }
+        if !events.isEmpty { parts.append(events.count == 1 ? String(localized: "1 network change") : String(localized: "\(events.count) network changes")) }
+        if let start = batteryStart, let end = batteryEnd, start > end { parts.append(String(localized: "battery −\(start - end)%")) }
         return parts.joined(separator: " · ")
     }
 }
@@ -102,12 +106,12 @@ public enum AgentState: String, Codable, Sendable {
     case working, waitingForYou, done, stalled, networkFailed, failed
     public var title: String {
         switch self {
-        case .working: "working"
-        case .waitingForYou: "waiting for you"
-        case .done: "done"
-        case .stalled: "stalled"
-        case .networkFailed: "network failed"
-        case .failed: "failed"
+        case .working: String(localized: "working", comment: "An AI agent's state")
+        case .waitingForYou: String(localized: "waiting for you", comment: "An AI agent's state")
+        case .done: String(localized: "done", comment: "An AI agent's state")
+        case .stalled: String(localized: "stalled", comment: "An AI agent's state")
+        case .networkFailed: String(localized: "network failed", comment: "An AI agent's state")
+        case .failed: String(localized: "failed", comment: "An AI agent's state")
         }
     }
 }
@@ -189,7 +193,7 @@ public enum AgentCatalog {
     /// The person turned the plugged-in session off; it starts again at the next plug-in, not before. Kept across
     /// relaunches until the Mac restarts, since Kilobat can't see a plug-in while it isn't running.
     public private(set) var powerSuppressed: Bool { didSet { defaults.set(powerSuppressed ? Date() : nil, forKey: "awake.powerOff") } }
-    public static let pluggedInTitle = "While plugged in"
+    public static let pluggedInTitle = String(localized: "While plugged in")
     /// The awake session's title: "While plugged in" for one the power adapter started, else its mode's.
     public var awakeTitle: String? { awakeByPower ? Self.pluggedInTitle : mode?.title }
 
@@ -371,7 +375,7 @@ public enum AgentCatalog {
         for key in Array(agents.keys) {
             agents[key]?.events.append(event)
             guard let run = agents[key] else { continue }
-            if !outage { alert("Network changed while \(run.title) was working", "\(event). If it stops responding, it may need a nudge or a restart.") }
+            if !outage { alert(String(localized: "Network changed while \(run.title) was working"), String(localized: "\(event). If it stops responding, it may need a nudge or a restart.")) }
             // An agent waiting for an answer isn't using the network.
             else if run.state != .waitingForYou { change(key, to: .networkFailed, detail: event, now: now) }
         }
@@ -527,7 +531,7 @@ public enum AgentCatalog {
         return usage
     }
 
-    static func background(_ count: Int) -> String { count == 1 ? "1 background task still running" : "\(count) background tasks still running" }
+    static func background(_ count: Int) -> String { count == 1 ? String(localized: "1 background task still running") : String(localized: "\(count) background tasks still running") }
 
     /// Of runs that share processes, the one working, else the one heard from last.
     private func rank(_ key: String) -> (Int, Date) {
@@ -546,16 +550,42 @@ public enum AgentCatalog {
         agents[key]?.state = state
         if state == .waitingForYou { waitingSince[key] = now }
         switch state {
-        case .waitingForYou where detail?.hasPrefix("Rate-limited") == true: alert(Self.headline(run, "is rate-limited"), (detail ?? "") + ". Continue it once the limit resets.", session: agents[key])
-        case .waitingForYou: alert(Self.headline(run, "is waiting for you"), detail ?? "It needs your answer to go on.", session: agents[key])
-        case .networkFailed: alert(Self.headline(run, "lost the network"), (detail ?? "The network dropped") + ". If it stops responding, it may need a nudge or a restart.", session: agents[key])
+        case .waitingForYou where detail?.hasPrefix("Rate-limited") == true:
+            alert(Self.headline(run, .rateLimited), String(localized: "\(detail ?? ""). Continue it once the limit resets."), session: agents[key])
+        case .waitingForYou: alert(Self.headline(run, .waiting), detail ?? String(localized: "It needs your answer to go on."), session: agents[key])
+        case .networkFailed:
+            alert(Self.headline(run, .lostNetwork), detail.map { String(localized: "\($0). If it stops responding, it may need a nudge or a restart.") }
+                  ?? String(localized: "The network dropped. If it stops responding, it may need a nudge or a restart."), session: agents[key])
         default: break
         }
         updateAssertion(now: now)
     }
 
+    enum Headline { case rateLimited, waiting, lostNetwork, wentQuiet, finished, failed, stopped }
     /// "Claude Code is waiting for you in kilobat".
-    static func headline(_ run: WorkSession, _ what: String) -> String { run.title + " " + what + (run.project.map { " in " + $0 } ?? "") }
+    static func headline(_ run: WorkSession, _ what: Headline) -> String {
+        let agent = run.title
+        guard let project = run.project else {
+            switch what {
+            case .rateLimited: return String(localized: "\(agent) is rate-limited")
+            case .waiting: return String(localized: "\(agent) is waiting for you")
+            case .lostNetwork: return String(localized: "\(agent) lost the network")
+            case .wentQuiet: return String(localized: "\(agent) went quiet")
+            case .finished: return String(localized: "\(agent) finished")
+            case .failed: return String(localized: "\(agent) stopped with an error")
+            case .stopped: return String(localized: "\(agent) stopped")
+            }
+        }
+        switch what {
+        case .rateLimited: return String(localized: "\(agent) is rate-limited in \(project)")
+        case .waiting: return String(localized: "\(agent) is waiting for you in \(project)")
+        case .lostNetwork: return String(localized: "\(agent) lost the network in \(project)")
+        case .wentQuiet: return String(localized: "\(agent) went quiet in \(project)")
+        case .finished: return String(localized: "\(agent) finished in \(project)")
+        case .failed: return String(localized: "\(agent) stopped with an error in \(project)")
+        case .stopped: return String(localized: "\(agent) stopped in \(project)")
+        }
+    }
 
     private func add(_ apps: [AppTraffic], to session: inout WorkSession, interval: TimeInterval, power: PowerState) {
         for app in apps where app.rate > 0 {
@@ -579,10 +609,11 @@ public enum AgentCatalog {
         archive(session)
         switch reason {
         // Quiet is never called finished: without hooks, Kilobat can't tell done from waiting.
-        case "Went quiet": alert(Self.headline(session, "went quiet"), "Its traffic and CPU went quiet: it may be done or waiting for you. " + session.summary, session: session)
-        case "Finished": alert(Self.headline(session, "finished"), session.summary, session: session)
-        case _ where reason.hasPrefix("Failed"): alert(Self.headline(session, "stopped with an error"), (reason == "Failed" ? "" : reason.dropFirst(8) + ". ") + session.summary, session: session)
-        default: alert(Self.headline(session, "stopped"), session.summary, session: session)
+        case "Went quiet": alert(Self.headline(session, .wentQuiet), String(localized: "Its traffic and CPU went quiet: it may be done or waiting for you. \(session.summary)"), session: session)
+        case "Finished": alert(Self.headline(session, .finished), session.summary, session: session)
+        case _ where reason.hasPrefix("Failed"):
+            alert(Self.headline(session, .failed), reason == "Failed" ? session.summary : String(localized: "\(String(reason.dropFirst(8))). \(session.summary)"), session: session)
+        default: alert(Self.headline(session, .stopped), session.summary, session: session)
         }
     }
 
@@ -594,7 +625,7 @@ public enum AgentCatalog {
         updateAssertion(now: now)
         archive(session)
         if !["Turned off", "Replaced", "Unplugged"].contains(reason) {
-            alert(reason == "Went quiet" ? "Done. Your Mac can sleep again" : "Awake timer ended", "Stayed awake " + session.summary, session: session)
+            alert(reason == "Went quiet" ? String(localized: "Done. Your Mac can sleep again") : String(localized: "Awake timer ended"), String(localized: "Stayed awake \(session.summary)"), session: session)
         }
     }
 
@@ -626,7 +657,7 @@ public enum AgentCatalog {
         let power = power ?? readPower()
         if !power.onAC, let percent = power.batteryPercent, percent <= lidBatteryFloor {
             endFrontmost("Battery at \(percent)%")
-            alert("Let the Mac sleep: battery at \(percent)%", "Kilobat stopped keeping it awake while \(condition.name) is in front.")
+            alert(String(localized: "Let the Mac sleep: battery at \(percent)%"), String(localized: "Kilobat stopped keeping it awake while \(condition.name) is in front."))
             return
         }
         if !frontmostActive { frontmostAssertion?.release(); frontmostAssertion = nil }

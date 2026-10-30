@@ -96,10 +96,10 @@ public struct SpeedTestResult: Codable, Sendable {
     // Latency/loss checks are conservative Kilobat heuristics, not a call-quality guarantee.
     public var callCautionReasons: [String] {
         var reasons: [String] = []
-        if let value = baseline.average, value > 300 { reasons.append(String(format: "High latency (%.0f ms)", value)) }
-        if let value = baseline.jitter, value > 30 { reasons.append(String(format: "Variable ping (%.0f ms jitter)", value)) }
-        if let value = baseline.lossPercent, value > 2 { reasons.append(String(format: "Missing ping replies (%.0f%%)", value)) }
-        if let value = addedLatency, value > 100 { reasons.append(String(format: "Delay under load (+%.0f ms)", value)) }
+        if let value = baseline.average, value > 300 { reasons.append(String(localized: "High latency (\(String(format: "%.0f", value)) ms)")) }
+        if let value = baseline.jitter, value > 30 { reasons.append(String(localized: "Variable ping (\(String(format: "%.0f", value)) ms jitter)")) }
+        if let value = baseline.lossPercent, value > 2 { reasons.append(String(localized: "Missing ping replies (\(String(format: "%.0f", value))%)")) }
+        if let value = addedLatency, value > 100 { reasons.append(String(localized: "Delay under load (+\(String(format: "%.0f", value)) ms)")) }
         return reasons
     }
     private var callCaution: Bool { !callCautionReasons.isEmpty }
@@ -125,9 +125,9 @@ public struct SpeedTestResult: Codable, Sendable {
     /// Coding agents make many small round trips and upload context, so latency, jitter and loss matter more than speed.
     public var agentReadiness: String {
         let latency = baseline.average ?? 0, jitter = baseline.jitter ?? 0, loss = baseline.lossPercent ?? 0
-        if loss > 2 || (addedLatency ?? 0) > 200 || uploadMbps < 0.5 { return "May stall" }
-        if latency > 150 || jitter > 50 || uploadMbps < 2 { return "Sluggish" }
-        return "Smooth"
+        if loss > 2 || (addedLatency ?? 0) > 200 || uploadMbps < 0.5 { return String(localized: "May stall", comment: "How a coding agent may run on this connection") }
+        if latency > 150 || jitter > 50 || uploadMbps < 2 { return String(localized: "Sluggish", comment: "How a coding agent may run on this connection") }
+        return String(localized: "Smooth", comment: "How a coding agent may run on this connection")
     }
     public var addedLatency: Double? {
         guard let baseline = baseline.average, baseline.isFinite, (self.baseline.lossPercent ?? 0) <= 10, self.baseline.samples.count >= 3 else { return nil }

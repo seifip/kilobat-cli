@@ -9,6 +9,43 @@ public struct DoctorStep: Codable, Identifiable, Sendable {
     public let layer: String
     public let status: Status
     public let detail: String
+    /// What the verdict reads from a step beyond its layer and status, kept apart from `detail`, which is translated. Not encoded.
+    enum Cue: Sendable { case redirectLoop, privateResolver, privateSilent, namedProxy, publicResolves, vpn, stale, refused, proxyOnly, guessedProvider }
+    var cues: Set<Cue> = []
+    private enum CodingKeys: String, CodingKey { case layer, status, detail }
+
+    /// A cue, or for a step made without cues, the English words that carry it.
+    func says(_ cue: Cue, _ words: String, prefix: Bool = false) -> Bool {
+        cues.contains(cue) || (prefix ? detail.hasPrefix(words) : detail.contains(words))
+    }
+
+    /// The layer's name as shown; `layer` stays English, since verdicts, the CLI and JSON key on it.
+    public var title: String {
+        switch layer {
+        case "Network": String(localized: "Network", comment: "Connection check layer")
+        case "Interface": String(localized: "Interface", comment: "Connection check layer")
+        case "Proxy": String(localized: "Proxy", comment: "Connection check layer")
+        case "App proxy": String(localized: "App proxy", comment: "Connection check layer")
+        case "Proxy app": String(localized: "Proxy app", comment: "Connection check layer: the proxy app, such as Clash, and its nodes")
+        case "App setting": String(localized: "App setting", comment: "Connection check layer")
+        case "DNS": "DNS"
+        case "Kilobat rules": String(localized: "Kilobat rules", comment: "Connection check layer")
+        case "IPv4", "IPv6": layer
+        case "Redirect IPv4": String(localized: "Redirect IPv4", comment: "Connection check layer")
+        case "Redirect IPv6": String(localized: "Redirect IPv6", comment: "Connection check layer")
+        case "Other networks": String(localized: "Other networks", comment: "Connection check layer")
+        case "Secure connection": String(localized: "Secure connection", comment: "Connection check layer")
+        case "Request": String(localized: "Request", comment: "Connection check layer")
+        case "Server": String(localized: "Server", comment: "Connection check layer")
+        case "Redirects": String(localized: "Redirects", comment: "Connection check layer")
+        case "Direct path": String(localized: "Direct path", comment: "Connection check layer")
+        case "Open connections": String(localized: "Open connections", comment: "Connection check layer")
+        case "Transfer": String(localized: "Transfer", comment: "Connection check layer")
+        case "Context": String(localized: "Context", comment: "Connection check layer")
+        case "Provider": String(localized: "Provider", comment: "Connection check layer")
+        default: layer
+        }
+    }
 }
 
 /// One request of a redirect chain, as shown: no query values or password in `url`.
@@ -87,13 +124,13 @@ public enum ConnectionDoctor {
         let route: String?
         let docs: String
         let checked: String
-        var servers: String { "\(name)’s servers" }
+        var servers: String { String(localized: "\(name)’s servers") }
     }
 
     static let providers = [
-        Provider(name: "Warp", apps: ["dev.warp.Warp-Stable", "dev.warp.Warp-Preview"], feature: "custom inference endpoint",
-                 claim: "requests to a custom inference endpoint go through Warp’s servers, so the endpoint needs a public URL",
-                 route: "your own OpenAI, Anthropic or Google key, which Warp’s docs list as another option",
+        Provider(name: "Warp", apps: ["dev.warp.Warp-Stable", "dev.warp.Warp-Preview"], feature: String(localized: "custom inference endpoint"),
+                 claim: String(localized: "requests to a custom inference endpoint go through Warp’s servers, so the endpoint needs a public URL"),
+                 route: String(localized: "your own OpenAI, Anthropic or Google key, which Warp’s docs list as another option"),
                  docs: "https://docs.warp.dev/agents/inference/custom-inference-endpoint/", checked: "Oct 2026"),
     ]
 
@@ -114,8 +151,8 @@ public enum ConnectionDoctor {
 
     static let appSettings = [
         AppSetting(name: "LM Studio", apps: ["ai.elementlabs.lmstudio", "process:LM Studio"], domains: ["huggingface.co", "hf.co"],
-                   setting: "Hugging Face proxy setting",
-                   reports: "users reported large model downloads timing out until they turned that proxy off, some after restarting the app; one said the switch shows only with Developer mode on",
+                   setting: String(localized: "Hugging Face proxy setting"),
+                   reports: String(localized: "users reported large model downloads timing out until they turned that proxy off, some after restarting the app; one said the switch shows only with Developer mode on"),
                    source: "lmstudio-bug-tracker#1031", dated: "Mar–Aug 2026"),
     ]
 
@@ -127,26 +164,29 @@ public enum ConnectionDoctor {
 
     /// Where to look, citing the reports and their date; Kilobat never changes another app's settings.
     static func settingAdvice(_ setting: AppSetting) -> String {
-        "Check \(setting.name)’s \(setting.setting). In \(setting.source) (\(setting.dated)), \(setting.reports). Those are user reports, not a confirmed fix, and Kilobat doesn’t change \(setting.name)’s settings."
+        String(localized: "Check \(setting.name)’s \(setting.setting). In \(setting.source) (\(setting.dated)), \(setting.reports). Those are user reports, not a confirmed fix, and Kilobat doesn’t change \(setting.name)’s settings.")
     }
 
     static func appSettingStep(_ setting: AppSetting, path: DoctorPath?) -> DoctorStep {
         let went = switch path?.kind {
-        case .appProxy?, .environmentProxy?: "through the proxy below"
-        case .systemProxy?: "through the system proxy"
-        default: "directly"
+        case .appProxy?, .environmentProxy?: String(localized: "\(setting.name) has its own \(setting.setting), which Kilobat can’t read or send a request through, so this check went through the proxy below.")
+        case .systemProxy?: String(localized: "\(setting.name) has its own \(setting.setting), which Kilobat can’t read or send a request through, so this check went through the system proxy.")
+        default: String(localized: "\(setting.name) has its own \(setting.setting), which Kilobat can’t read or send a request through, so this check went directly.")
         }
-        return DoctorStep(layer: "App setting", status: .skipped, detail: "\(setting.name) has its own \(setting.setting), which Kilobat can’t read or send a request through, so this check went \(went). "
-                          + "In \(setting.source) (\(setting.dated)), \(setting.reports). Those are user reports, not a confirmed cause.")
+        return DoctorStep(layer: "App setting", status: .skipped, detail: went + " "
+                          + String(localized: "In \(setting.source) (\(setting.dated)), \(setting.reports). Those are user reports, not a confirmed cause."))
     }
 
     /// The path in words, as verdicts and steps name it.
     public static func via(_ path: DoctorPath, app: String?) -> String {
-        switch path.kind {
-        case .appProxy: "\(app ?? "the app")’s own proxy (\(path.proxy ?? "?"))"
-        case .environmentProxy: "\(app ?? "the app")’s proxy (\(path.proxy ?? "?"))"
-        case .systemProxy: "the system proxy (\(path.proxy ?? "?"))"
-        case .direct: "a direct connection"
+        let proxy = path.proxy ?? "?"
+        return switch (path.kind, app) {
+        case (.appProxy, let app?): String(localized: "\(app)’s own proxy (\(proxy))")
+        case (.appProxy, nil): String(localized: "the app’s own proxy (\(proxy))")
+        case (.environmentProxy, let app?): String(localized: "\(app)’s proxy (\(proxy))")
+        case (.environmentProxy, nil): String(localized: "the app’s proxy (\(proxy))")
+        case (.systemProxy, _): String(localized: "the system proxy (\(proxy))")
+        case (.direct, _): String(localized: "a direct connection")
         }
     }
 
@@ -191,13 +231,24 @@ public enum ConnectionDoctor {
         var nodes: [(group: String, node: String, delay: Int?)] = []
         for group in groups.prefix(3) { if let node = group.now, node != "DIRECT" { nodes.append((group.name, node, await api.delay(node))) } }
         let dead = nodes.filter { $0.delay == nil }
-        var detail = "\(client.name)" + [mode.map { " in \($0) mode" }, tun == true ? ", TUN on" : nil].compactMap { $0 }.joined()
-        if nodes.isEmpty { detail += "; no proxy node is selected, so traffic goes direct." }
-        else { detail += ". " + nodes.map { "\($0.group) uses \($0.node): " + ($0.delay.map { "\($0) ms" } ?? "no answer") }.joined(separator: "; ") + "." }
+        var detail = switch mode {
+        case "rule": String(localized: "\(client.name) in rule mode", comment: "A proxy app, such as Clash Verge, in the mode where each connection follows its rules")
+        case "global": String(localized: "\(client.name) in global mode", comment: "A proxy app, such as Clash Verge, in the mode where everything goes through one proxy")
+        case "direct": String(localized: "\(client.name) in direct mode", comment: "A proxy app, such as Clash Verge, in the mode where nothing goes through a proxy")
+        case let mode?: String(localized: "\(client.name) in \(mode) mode", comment: "A proxy app, such as Clash Verge, and its mode keyword")
+        case nil: client.name
+        }
+        if tun == true { detail = String(localized: "\(detail), TUN on", comment: "A proxy app and its mode; its TUN mode, which captures all traffic, is on") }
+        if nodes.isEmpty { detail = String(localized: "\(detail); no proxy node is selected, so traffic goes direct.", comment: "A proxy app and its mode come first") }
+        else {
+            let answers = nodes.map { node in node.delay.map { String(localized: "\(node.group) uses \(node.node): \($0) ms", comment: "A proxy group, the node it uses and how fast the node answered") }
+                ?? String(localized: "\(node.group) uses \(node.node): no answer", comment: "A proxy group and the node it uses, which didn’t answer") }
+            detail = String(localized: "\(detail). \(answers.joined(separator: "; ")).", comment: "A proxy app and its mode, then each proxy group’s node and how fast it answered")
+        }
         var report = report
         report.steps.append(DoctorStep(layer: "Proxy app", status: dead.isEmpty ? .ok : .warning, detail: detail))
         if !report.ok, let node = dead.first {
-            report.next = "\(node.node) in \(client.name) doesn’t answer, so requests sent through it fail. Pick another node in its \(node.group) group, or update the subscription. " + report.next
+            report.next = String(localized: "\(node.node) in \(client.name) doesn’t answer, so requests sent through it fail. Pick another node in its \(node.group) group, or update the subscription. \(report.next)", comment: "A proxy node, such as HK-01, the proxy app and the node’s group; the check’s usual next step follows")
         }
         return report
     }
@@ -205,11 +256,11 @@ public enum ConnectionDoctor {
     static func checks(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
         let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = requestURL(trimmed), let host = url.host, ExpertTools.validHost(host) else {
-            return DoctorReport(target: requestURL(trimmed).map(ConnectionProbe.redacted) ?? trimmed, host: trimmed, app: app, verdict: "That doesn’t look like a website or host.", next: "Enter a domain such as example.com or a full https:// address.", steps: [], date: Date())
+            return DoctorReport(target: requestURL(trimmed).map(ConnectionProbe.redacted) ?? trimmed, host: trimmed, app: app, verdict: String(localized: "That doesn’t look like a website or host."), next: String(localized: "Enter a domain such as example.com or a full https:// address."), steps: [], date: Date())
         }
         let shown = ConnectionProbe.redacted(url)
         if let proxy, ConnectionProbe.endpoint(proxy) == nil {
-            return DoctorReport(target: shown, host: host, app: app, verdict: "That proxy doesn’t look like an address.", next: "Enter it as the app shows it, such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080.", steps: [], date: Date())
+            return DoctorReport(target: shown, host: host, app: app, verdict: String(localized: "That proxy doesn’t look like an address."), next: String(localized: "Enter it as the app shows it, such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080."), steps: [], date: Date())
         }
         let port = url.port ?? (url.scheme == "http" ? 80 : 443), https = url.scheme == "https"
         let provider = provider(for: app), client = app.map(ConnectionProbe.client)
@@ -220,7 +271,7 @@ public enum ConnectionDoctor {
         let physical = path.availableInterfaces.filter { [.wifi, .wiredEthernet, .cellular].contains($0.type) }
             .reduce(into: [NWInterface]()) { list, interface in if !list.contains(where: { $0.name == interface.name }) { list.append(interface) } }
         guard path.status == .satisfied, let primary = path.availableInterfaces.first else {
-            return report(shown, host, app, [DoctorStep(layer: "Network", status: .failed, detail: "This Mac has no route to the internet.")] + [note].compactMap { $0 },
+            return report(shown, host, app, [DoctorStep(layer: "Network", status: .failed, detail: String(localized: "This Mac has no route to the internet."))] + [note].compactMap { $0 },
                           client: client, failedAt: failedAt)
         }
         let gateway = path.gateways.lazy.compactMap(ConnectionProbe.address).first
@@ -238,9 +289,9 @@ public enum ConnectionDoctor {
         note = contextStep(context, host: host, url: shown, provider: provider, addresses: addresses, resolver: resolver)
 
         let network: DoctorStep = switch (await router, gateway) {
-        case (true?, let gateway?): DoctorStep(layer: "Network", status: .ok, detail: "Online; the router at \(gateway) answers.")
-        case (false?, let gateway?): DoctorStep(layer: "Network", status: .warning, detail: "Online, but the router at \(gateway) didn’t answer a ping. Some routers ignore pings.")
-        default: DoctorStep(layer: "Network", status: .ok, detail: "Online.")
+        case (true?, let gateway?): DoctorStep(layer: "Network", status: .ok, detail: String(localized: "Online; the router at \(gateway) answers."))
+        case (false?, let gateway?): DoctorStep(layer: "Network", status: .warning, detail: String(localized: "Online, but the router at \(gateway) didn’t answer a ping. Some routers ignore pings."))
+        default: DoctorStep(layer: "Network", status: .ok, detail: String(localized: "Online."))
         }
         let systemProxy = await system
         var environmentProxy: Bool?
@@ -296,9 +347,15 @@ public enum ConnectionDoctor {
         case .tls?: "DNS over TLS"
         default: nil
         }
+        let found = addresses.prefix(3).joined(separator: ", ")
+        let lookup = switch (resolver?.description, encrypted) {
+        case let (resolver?, encrypted?): String(localized: "\(host) → \(found) in \(dnsMs) ms from \(resolver) over \(encrypted)")
+        case let (resolver?, nil): String(localized: "\(host) → \(found) in \(dnsMs) ms from \(resolver)")
+        case let (nil, encrypted?): String(localized: "\(host) → \(found) in \(dnsMs) ms over \(encrypted)")
+        case (nil, nil): String(localized: "\(host) → \(found) in \(dnsMs) ms")
+        }
         let dns = DoctorStep(layer: "DNS", status: dnsMs > 300 ? .warning : .ok,
-                             detail: "\(host) → \(addresses.prefix(3).joined(separator: ", ")) in \(dnsMs) ms" + (resolver.map { " from \($0.description)" } ?? "")
-                                + (encrypted.map { " over \($0)" } ?? "") + (dnsMs > 300 ? ", which is slow." : "."))
+                             detail: dnsMs > 300 ? String(localized: "\(lookup), which is slow.") : String(localized: "\(lookup).", comment: "A DNS lookup's result, ending the sentence"))
         var steps = [network, interfaceStep(used, source: families.lazy.compactMap(\.tcp.source).first, underlying: underlying)] + proxySteps + [dns]
         if let policy { steps.append(rules(host: host, port: String(port), app: app, policy: policy)) }
         steps.append(familyStep("IPv4", ipv4, host: host, port: port, available: path.supportsIPv4))
@@ -311,14 +368,14 @@ public enum ConnectionDoctor {
             return switch tls.outcome {
             case .connected: nil
             case .tlsFailed(let message), .failed(let message): message
-            default: "it didn’t finish within 5 seconds"
+            default: String(localized: "it didn’t finish within 5 seconds")
             }
         }.first
         // The exact request through the app's path, redirects followed one hop at a time.
         let web = ["http", "https"].contains(url.scheme ?? "")
         var hops: [ConnectionProbe.Hop] = []
         if !direct, route == nil, let secure {
-            steps.append(DoctorStep(layer: "Secure connection", status: .failed, detail: "The secure connection failed: \(secure). A proxy, VPN or network filter may be intercepting it."))
+            steps.append(DoctorStep(layer: "Secure connection", status: .failed, detail: String(localized: "The secure connection failed: \(secure). A proxy, VPN or network filter may be intercepting it.")))
         } else if web, direct || route != nil {
             hops = await ConnectionProbe.fetch(url, through: route?.proxy)
             steps += requestSteps(hops)
@@ -343,11 +400,11 @@ public enum ConnectionDoctor {
         }
 
         // The direct path against the VPN or proxy path, which can keep using a network the Mac has left.
-        var paths: [(via: String, direct: Bool?, through: Bool?)] = []
-        if let route { paths.append((route.via, direct, hops.isEmpty ? nil : answered(hops.first))) }
-        if used.vpn, let bypass = await bypass { paths.append(("the VPN (\(used.name))", bypass.outcome == ConnectionProbe.Attempt.Outcome.connected, reached)) }
+        var paths: [(via: String, direct: Bool?, through: Bool?, vpn: Bool)] = []
+        if let route { paths.append((route.via, direct, hops.isEmpty ? nil : answered(hops.first), false)) }
+        if used.vpn, let bypass = await bypass { paths.append((String(localized: "the VPN (\(used.name))"), bypass.outcome == ConnectionProbe.Attempt.Outcome.connected, reached, true)) }
         let leftovers = ConnectionProbe.leftovers(ConnectionProbe.interfaceAddresses(), active: Set(path.availableInterfaces.map(\.name)))
-        let routes = paths.compactMap { pathStep(via: $0.via, over: underlying, direct: $0.direct, through: $0.through, leftovers: leftovers) }
+        let routes = paths.compactMap { pathStep(via: $0.via, over: underlying, direct: $0.direct, through: $0.through, leftovers: leftovers, vpn: $0.vpn) }
         if let step = routes.first(where: { $0.status == .failed }) ?? routes.first { steps.append(step) }
 
         // An app setting that changes its path, which this check can't take.
@@ -378,13 +435,13 @@ public enum ConnectionDoctor {
 
         // Nothing shown keeps a query value or password, even in an error message that quotes the URL.
         let urls = [url] + hops.map(\.url)
-        let shownSteps = (steps + [note].compactMap { $0 }).map { DoctorStep(layer: $0.layer, status: $0.status, detail: ConnectionProbe.scrubbed($0.detail, urls)) }
+        let shownSteps = (steps + [note].compactMap { $0 }).map { DoctorStep(layer: $0.layer, status: $0.status, detail: ConnectionProbe.scrubbed($0.detail, urls), cues: $0.cues) }
         let shownHops = hops.map { hop in
             let status: Int? = if case .status(let code) = hop.answer { code } else { nil }
             return DoctorHop(url: ConnectionProbe.redacted(hop.url), host: hop.url.host ?? "", method: hop.method, status: status,
                              error: status == nil ? ConnectionProbe.scrubbed(describe(hop.answer), urls) : nil)
         }
-        let over = "over \(used.label)" + (route.map { " through \($0.via)" } ?? "")
+        let over = route.map { String(localized: "over \(used.label) through \($0.via)") } ?? String(localized: "over \(used.label)")
         return report(shown, host, app, shownSteps, hops: shownHops, over: over, client: client, path: taken, failedAt: failedAt)
     }
 
@@ -416,7 +473,7 @@ public enum ConnectionDoctor {
     static func viaProxy(_ steps: [DoctorStep], layers: Set<String>) -> [DoctorStep] {
         steps.map { step in
             guard layers.contains(step.layer), step.status == .failed else { return step }
-            return DoctorStep(layer: step.layer, status: .warning, detail: step.detail + " Requests through the proxy don’t take this path.")
+            return DoctorStep(layer: step.layer, status: .warning, detail: step.detail + " " + String(localized: "Requests through the proxy don’t take this path."), cues: step.cues)
         }
     }
 
@@ -465,75 +522,87 @@ public enum ConnectionDoctor {
 
     static func interfaceStep(_ link: ConnectionProbe.Link, source: String? = nil, underlying: ConnectionProbe.Link?) -> DoctorStep {
         if link.vpn {
-            return DoctorStep(layer: "Interface", status: .warning, detail: "Through a VPN (\(link.name))" + (underlying.map { " on \($0.label)" } ?? "") + ". It can block or reroute this connection.")
+            let through = underlying.map { String(localized: "Through a VPN (\(link.name)) on \($0.label).") } ?? String(localized: "Through a VPN (\(link.name)).")
+            return DoctorStep(layer: "Interface", status: .warning, detail: through + " " + String(localized: "It can block or reroute this connection."))
         }
-        return DoctorStep(layer: "Interface", status: .ok, detail: "Connections leave through \(link.label)" + (source.map { " from \($0)" } ?? "") + "."
-                          + (link.expensive ? " macOS marks it metered, as it does a phone hotspot; carrier networks sometimes break IPv6 or block ports." : ""))
+        let leaves = source.map { String(localized: "Connections leave through \(link.label) from \($0).") } ?? String(localized: "Connections leave through \(link.label).")
+        return DoctorStep(layer: "Interface", status: .ok, detail: leaves
+                          + (link.expensive ? " " + String(localized: "macOS marks it metered, as it does a phone hotspot; carrier networks sometimes break IPv6 or block ports.") : ""))
     }
 
     static func proxyStep(_ system: ConnectionProbe.SystemProxy) -> DoctorStep {
-        let pac = system.pac.map { $0 == "set as a script" ? "The PAC script" : "The PAC file at \($0)" }
+        // `pac` is a redacted URL, or "set as a script" for a script set inline.
+        let script = system.pac == "set as a script"
         if system.pacFailed {
-            return DoctorStep(layer: "Proxy", status: .warning, detail: "A PAC file is set (\(system.pac ?? "")), but it couldn’t be loaded. Apps may connect directly or fail.")
+            return DoctorStep(layer: "Proxy", status: .warning, detail: String(localized: "A PAC file is set (\(system.pac ?? "")), but it couldn’t be loaded. Apps may connect directly or fail."))
         }
         if let proxy = system.proxy {
-            return DoctorStep(layer: "Proxy", status: .warning, detail: (pac.map { "\($0) sends this address through \(proxy)." } ?? "A system proxy is set (\(proxy)).") + " It can block or reroute this connection.")
+            let sends = system.pac.map { script ? String(localized: "The PAC script sends this address through \(proxy).") : String(localized: "The PAC file at \($0) sends this address through \(proxy).") }
+                ?? String(localized: "A system proxy is set (\(proxy)).")
+            return DoctorStep(layer: "Proxy", status: .warning, detail: sends + " " + String(localized: "It can block or reroute this connection."))
         }
-        return DoctorStep(layer: "Proxy", status: .ok, detail: pac.map { "\($0) sends this address direct." } ?? "No system proxy for this address.")
+        return DoctorStep(layer: "Proxy", status: .ok, detail: system.pac.map { script ? String(localized: "The PAC script sends this address direct.") : String(localized: "The PAC file at \($0) sends this address direct.") }
+                          ?? String(localized: "No system proxy for this address."))
     }
 
     /// Whether the app's environment sets a different proxy from the system, as command-line tools read it.
     static func appProxyStep(_ environment: ConnectionProbe.Environment?, app: String?, url: URL, system: String?, answers: Bool?) -> DoctorStep? {
-        let none = "the system uses " + (system ?? "none")
         switch environment {
         case nil, .unreadable?: return nil
         case .notRunning?:
-            let name = app.map { $0.hasPrefix("process:") ? String($0.dropFirst(8)) : $0 } ?? "The app"
-            return DoctorStep(layer: "App proxy", status: .skipped, detail: "\(name) isn’t running, so its proxy settings weren’t checked.")
+            let name = app.map { $0.hasPrefix("process:") ? String($0.dropFirst(8)) : $0 } ?? String(localized: "The app")
+            return DoctorStep(layer: "App proxy", status: .skipped, detail: String(localized: "\(name) isn’t running, so its proxy settings weren’t checked."))
         case .found(let name, let values)?:
             guard let proxy = ConnectionProbe.environmentProxy(values, for: url) else {
-                return system == nil ? DoctorStep(layer: "App proxy", status: .ok, detail: "\(name) sets no proxy variables, and the system uses no proxy.")
-                    : DoctorStep(layer: "App proxy", status: .warning, detail: "\(name) sets no proxy variables, but \(none). Tools that ignore the system proxy, as most command-line tools do, connect directly.")
+                return system.map { DoctorStep(layer: "App proxy", status: .warning, detail: String(localized: "\(name) sets no proxy variables, but the system uses \($0). Tools that ignore the system proxy, as most command-line tools do, connect directly.")) }
+                    ?? DoctorStep(layer: "App proxy", status: .ok, detail: String(localized: "\(name) sets no proxy variables, and the system uses no proxy."))
             }
+            let variable = proxy.variable, value = proxy.value
             if proxy.bypassed {
-                return DoctorStep(layer: "App proxy", status: system == nil ? .ok : .warning, detail: "\(name) skips its proxy for this host (\(proxy.variable)); \(none).")
+                return DoctorStep(layer: "App proxy", status: system == nil ? .ok : .warning, detail: system.map { String(localized: "\(name) skips its proxy for this host (\(variable)); the system uses \($0).") }
+                                  ?? String(localized: "\(name) skips its proxy for this host (\(variable)); the system uses none."))
             }
-            let setting = "\(name) uses \(proxy.variable)=\(proxy.value) from its environment", endpoint = ConnectionProbe.endpoint(proxy.value)
-            let at = endpoint.map { "\($0.host):\($0.port)" } ?? proxy.value
-            if answers == false { return DoctorStep(layer: "App proxy", status: .failed, detail: "\(setting), but nothing answers at \(at).") }
-            if system?.lowercased() == at.lowercased() { return DoctorStep(layer: "App proxy", status: .ok, detail: "\(setting), the same proxy as the system.") }
-            return DoctorStep(layer: "App proxy", status: .warning, detail: "\(setting); \(none).")
+            let at = ConnectionProbe.endpoint(value).map { "\($0.host):\($0.port)" } ?? value
+            if answers == false { return DoctorStep(layer: "App proxy", status: .failed, detail: String(localized: "\(name) uses \(variable)=\(value) from its environment, but nothing answers at \(at).")) }
+            if system?.lowercased() == at.lowercased() { return DoctorStep(layer: "App proxy", status: .ok, detail: String(localized: "\(name) uses \(variable)=\(value) from its environment, the same proxy as the system.")) }
+            return DoctorStep(layer: "App proxy", status: .warning, detail: system.map { String(localized: "\(name) uses \(variable)=\(value) from its environment; the system uses \($0).") }
+                              ?? String(localized: "\(name) uses \(variable)=\(value) from its environment; the system uses none."))
         }
     }
 
     /// A proxy the person says the app uses, from the app's own settings.
     static func namedProxyStep(_ proxy: String, app: String?, system: String?, answers: Bool?) -> DoctorStep {
-        let address = at(proxy), setting = "\(app ?? "The app") uses its own proxy at \(address), as you said"
-        if answers == false { return DoctorStep(layer: "App proxy", status: .failed, detail: "\(setting), but nothing answers there.") }
-        let through = ConnectionProbe.redacted(proxy) == proxy ? " The request below goes through it." : " It needs a password, so Kilobat only checked that it answers."
-        if system?.lowercased() == address.lowercased() { return DoctorStep(layer: "App proxy", status: .ok, detail: "\(setting), the same proxy as the system." + through) }
-        return DoctorStep(layer: "App proxy", status: .warning, detail: "\(setting); the system uses \(system ?? "none"), so a browser or speed test takes another path." + through)
+        let address = at(proxy), owner = app ?? String(localized: "The app")
+        if answers == false { return DoctorStep(layer: "App proxy", status: .failed, detail: String(localized: "\(owner) uses its own proxy at \(address), as you said, but nothing answers there."), cues: [.namedProxy]) }
+        let through = " " + (ConnectionProbe.redacted(proxy) == proxy ? String(localized: "The request below goes through it.") : String(localized: "It needs a password, so Kilobat only checked that it answers."))
+        if system?.lowercased() == address.lowercased() {
+            return DoctorStep(layer: "App proxy", status: .ok, detail: String(localized: "\(owner) uses its own proxy at \(address), as you said, the same proxy as the system.") + through, cues: [.namedProxy])
+        }
+        let other = system.map { String(localized: "\(owner) uses its own proxy at \(address), as you said; the system uses \($0), so a browser or speed test takes another path.") }
+            ?? String(localized: "\(owner) uses its own proxy at \(address), as you said; the system uses none, so a browser or speed test takes another path.")
+        return DoctorStep(layer: "App proxy", status: .warning, detail: other + through, cues: [.namedProxy])
     }
 
     /// `named` puts the host before the address, for a host other than the one asked about.
     static func familyStep(_ layer: String, _ probe: FamilyProbe?, host: String, port: Int, available: Bool, named: Bool = false) -> DoctorStep {
         let family = layer.replacingOccurrences(of: "Redirect ", with: "")
-        guard available else { return DoctorStep(layer: layer, status: .skipped, detail: "This network has no \(family).") }
-        guard let probe, probe.tcp.outcome != .noAddress else { return DoctorStep(layer: layer, status: .skipped, detail: "\(host) has no \(family) address.") }
-        let address = probe.tcp.address.map { named ? "\(host) at \($0)" : $0 } ?? host
+        guard available else { return DoctorStep(layer: layer, status: .skipped, detail: String(localized: "This network has no \(family).")) }
+        guard let probe, probe.tcp.outcome != .noAddress else { return DoctorStep(layer: layer, status: .skipped, detail: String(localized: "\(host) has no \(family) address.")) }
+        let address = probe.tcp.address.map { named ? String(localized: "\(host) at \($0)") : $0 } ?? host
         switch probe.tcp.outcome {
         case .connected: break
-        case .refused: return DoctorStep(layer: layer, status: .failed, detail: "\(address) refused the connection on port \(port).")
-        case .timedOut: return DoctorStep(layer: layer, status: .failed, detail: "No answer from \(address) on port \(port) within 5 seconds.")
-        case .failed(let message), .tlsFailed(let message): return DoctorStep(layer: layer, status: .failed, detail: "Couldn’t connect to \(address): \(message).")
+        case .refused: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "\(address) refused the connection on port \(port)."))
+        case .timedOut: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "No answer from \(address) on port \(port) within 5 seconds."))
+        case .failed(let message), .tlsFailed(let message): return DoctorStep(layer: layer, status: .failed, detail: String(localized: "Couldn’t connect to \(address): \(message)."))
         case .noAddress: break
         }
-        let connected = "\(address): connected in \(probe.tcp.ms) ms"
+        let ms = probe.tcp.ms
         switch probe.tls?.outcome {
-        case nil: return DoctorStep(layer: layer, status: .ok, detail: connected + ".")
-        case .connected?: return DoctorStep(layer: layer, status: .ok, detail: connected + ", secure connection in \(probe.tls?.ms ?? 0) ms.")
-        case .tlsFailed(let message)?, .failed(let message)?: return DoctorStep(layer: layer, status: .failed, detail: connected + ", but the secure connection failed: \(message).")
-        default: return DoctorStep(layer: layer, status: .failed, detail: connected + ", but the secure connection didn’t finish within 5 seconds.")
+        case nil: return DoctorStep(layer: layer, status: .ok, detail: String(localized: "\(address): connected in \(ms) ms."))
+        case .connected?: return DoctorStep(layer: layer, status: .ok, detail: String(localized: "\(address): connected in \(ms) ms, secure connection in \(probe.tls?.ms ?? 0) ms."))
+        case .tlsFailed(let message)?, .failed(let message)?:
+            return DoctorStep(layer: layer, status: .failed, detail: String(localized: "\(address): connected in \(ms) ms, but the secure connection failed: \(message)."))
+        default: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "\(address): connected in \(ms) ms, but the secure connection didn’t finish within 5 seconds."))
         }
     }
 
@@ -542,63 +611,79 @@ public enum ConnectionDoctor {
         guard results.count > 1 else { return nil }
         let works = results.filter { $0.1.outcome == .connected }.map(\.0.label), fails = results.filter { $0.1.outcome != .connected }.map(\.0.label)
         if !reached, !works.isEmpty {
-            return DoctorStep(layer: "Other networks", status: .warning, detail: "It connects over \(works.joined(separator: " and "))"
-                              + (fails.isEmpty ? " when it skips the VPN." : ", but not over \(fails.joined(separator: " or "))."))
+            let over = works.spokenList()
+            return DoctorStep(layer: "Other networks", status: .warning, detail: fails.isEmpty ? String(localized: "It connects over \(over) when it skips the VPN.")
+                              : String(localized: "It connects over \(over), but not over \(fails.spokenList(or: true))."))
         }
         return DoctorStep(layer: "Other networks", status: .ok, detail: results.map { link, attempt in
-            attempt.outcome == .connected ? "\(link.label) connects in \(attempt.ms) ms" : "\(link.label) doesn’t connect"
+            attempt.outcome == .connected ? String(localized: "\(link.label) connects in \(attempt.ms) ms") : String(localized: "\(link.label) doesn’t connect")
         }.joined(separator: "; ") + ".")
     }
 
     /// A failed lookup, told apart: a private resolver that doesn't answer, the Mac's DNS against 1.1.1.1, or a name nobody knows.
     static func dnsFailure(_ host: String, resolver: ConnectionProbe.Resolver?, private answer: [String]?, public open: [String]?) -> DoctorStep {
-        func failed(_ detail: String) -> DoctorStep { DoctorStep(layer: "DNS", status: .failed, detail: detail) }
+        func failed(_ detail: String, _ cues: Set<DoctorStep.Cue> = []) -> DoctorStep { DoctorStep(layer: "DNS", status: .failed, detail: detail, cues: cues) }
         if let resolver, let domain = resolver.domain {
-            let goes = "\(host) goes to \(resolver.server), the private resolver for \(domain)"
+            let server = resolver.server
             switch answer {
-            case nil: return failed(goes + ", and it doesn’t answer." + (open == nil ? "" : " Public DNS works."))
-            case let found? where !found.isEmpty: return failed(goes + ", which knows it (\(found.prefix(2).joined(separator: ", "))), but macOS didn’t get the answer.")
-            default: return failed(goes + ", which doesn’t know it.")
+            case nil:
+                return failed(String(localized: "\(host) goes to \(server), the private resolver for \(domain), and it doesn’t answer.")
+                              + (open == nil ? "" : " " + String(localized: "Public DNS works.")), [.privateResolver, .privateSilent])
+            case let found? where !found.isEmpty:
+                let known = found.prefix(2).joined(separator: ", ")
+                return failed(String(localized: "\(host) goes to \(server), the private resolver for \(domain), which knows it (\(known)), but macOS didn’t get the answer."), [.privateResolver])
+            default: return failed(String(localized: "\(host) goes to \(server), the private resolver for \(domain), which doesn’t know it."), [.privateResolver])
             }
         }
-        let mine = resolver.map { " with your DNS (\($0.server))" } ?? " with your DNS"
-        return switch open {
-        case let found? where !found.isEmpty: failed("\(host) didn’t resolve\(mine), but 1.1.1.1 resolves it to \(found.prefix(2).joined(separator: ", ")).")
-        case []?: failed("\(host) didn’t resolve\(mine) or at 1.1.1.1.")
-        default: failed("\(host) didn’t resolve to an address.")
+        return switch (open, resolver?.server) {
+        case let (found?, server?) where !found.isEmpty:
+            failed(String(localized: "\(host) didn’t resolve with your DNS (\(server)), but 1.1.1.1 resolves it to \(found.prefix(2).joined(separator: ", "))."), [.publicResolves])
+        case let (found?, nil) where !found.isEmpty: failed(String(localized: "\(host) didn’t resolve with your DNS, but 1.1.1.1 resolves it to \(found.prefix(2).joined(separator: ", "))."), [.publicResolves])
+        case let ([]?, server?): failed(String(localized: "\(host) didn’t resolve with your DNS (\(server)) or at 1.1.1.1."))
+        case ([]?, nil): failed(String(localized: "\(host) didn’t resolve with your DNS or at 1.1.1.1."))
+        default: failed(String(localized: "\(host) didn’t resolve to an address."))
         }
     }
 
     /// The direct path against the VPN or proxy path. A tunnel that fails while the direct path works is the tunnel's
     /// problem; `leftovers` are addresses still held by network ports macOS no longer uses, which a tunnel may keep using.
-    static func pathStep(via: String, over link: ConnectionProbe.Link?, direct: Bool?, through: Bool?, leftovers: [String]) -> DoctorStep? {
+    /// `vpn` says `via` is the VPN rather than a proxy.
+    static func pathStep(via: String, over link: ConnectionProbe.Link?, direct: Bool?, through: Bool?, leftovers: [String], vpn: Bool = false) -> DoctorStep? {
         guard let direct, let through else { return nil }
-        let over = link.map { " over \($0.label)" } ?? ""
+        let over = link?.label, tunnel: Set<DoctorStep.Cue> = vpn ? [.vpn] : []
         switch (direct, through) {
         case (true, false):
-            let left = leftovers.isEmpty ? "" : " \(leftovers.joined(separator: " and ")) still \(leftovers.count == 1 ? "has an address" : "have addresses") from a network that’s no longer in use."
-            return DoctorStep(layer: "Direct path", status: .failed, detail: "Direct connections\(over) work; through \(via) they fail." + left)
-        case (true, true): return DoctorStep(layer: "Direct path", status: .ok, detail: "Direct connections\(over) work, and so do connections through \(via).")
-        case (false, true): return DoctorStep(layer: "Direct path", status: .ok, detail: "Through \(via) it works; direct connections\(over) don’t. Company networks often allow only their proxy.")
-        case (false, false): return DoctorStep(layer: "Direct path", status: .warning, detail: "Connections fail both directly\(over) and through \(via).")
+            let fails = over.map { String(localized: "Direct connections over \($0) work; through \(via) they fail.") } ?? String(localized: "Direct connections work; through \(via) they fail.")
+            let left = leftovers.isEmpty ? "" : " " + (leftovers.count == 1 ? String(localized: "\(leftovers[0]) still has an address from a network that’s no longer in use.")
+                : String(localized: "\(leftovers.spokenList()) still have addresses from a network that’s no longer in use."))
+            return DoctorStep(layer: "Direct path", status: .failed, detail: fails + left, cues: tunnel.union(leftovers.isEmpty ? [] : [.stale]))
+        case (true, true):
+            return DoctorStep(layer: "Direct path", status: .ok, detail: over.map { String(localized: "Direct connections over \($0) work, and so do connections through \(via).") }
+                              ?? String(localized: "Direct connections work, and so do connections through \(via)."), cues: tunnel)
+        case (false, true):
+            return DoctorStep(layer: "Direct path", status: .ok, detail: over.map { String(localized: "Through \(via) it works; direct connections over \($0) don’t. Company networks often allow only their proxy.") }
+                              ?? String(localized: "Through \(via) it works; direct connections don’t. Company networks often allow only their proxy."), cues: tunnel.union([.proxyOnly]))
+        case (false, false):
+            return DoctorStep(layer: "Direct path", status: .warning, detail: over.map { String(localized: "Connections fail both directly over \($0) and through \(via).") }
+                              ?? String(localized: "Connections fail both directly and through \(via)."), cues: tunnel)
         }
     }
 
     static func serverStep(_ answer: ConnectionProbe.Answer) -> DoctorStep {
         switch answer {
         case .secureFailed(let message):
-            return DoctorStep(layer: "Secure connection", status: .failed, detail: "The secure connection failed: \(message) A proxy, VPN or network filter may be intercepting it.")
+            return DoctorStep(layer: "Secure connection", status: .failed, detail: String(localized: "The secure connection failed: \(message) A proxy, VPN or network filter may be intercepting it."))
         case .failed(let message), .closed(let message): return DoctorStep(layer: "Request", status: .failed, detail: message)
         case .status(let code):
             let (status, detail): (DoctorStep.Status, String) = switch code {
-            case 200..<400: (.ok, "The server answered (HTTP \(code)).")
-            case 401, 403: (.warning, "The server answered but refused access (HTTP \(code)). The network is fine; it wants a login, a key or permission.")
-            case 407: (.failed, "A proxy wants credentials (HTTP 407).")
-            case 429: (.warning, "The server is rate limiting you (HTTP 429). Wait before retrying.")
-            case 500..<600: (.failed, "The server has a problem of its own (HTTP \(code)).")
-            default: (.warning, "The server answered with HTTP \(code).")
+            case 200..<400: (.ok, String(localized: "The server answered (HTTP \(code))."))
+            case 401, 403: (.warning, String(localized: "The server answered but refused access (HTTP \(code)). The network is fine; it wants a login, a key or permission."))
+            case 407: (.failed, String(localized: "A proxy wants credentials (HTTP 407)."))
+            case 429: (.warning, String(localized: "The server is rate limiting you (HTTP 429). Wait before retrying."))
+            case 500..<600: (.failed, String(localized: "The server has a problem of its own (HTTP \(code))."))
+            default: (.warning, String(localized: "The server answered with HTTP \(code)."))
             }
-            return DoctorStep(layer: "Server", status: status, detail: detail)
+            return DoctorStep(layer: "Server", status: status, detail: detail, cues: [401, 403, 429].contains(code) ? [.refused] : [])
         }
     }
 
@@ -608,15 +693,15 @@ public enum ConnectionDoctor {
         var answer = serverStep(last.answer)
         if let head = last.head {
             if case .status(let code) = last.answer, (200..<400).contains(code) {
-                answer = DoctorStep(layer: "Server", status: .ok, detail: "The server refuses HEAD requests but answers GET (HTTP \(code)).")
+                answer = DoctorStep(layer: "Server", status: .ok, detail: String(localized: "The server refuses HEAD requests but answers GET (HTTP \(code))."))
             } else {
-                answer = DoctorStep(layer: answer.layer, status: answer.status, detail: "The server refuses HEAD requests (\(describe(head))), and GET fails too. " + answer.detail)
+                answer = DoctorStep(layer: answer.layer, status: answer.status, detail: String(localized: "The server refuses HEAD requests (\(describe(head))), and GET fails too.") + " " + answer.detail, cues: answer.cues)
             }
         }
         guard hops.count > 1 else { return [answer] }
-        let chain = hops.map { "\($0.url.host ?? "?") (\(describe($0.answer)))" }.joined(separator: " → "), target = last.url.host ?? "another host"
-        if last.location != nil { return [DoctorStep(layer: "Redirects", status: .failed, detail: "More than \(hops.count - 1) redirects: \(chain).")] }
-        if answer.status == .failed { return [DoctorStep(layer: "Redirects", status: .failed, detail: "This address redirects to \(target), which fails: \(chain)."), answer] }
+        let chain = hops.map { "\($0.url.host ?? "?") (\(describe($0.answer)))" }.joined(separator: " → "), target = last.url.host ?? String(localized: "another host")
+        if last.location != nil { return [DoctorStep(layer: "Redirects", status: .failed, detail: String(localized: "More than \(hops.count - 1) redirects: \(chain)."), cues: [.redirectLoop])] }
+        if answer.status == .failed { return [DoctorStep(layer: "Redirects", status: .failed, detail: String(localized: "This address redirects to \(target), which fails: \(chain).")), answer] }
         return [DoctorStep(layer: "Redirects", status: .ok, detail: chain + "."), answer]
     }
 
@@ -630,18 +715,18 @@ public enum ConnectionDoctor {
     /// The app's open connections to the host against the fresh one this check made: one opened earlier can use the other IP version
     /// or another server, and a fresh check can't see how it's doing.
     static func existingStep(_ name: String, host: String, open: [OpenDestination], fresh: String?) -> DoctorStep {
-        let watch = " A fresh check can’t see how an open connection is doing; watch it in \(name)’s bandwidth panel or with kilobat bandwidth \"\(name)\"."
-        guard !open.isEmpty else { return DoctorStep(layer: "Open connections", status: .skipped, detail: "\(name) has no connection open to \(host)’s current addresses.") }
+        let watch = " " + String(localized: "A fresh check can’t see how an open connection is doing; watch it in \(name)’s bandwidth panel or with kilobat bandwidth \"\(name)\".")
+        guard !open.isEmpty else { return DoctorStep(layer: "Open connections", status: .skipped, detail: String(localized: "\(name) has no connection open to \(host)’s current addresses.")) }
         func family(_ address: String) -> String { address.contains(":") ? "IPv6" : "IPv4" }
         let count = open.reduce(0) { $0 + $1.connections }, families = Set(open.map { family($0.address) }).sorted()
-        var detail = "\(name) has \(count == 1 ? "a connection" : "\(count) connections") open to \(host): "
-            + open.prefix(3).map { "\($0.address) (\(family($0.address)), ↓ \(TrafficFormat.bytes($0.received)))" }.joined(separator: ", ") + "."
+        let list = open.prefix(3).map { "\($0.address) (\(family($0.address)), ↓ \(TrafficFormat.bytes($0.received)))" }.joined(separator: ", ")
+        var detail = count == 1 ? String(localized: "\(name) has a connection open to \(host): \(list).") : String(localized: "\(name) has \(count) connections open to \(host): \(list).")
         var status = DoctorStep.Status.ok
         if let fresh, !families.contains(family(fresh)) {
             status = .warning
-            detail += " It uses \(families.joined(separator: " and ")); this check’s fresh connection chose \(family(fresh)) (\(fresh)), so the results here may not be what the app sees."
+            detail += " " + String(localized: "It uses \(families.spokenList()); this check’s fresh connection chose \(family(fresh)) (\(fresh)), so the results here may not be what the app sees.")
         } else if let fresh, !open.contains(where: { $0.address == fresh }) {
-            detail += " This check’s fresh connection reached another server (\(fresh))."
+            detail += " " + String(localized: "This check’s fresh connection reached another server (\(fresh)).")
         }
         return DoctorStep(layer: "Open connections", status: status, detail: detail + watch)
     }
@@ -655,10 +740,13 @@ public enum ConnectionDoctor {
         let total = pairs.reduce(UInt64(0)) { $0 + $1.after.received }
         // Under 1 KB/s is keep-alives and stragglers, not a download moving.
         if arrived >= UInt64(seconds) * 1024 {
-            return DoctorStep(layer: "Transfer", status: .ok, detail: "\(name) is receiving from \(host): ↓ \(TrafficFormat.bytes(arrived)) in \(seconds) seconds.")
+            return DoctorStep(layer: "Transfer", status: .ok, detail: String(localized: "\(name) is receiving from \(host): ↓ \(TrafficFormat.bytes(arrived)) in \(seconds) seconds."))
         }
-        return DoctorStep(layer: "Transfer", status: .warning, detail: "\(name)’s open connection to \(host) received \(arrived == 0 ? "nothing" : "only " + TrafficFormat.bytes(arrived)) in \(seconds) seconds"
-                          + " (↓ \(TrafficFormat.bytes(total)) since it opened), so the transfer went quiet. That can be a stalled download, or a finished one whose connection is still open; Kilobat can’t tell which, so this doesn’t mean the download finished.")
+        let since = TrafficFormat.bytes(total)
+        let quiet = arrived == 0 ? String(localized: "\(name)’s open connection to \(host) received nothing in \(seconds) seconds (↓ \(since) since it opened), so the transfer went quiet.")
+            : String(localized: "\(name)’s open connection to \(host) received only \(TrafficFormat.bytes(arrived)) in \(seconds) seconds (↓ \(since) since it opened), so the transfer went quiet.")
+        return DoctorStep(layer: "Transfer", status: .warning, detail: quiet + " "
+                          + String(localized: "That can be a stalled download, or a finished one whose connection is still open; Kilobat can’t tell which, so this doesn’t mean the download finished."))
     }
 
     /// A note that these checks ran on the Mac, when the code that fails runs somewhere else or the name looks like it lives there.
@@ -671,41 +759,49 @@ public enum ConnectionDoctor {
         let url = url.contains("?") ? "'\(url)'" : url
         let machine: String, command: String
         switch place {
-        case .container: (machine, command) = ("A container", "docker run --rm " + (inside ? "--network <network> " : "") + "curlimages/curl -sv \(url)")
-        case .vm: (machine, command) = ("A VM", "curl -sv \(url)")
-        case .remote: (machine, command) = ("A remote machine", "ssh <host> curl -sv \(url)")
+        case .container: (machine, command) = (String(localized: "A container has its own network, DNS and proxy."), "docker run --rm " + (inside ? "--network <network> " : "") + "curlimages/curl -sv \(url)")
+        case .vm: (machine, command) = (String(localized: "A VM has its own network, DNS and proxy."), "curl -sv \(url)")
+        case .remote: (machine, command) = (String(localized: "A remote machine has its own network, DNS and proxy."), "ssh <host> curl -sv \(url)")
         case .provider: return providerStep(provider, declared: context == .provider, reach: privateReach(host, addresses: addresses, resolver: resolver))
         }
-        var detail = (context == nil ? "\(host) looks like a name inside a container or cluster network. " : "") + "These checks ran on this Mac. \(machine) has its own network, DNS and proxy."
+        var detail = [context == nil ? String(localized: "\(host) looks like a name inside a container or cluster network.") : nil, String(localized: "These checks ran on this Mac."), machine]
         if place == .container && ["localhost", "127.0.0.1", "::1"].contains(host.lowercased()) {
-            detail += " Inside a container, localhost is the container itself; use host.docker.internal to reach the Mac."
+            detail.append(String(localized: "Inside a container, localhost is the container itself; use host.docker.internal to reach the Mac."))
         }
-        return DoctorStep(layer: "Context", status: .skipped, detail: detail + " Check from there: " + command)
+        detail.append(String(localized: "Check from there: \(command)"))
+        return DoctorStep(layer: "Context", status: .skipped, detail: detail.compactMap { $0 }.joined(separator: " "))
     }
 
     /// The provider's servers make the request, so this Mac's success doesn't carry over; a private target is out of their reach.
     /// Nothing here is measured from the provider's side.
     static func providerStep(_ provider: Provider?, declared: Bool, reach: String?) -> DoctorStep {
-        let servers = provider?.servers ?? "the provider’s servers"
-        let claim = provider.map { (declared ? "" : "If this is \($0.name)’s \($0.feature): ") + "\($0.name)’s docs (\($0.checked)) say \($0.claim)." }
-            ?? "The provider’s servers make this request, not this Mac."
-        let unmeasured = " These checks ran on this Mac; Kilobat can’t test from \(servers)"
-        guard let reach else { return DoctorStep(layer: "Provider", status: .skipped, detail: claim + unmeasured + ", so whether they reach it is unknown.") }
-        return DoctorStep(layer: "Provider", status: declared ? .failed : .warning, detail: claim + " \(reach), so \(servers) can’t reach it." + unmeasured + ".")
+        let servers = provider?.servers ?? String(localized: "the provider’s servers")
+        let claim = provider.map { declared ? String(localized: "\($0.name)’s docs (\($0.checked)) say \($0.claim).")
+            : String(localized: "If this is \($0.name)’s \($0.feature): \($0.name)’s docs (\($0.checked)) say \($0.claim).") }
+            ?? String(localized: "The provider’s servers make this request, not this Mac.")
+        let cues: Set<DoctorStep.Cue> = provider != nil && !declared ? [.guessedProvider] : []
+        guard let reach else {
+            return DoctorStep(layer: "Provider", status: .skipped, detail: claim + " " + String(localized: "These checks ran on this Mac; Kilobat can’t test from \(servers), so whether they reach it is unknown."), cues: cues)
+        }
+        return DoctorStep(layer: "Provider", status: declared ? .failed : .warning, detail: claim + " " + String(localized: "\(reach), so \(servers) can’t reach it.") + " "
+                          + String(localized: "These checks ran on this Mac; Kilobat can’t test from \(servers)."), cues: cues)
     }
 
     /// Why only this Mac or its private networks can reach the host, in words; nil for a public name or address.
     static func privateReach(_ host: String, addresses: [String], resolver: ConnectionProbe.Resolver?) -> String? {
         let name = host.lowercased()
-        func kind(_ address: String) -> String? {
+        /// Whether a private address is this Mac itself; nil for a public one.
+        func loopback(_ address: String) -> Bool? {
             guard let bytes = AddressRange.parse(address), GeoIP.isPrivate(bytes) else { return nil }
-            return bytes[0] == 127 || bytes == [UInt8](repeating: 0, count: 15) + [1] ? "this Mac itself" : "a private address"
+            return bytes[0] == 127 || bytes == [UInt8](repeating: 0, count: 15) + [1]
         }
-        if name == "localhost" || name.hasSuffix(".localhost") { return "\(host) is this Mac itself" }
-        if AddressRange.parse(name) != nil { return kind(name).map { "\(host) is \($0)" } }
-        if let (address, place) = addresses.lazy.compactMap({ address in kind(address).map { (address, $0) } }).first { return "\(host) resolves to \(address), \(place)" }
-        if let resolver, resolver.domain != nil { return "\(host) resolves only through private DNS (\(resolver.server))" }
-        if !name.contains(".") || [".local", ".lan", ".home.arpa", ".internal", ".ts.net"].contains(where: name.hasSuffix) { return "\(host) is a name only private networks know" }
+        if name == "localhost" || name.hasSuffix(".localhost") { return String(localized: "\(host) is this Mac itself") }
+        if AddressRange.parse(name) != nil { return loopback(name).map { $0 ? String(localized: "\(host) is this Mac itself") : String(localized: "\(host) is a private address") } }
+        if let (address, mac) = addresses.lazy.compactMap({ address in loopback(address).map { (address, $0) } }).first {
+            return mac ? String(localized: "\(host) resolves to \(address), this Mac itself") : String(localized: "\(host) resolves to \(address), a private address")
+        }
+        if let resolver, resolver.domain != nil { return String(localized: "\(host) resolves only through private DNS (\(resolver.server))") }
+        if !name.contains(".") || [".local", ".lan", ".home.arpa", ".internal", ".ts.net"].contains(where: name.hasSuffix) { return String(localized: "\(host) is a name only private networks know") }
         return nil
     }
 
@@ -718,8 +814,8 @@ public enum ConnectionDoctor {
 
     /// The same decision the filter makes for this host and app (`FilterPolicy`), in words.
     static func rules(host: String, port: String, app: String?, policy: Policy) -> DoctorStep {
-        let preferences = policy.preferences, profile = preferences.profile.rawValue
-        let enforced = policy.filterActive ? "" : " The network filter is off, so it isn’t enforced right now."
+        let preferences = policy.preferences, profile = preferences.profile.title
+        let enforced = policy.filterActive ? "" : " " + String(localized: "The network filter is off, so it isn’t enforced right now.")
         let rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached, metered: policy.metered))
         // An address typed as the target is matched as the remote address, as the filter would see it.
         let address = AddressRange.parse(host) != nil ? host : nil
@@ -730,23 +826,23 @@ public enum ConnectionDoctor {
             DoctorStep(layer: "Kilobat rules", status: status, detail: detail + (status == .ok ? "" : enforced))
         }
         switch decision.reason {
-        case .filterOff, .unrestricted: return step(.ok, "The Unrestricted profile allows everything.")
-        case .connectionRule(let rule): return rule.allowed ? step(.ok, "A connection rule allows this.") : step(blocked, "A connection rule in \(profile) blocks this.")
-        case .blocklist(let entry): return step(blocked, "\(host) matches \(entry) on your blocklist.")
+        case .filterOff, .unrestricted: return step(.ok, String(localized: "The Unrestricted profile allows everything."))
+        case .connectionRule(let rule): return rule.allowed ? step(.ok, String(localized: "A connection rule allows this.")) : step(blocked, String(localized: "A connection rule in \(profile) blocks this."))
+        case .blocklist(let entry): return step(blocked, String(localized: "\(host) matches \(entry) on your blocklist."))
         case .temporaryRule(let rule):
             let until = rule.expires.formatted(date: .omitted, time: .shortened)
-            return rule.allowed ? step(.ok, "A temporary rule allows this app until \(until).") : step(blocked, "A temporary rule blocks this app until \(until).")
-        case .budget: return step(blocked, "This network’s data budget is used up, which stops new connections.")
-        case .quota: return step(blocked, "This app used up its data quota, which stops its new connections until the quota resets.")
+            return rule.allowed ? step(.ok, String(localized: "A temporary rule allows this app until \(until).")) : step(blocked, String(localized: "A temporary rule blocks this app until \(until)."))
+        case .budget: return step(blocked, String(localized: "This network’s data budget is used up, which stops new connections."))
+        case .quota: return step(blocked, String(localized: "This app used up its data quota, which stops its new connections until the quota resets."))
         case .updaterPaused(let name):
-            return step(blocked, "\(name) is an updater, and Kilobat pauses updaters while this network is metered. Allow it for a while, or turn off pausing updaters.")
-        case .appRule(let allowed): return allowed ? step(.ok, "This app is allowed in the \(profile) profile.") : step(blocked, "This app is blocked in the \(profile) profile.")
-        case .recentDecision(let allowed): return allowed ? step(.ok, "You allowed this app when asked.") : step(blocked, "You blocked this app when asked.")
-        case .appleSoftware: return step(.ok, "Apple software is allowed in \(profile).")
-        case .askNewApps: return step(.warning, "Kilobat asks before this app’s first connection. Answer in the approval window.")
+            return step(blocked, String(localized: "\(name) is an updater, and Kilobat pauses updaters while this network is metered. Allow it for a while, or turn off pausing updaters."))
+        case .appRule(let allowed): return allowed ? step(.ok, String(localized: "This app is allowed in the \(profile) profile.")) : step(blocked, String(localized: "This app is blocked in the \(profile) profile."))
+        case .recentDecision(let allowed): return allowed ? step(.ok, String(localized: "You allowed this app when asked.")) : step(blocked, String(localized: "You blocked this app when asked."))
+        case .appleSoftware: return step(.ok, String(localized: "Apple software is allowed in \(profile)."))
+        case .askNewApps: return step(.warning, String(localized: "Kilobat asks before this app’s first connection. Answer in the approval window."))
         case .newAppDefault(let allowed):
-            return allowed ? step(.ok, "Nothing in Kilobat blocks this app here.") : step(blocked, "New apps are blocked in \(profile), and this app has no rule.")
-        case .noAppRule: return step(.ok, "Nothing in Kilobat blocks this.")
+            return allowed ? step(.ok, String(localized: "Nothing in Kilobat blocks this app here.")) : step(blocked, String(localized: "New apps are blocked in \(profile), and this app has no rule."))
+        case .noAppRule: return step(.ok, String(localized: "Nothing in Kilobat blocks this."))
         }
     }
 
@@ -758,115 +854,119 @@ public enum ConnectionDoctor {
         func step(_ layer: String) -> DoctorStep? { steps.first { $0.layer == layer } }
         // An app that isn't installed has only its bundle ID; a known one keeps its name.
         let setting = appSetting(for: app, hosts: [host] + hops.map(\.host)), known = client.flatMap { $0.name == $0.id ? nil : $0.name } ?? setting?.name
-        let name = known ?? "the app"
+        let name = known ?? String(localized: "the app")
         var taken = taken
         if let setting { taken?.untested = "\(setting.name)’s \(setting.setting)" }
         let ownRoute = taken.flatMap { [.appProxy, .environmentProxy].contains($0.kind) ? via($0, app: known) : nil }
         let failed = steps.first { $0.status == .failed }, routed = step("Provider")
         // A declared provider's note stands in for the Context note; a guessed one ("If this is …") doesn't.
-        let context = step("Context") ?? routed.flatMap { $0.status == .skipped && !$0.detail.hasPrefix("If ") ? $0 : nil }
-        let provider = provider(for: app), servers = provider?.servers ?? "the provider’s servers"
+        let context = step("Context") ?? routed.flatMap { $0.status == .skipped && !$0.says(.guessedProvider, "If ", prefix: true) ? $0 : nil }
+        let provider = provider(for: app), servers = provider?.servers ?? String(localized: "the provider’s servers")
         // Options that work wherever the request comes from: never a tunnel or exposure made for the person, never SSH into the provider.
-        let options = "Point it at an endpoint you control with a public address, behind HTTPS and a key, or use "
-            + (provider?.route ?? "a route the provider supports for private endpoints, if it has one") + ". This Mac’s DNS, firewall or VPN settings won’t change it."
-            + (provider.map { " Source: \($0.name)’s docs (\($0.checked)), \($0.docs)" } ?? "")
+        let route = provider?.route ?? String(localized: "a route the provider supports for private endpoints, if it has one")
+        let options = String(localized: "Point it at an endpoint you control with a public address, behind HTTPS and a key, or use \(route). This Mac’s DNS, firewall or VPN settings won’t change it.")
+            + (provider.map { " " + String(localized: "Source: \($0.name)’s docs (\($0.checked)), \($0.docs)") } ?? "")
         let detour = step("Interface")?.status == .warning || step("Proxy")?.status == .warning
-        let path = over.map { " " + $0 } ?? "", redirect = hops.count > 1 ? hops.last?.host ?? "another server" : "another server"
+        let path = over.map { " " + $0 } ?? "", redirect = hops.count > 1 ? hops.last?.host ?? String(localized: "another server") : String(localized: "another server")
         // Whether the code may run somewhere these checks didn't reach.
         var elsewhere = false
         let (verdict, next): (String, String)
         let tunnel = step("Direct path").flatMap { $0.status == .failed ? $0 : nil }
         func broken(_ layer: String) -> String {
             layer == "IPv6"
-                ? "Apps that prefer IPv6 can hang or keep reconnecting. In System Settings › Network, open this network’s Details › TCP/IP and set Configure IPv6 to Link-local only, or ask the network owner to fix IPv6."
-                : "Apps that use IPv4 can hang or keep reconnecting. Reconnect to the network, or ask the network owner to fix IPv4."
+                ? String(localized: "Apps that prefer IPv6 can hang or keep reconnecting. In System Settings › Network, open this network’s Details › TCP/IP and set Configure IPv6 to Link-local only, or ask the network owner to fix IPv6.")
+                : String(localized: "Apps that use IPv4 can hang or keep reconnecting. Reconnect to the network, or ask the network owner to fix IPv4.")
         }
-        let elsewhereNext = "The first server answers; the one it sends you to doesn’t. Try another network, or turn off a VPN or filter that may block it."
+        let elsewhereNext = String(localized: "The first server answers; the one it sends you to doesn’t. Try another network, or turn off a VPN or filter that may block it.")
         switch failed?.layer {
-        case "Network": (verdict, next) = ("Your Mac isn’t connected.", "Check Wi-Fi or the cable, then try again.")
-        case "Provider": (verdict, next) = ("This works from this Mac\(path), but \(servers) can’t reach a private address.", options)
-        case let layer? where tunnel != nil && !["DNS", "Kilobat rules"].contains(layer) && ownRoute != nil && !tunnel!.detail.contains("through the VPN ("):
-            let own = "So \(name)’s own path stops it, not this Mac’s connection. "
-            (verdict, next) = ("The network is fine: direct connections work. This request through \(ownRoute!) fails.", setting.map { own + settingAdvice($0) }
-                ?? own + "Check that proxy, or \(name)’s proxy setting, then try again. Kilobat doesn’t change another app’s settings.")
+        case "Network": (verdict, next) = (String(localized: "Your Mac isn’t connected."), String(localized: "Check Wi-Fi or the cable, then try again."))
+        case "Provider": (verdict, next) = (String(localized: "This works from this Mac\(path), but \(servers) can’t reach a private address."), options)
+        case let layer? where tunnel != nil && !["DNS", "Kilobat rules"].contains(layer) && ownRoute != nil && !tunnel!.says(.vpn, "through the VPN ("):
+            let own = String(localized: "So \(name)’s own path stops it, not this Mac’s connection.")
+            (verdict, next) = (String(localized: "The network is fine: direct connections work. This request through \(ownRoute!) fails."), own + " " + (setting.map(settingAdvice)
+                ?? String(localized: "Check that proxy, or \(name)’s proxy setting, then try again. Kilobat doesn’t change another app’s settings.")))
         case let layer? where tunnel != nil && !["DNS", "Kilobat rules"].contains(layer):
-            (verdict, next) = ("Direct connections work; traffic through the VPN or proxy fails.", tunnel!.detail.contains("no longer in use")
-                ? "It may still be using the network you left. Restart its tunnel or the proxy app, then try again."
-                : "Restart its tunnel or the proxy app, or check the app’s own proxy setting, then try again.")
-        case "Redirects" where failed?.detail.hasPrefix("More than") == true:
-            (verdict, next) = ("This address redirects too many times.", "The redirects loop or run too deep. Check the address, or get a fresh link if it expires.")
+            (verdict, next) = (String(localized: "Direct connections work; traffic through the VPN or proxy fails."), tunnel!.says(.stale, "no longer in use")
+                ? String(localized: "It may still be using the network you left. Restart its tunnel or the proxy app, then try again.")
+                : String(localized: "Restart its tunnel or the proxy app, or check the app’s own proxy setting, then try again."))
+        case "Redirects" where failed?.says(.redirectLoop, "More than", prefix: true) == true:
+            (verdict, next) = (String(localized: "This address redirects too many times."), String(localized: "The redirects loop or run too deep. Check the address, or get a fresh link if it expires."))
         case let layer? where ["Redirects", "Redirect IPv4", "Redirect IPv6"].contains(layer):
             if let family = ["IPv6", "IPv4"].first(where: { step("Redirect " + $0)?.status == .failed }) {
                 let other = family == "IPv4" ? "IPv6" : "IPv4"
                 (verdict, next) = step("Redirect " + other)?.status == .ok
-                    ? ("This address redirects to \(redirect), which works over \(other) but not \(family).", broken(family))
-                    : ("This address redirects to \(redirect), which can’t be reached from here.", elsewhereNext)
+                    ? (String(localized: "This address redirects to \(redirect), which works over \(other) but not \(family)."), broken(family))
+                    : (String(localized: "This address redirects to \(redirect), which can’t be reached from here."), elsewhereNext)
             } else if step("Server")?.status == .failed {
-                (verdict, next) = ("This address redirects to \(redirect), which has a problem.", "The network gets there; that server answered with an error of its own. Try again later.")
+                (verdict, next) = (String(localized: "This address redirects to \(redirect), which has a problem."), String(localized: "The network gets there; that server answered with an error of its own. Try again later."))
             } else {
-                (verdict, next) = ("This address redirects to \(redirect), which fails.", elsewhereNext)
+                (verdict, next) = (String(localized: "This address redirects to \(redirect), which fails."), elsewhereNext)
             }
-        case "DNS" where failed?.detail.contains("private resolver") == true:
-            let answers = failed?.detail.contains("doesn’t answer") == true
-            (verdict, next) = (answers ? "Private DNS isn’t answering." : "The private resolver can’t resolve it.", answers
-                ? "Reconnect the VPN or tool that provides it (a company VPN, Tailscale or NetBird, say), then try again."
-                : "Check the name, and that this Mac is allowed to see it on that private network.")
-        case "App proxy": (verdict, next) = ("The app’s proxy isn’t answering.", failed?.detail.contains("as you said") == true
-            ? "Start that proxy, or check the proxy setting in the app."
-            : "Start the proxy it points to, or remove the variable from the app’s environment (often set in a shell profile), then restart the app.")
-        case "DNS" where failed?.detail.contains("1.1.1.1 resolves") == true:
-            (verdict, next) = ("Your DNS server can’t resolve it.", "Switch DNS to Cloudflare or Google in the Connection tab, or ask the network owner.")
+        case "DNS" where failed?.says(.privateResolver, "private resolver") == true:
+            let answers = failed?.says(.privateSilent, "doesn’t answer") == true
+            (verdict, next) = (answers ? String(localized: "Private DNS isn’t answering.") : String(localized: "The private resolver can’t resolve it."), answers
+                ? String(localized: "Reconnect the VPN or tool that provides it (a company VPN, Tailscale or NetBird, say), then try again.")
+                : String(localized: "Check the name, and that this Mac is allowed to see it on that private network."))
+        case "App proxy": (verdict, next) = (String(localized: "The app’s proxy isn’t answering."), failed?.says(.namedProxy, "as you said") == true
+            ? String(localized: "Start that proxy, or check the proxy setting in the app.")
+            : String(localized: "Start the proxy it points to, or remove the variable from the app’s environment (often set in a shell profile), then restart the app."))
+        case "DNS" where failed?.says(.publicResolves, "1.1.1.1 resolves") == true:
+            (verdict, next) = (String(localized: "Your DNS server can’t resolve it."), String(localized: "Switch DNS to Cloudflare or Google in the Connection tab, or ask the network owner."))
         case "DNS":
             elsewhere = true
-            (verdict, next) = (context == nil ? "The name doesn’t resolve." : "The name doesn’t resolve on this Mac.", "Check the spelling. If other sites work, switch DNS to Cloudflare or Google in the Connection tab and try again.")
-        case "Kilobat rules": (verdict, next) = ("Kilobat is blocking it.", "Allow the app or remove the rule in Tools › Diagnostics & rules, or switch profile.")
+            (verdict, next) = (context == nil ? String(localized: "The name doesn’t resolve.") : String(localized: "The name doesn’t resolve on this Mac."),
+                               String(localized: "Check the spelling. If other sites work, switch DNS to Cloudflare or Google in the Connection tab and try again."))
+        case "Kilobat rules": (verdict, next) = (String(localized: "Kilobat is blocking it."), String(localized: "Allow the app or remove the rule in Tools › Diagnostics & rules, or switch profile."))
         case let layer? where layer == "IPv4" || layer == "IPv6":
             let other = layer == "IPv4" ? "IPv6" : "IPv4"
             if step(other)?.status == .ok {
-                (verdict, next) = ("\(other) works, but \(layer) is broken for this host.", broken(layer))
+                (verdict, next) = (String(localized: "\(other) works, but \(layer) is broken for this host."), broken(layer))
             } else if step("Secure connection")?.status == .failed {
-                (verdict, next) = ("Something is interfering with the secure connection.", "Try with the VPN, proxy or other network filters off.")
+                (verdict, next) = (String(localized: "Something is interfering with the secure connection."), String(localized: "Try with the VPN, proxy or other network filters off."))
             } else if let others = step("Other networks"), others.status == .warning {
-                (verdict, next) = ("The server can’t be reached over this network.", others.detail + " Switch to it, or ask the owner of this network what blocks it.")
+                (verdict, next) = (String(localized: "The server can’t be reached over this network."), others.detail + " " + String(localized: "Switch to it, or ask the owner of this network what blocks it."))
             } else {
                 elsewhere = true
-                (verdict, next) = ("The server can’t be reached.", detour ? "Try with the VPN or proxy off. If it still fails, the server or a firewall on the way is refusing it." : "The server may be down or a firewall on the way blocks it. Try another network to tell which.")
+                (verdict, next) = (String(localized: "The server can’t be reached."), detour ? String(localized: "Try with the VPN or proxy off. If it still fails, the server or a firewall on the way is refusing it.")
+                                   : String(localized: "The server may be down or a firewall on the way blocks it. Try another network to tell which."))
             }
-        case "Secure connection": (verdict, next) = ("Something is interfering with the secure connection.", "Try with the VPN, proxy or other network filters off.")
-        case "Server": (verdict, next) = ("The server is having problems.", "The network gets there; the server answered with an error of its own. Try again later.")
+        case "Secure connection": (verdict, next) = (String(localized: "Something is interfering with the secure connection."), String(localized: "Try with the VPN, proxy or other network filters off."))
+        case "Server": (verdict, next) = (String(localized: "The server is having problems."), String(localized: "The network gets there; the server answered with an error of its own. Try again later."))
         case "Request":
             elsewhere = true
-            (verdict, next) = ("The request failed.", "Try again; if it keeps failing, try another network.")
+            (verdict, next) = (String(localized: "The request failed."), String(localized: "Try again; if it keeps failing, try another network."))
         case .some, .none:
             if routed?.status == .warning {
-                (verdict, next) = ("This works from this Mac\(path), but if \(provider?.name ?? "the provider") makes the request from its servers, they can’t reach a private address.", options)
+                (verdict, next) = (provider.map { String(localized: "This works from this Mac\(path), but if \($0.name) makes the request from its servers, they can’t reach a private address.") }
+                                   ?? String(localized: "This works from this Mac\(path), but if the provider makes the request from its servers, they can’t reach a private address."), options)
             } else if let server = steps.first(where: { $0.layer == "Server" && $0.status == .warning }) {
-                let refused = server.detail.contains("refused access") || server.detail.contains("rate limiting")
+                let refused = server.says(.refused, "refused access") || server.says(.refused, "rate limiting")
                 (verdict, next) = refused
-                    ? ("This Mac reaches the server\(path), but it refuses this request.", "It wants a login, a key or a slower pace. Some servers limit by address or region, so another network can get another answer.")
-                    : ("This Mac reaches the server\(path), but it answered with an error.", "Check the address, including its path and query, or try the site’s home page.")
+                    ? (String(localized: "This Mac reaches the server\(path), but it refuses this request."), String(localized: "It wants a login, a key or a slower pace. Some servers limit by address or region, so another network can get another answer."))
+                    : (String(localized: "This Mac reaches the server\(path), but it answered with an error."), String(localized: "Check the address, including its path and query, or try the site’s home page."))
             } else if let quiet = step("Transfer"), quiet.status == .warning {
                 // A quiet transfer is never reported as finished.
-                (verdict, next) = ((setting == nil ? "This request works from this Mac\(path)" : "The network reaches \(host) from this Mac\(path)") + " right now, but \(name)’s open transfer went quiet.",
-                                   "Quiet isn’t finished: Kilobat can’t tell a stalled download from a completed one. Check the download in \(name); if it stopped, pause and resume it there."
+                (verdict, next) = (setting == nil ? String(localized: "This request works from this Mac\(path) right now, but \(name)’s open transfer went quiet.")
+                                   : String(localized: "The network reaches \(host) from this Mac\(path) right now, but \(name)’s open transfer went quiet."),
+                                   String(localized: "Quiet isn’t finished: Kilobat can’t tell a stalled download from a completed one. Check the download in \(name); if it stopped, pause and resume it there.")
                                    + (setting.map { " " + settingAdvice($0) } ?? ""))
             } else if let setting {
-                (verdict, next) = ("The network reaches \(host) from this Mac\(path) right now, but this check didn’t go through \(name)’s \(setting.setting).",
-                                   "So it doesn’t show the request works in \(name). " + settingAdvice(setting))
-            } else if let direct = step("Direct path"), direct.status == .ok, direct.detail.hasPrefix("Through ") {
-                (verdict, next) = ("This request works through the proxy, not directly.", "Apps that use that proxy reach it; apps that connect directly, as many command-line tools do, fail here. Point those at the proxy with HTTPS_PROXY, or ask the network owner.")
+                (verdict, next) = (String(localized: "The network reaches \(host) from this Mac\(path) right now, but this check didn’t go through \(name)’s \(setting.setting)."),
+                                   String(localized: "So it doesn’t show the request works in \(name).") + " " + settingAdvice(setting))
+            } else if let direct = step("Direct path"), direct.status == .ok, direct.says(.proxyOnly, "Through ", prefix: true) {
+                (verdict, next) = (String(localized: "This request works through the proxy, not directly."), String(localized: "Apps that use that proxy reach it; apps that connect directly, as many command-line tools do, fail here. Point those at the proxy with HTTPS_PROXY, or ask the network owner."))
             } else if step("Open connections")?.status == .warning {
-                (verdict, next) = ("This request works from this Mac\(path) right now, but the app’s open connection takes another path.", "A transfer that stays slow or stuck may do better on a new connection: pause and resume it, or restart it in the app.")
+                (verdict, next) = (String(localized: "This request works from this Mac\(path) right now, but the app’s open connection takes another path."), String(localized: "A transfer that stays slow or stuck may do better on a new connection: pause and resume it, or restart it in the app."))
             } else if step("App proxy")?.status == .warning {
-                (verdict, next) = ("This request works from this Mac\(path) right now.", "The app’s proxy differs from the system’s, so a browser or speed test doesn’t take the app’s path. If the app still can’t connect, check its proxy setting.")
+                (verdict, next) = (String(localized: "This request works from this Mac\(path) right now."), String(localized: "The app’s proxy differs from the system’s, so a browser or speed test doesn’t take the app’s path. If the app still can’t connect, check its proxy setting."))
             } else {
                 elsewhere = true
-                (verdict, next) = ("This request works from this Mac\(path) right now.", "That covers this request on this path only. If the app still fails, it may take another path: its own proxy setting (check it with kilobat why --proxy), a sandbox, or a container or remote machine.")
+                (verdict, next) = (String(localized: "This request works from this Mac\(path) right now."), String(localized: "That covers this request on this path only. If the app still fails, it may take another path: its own proxy setting (check it with kilobat why --proxy), a sandbox, or a container or remote machine."))
             }
         }
         var after = ""
         if let failedAt, !steps.contains(where: { $0.status == .failed }), date.timeIntervalSince(failedAt) > 60 {
-            after = " This check ran after \(name) failed at \(failedAt.formatted(date: .omitted, time: .shortened)), so it can’t show what happened then."
+            after = " " + String(localized: "This check ran after \(name) failed at \(failedAt.formatted(date: .omitted, time: .shortened)), so it can’t show what happened then.")
         }
         return DoctorReport(target: target, host: host, app: app, verdict: verdict, next: (elsewhere ? context?.detail ?? next : next) + after, steps: steps, hops: hops, date: date,
                             client: client, method: hops.first?.method, path: taken, failedAt: failedAt)
@@ -888,5 +988,16 @@ public enum ConnectionDoctor {
             }
             return addresses
         }.value
+    }
+}
+
+extension Sequence where Element == String {
+    /// A list in the app's language. English as Kilobat writes it, without a serial comma: "A, B and C".
+    func spokenList(or: Bool = false) -> String {
+        let items = Array(self), language = Bundle.main.preferredLocalizations.first ?? "en"
+        guard !language.hasPrefix("en") else {
+            return items.count < 2 ? items.first ?? "" : items.dropLast().joined(separator: ", ") + (or ? " or " : " and ") + items[items.count - 1]
+        }
+        return items.formatted(.list(type: or ? .or : .and).locale(Locale(identifier: language)))
     }
 }

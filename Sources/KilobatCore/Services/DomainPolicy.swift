@@ -3,12 +3,12 @@ import Foundation
 public enum DomainPolicy {
     public static func parseList(_ data: Data) throws -> [String] {
         func invalid(_ message: String) -> NSError { NSError(domain: "Kilobat", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
-        guard data.count <= 5_000_000 else { throw invalid("List is larger than 5 MB.") }
+        guard data.count <= 5_000_000 else { throw invalid(String(localized: "List is larger than 5 MB.")) }
         var domains = Set<String>()
         for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
             let clean = (line.split(separator: "#", omittingEmptySubsequences: false).first ?? "").trimmingCharacters(in: .whitespaces)
             if clean.isEmpty { continue }
-            if clean.contains("|") || clean.hasPrefix("!") || clean.hasPrefix("[") { throw invalid("Use a plain domains or hosts list; Adblock syntax is not supported.") }
+            if clean.contains("|") || clean.hasPrefix("!") || clean.hasPrefix("[") { throw invalid(String(localized: "Use a plain domains or hosts list; Adblock syntax is not supported.")) }
             // Hosts files map addresses to names; only the names after them are blocked. A line with only an
             // address or range blocks that address.
             let all = clean.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -16,10 +16,10 @@ public enum DomainPolicy {
             for word in words {
                 guard let entry = entry(word) else { continue }
                 domains.insert(entry)
-                guard domains.count <= 10000 else { throw invalid("Use at most 10,000 domains.") }
+                guard domains.count <= 10000 else { throw invalid(String(localized: "Use at most 10,000 domains.")) }
             }
         }
-        guard !domains.isEmpty else { throw invalid("No domains found in list.") }
+        guard !domains.isEmpty else { throw invalid(String(localized: "No domains found in list.")) }
         return domains.sorted()
     }
 

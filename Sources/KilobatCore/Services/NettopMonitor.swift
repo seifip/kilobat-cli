@@ -56,7 +56,7 @@ public final class NettopMonitor: @unchecked Sendable {
         let retry: @Sendable (Bool) -> Void = { [weak self] sampled in
             guard let self, self.current(id) else { return }
             let next = sampled ? 0 : failures + 1
-            if next == 3 { onError("Network monitoring stopped. Retrying…") }
+            if next == 3 { onError(String(localized: "Network monitoring stopped. Retrying…")) }
             self.queue.asyncAfter(deadline: .now() + min(60, pow(2, Double(next)))) { [weak self] in
                 self?.launch(id, scope: scope, failures: next, onSample: onSample, onError: onError)
             }

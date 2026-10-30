@@ -7,7 +7,7 @@ public struct UsageComparison: Codable, Equatable, Sendable {
     public enum Direction: String, Codable, CaseIterable, Identifiable, Sendable {
         case download, upload, both
         public var id: String { rawValue }
-        public var title: String { switch self { case .download: "Download"; case .upload: "Upload"; case .both: "Both ways" } }
+        public var title: String { switch self { case .download: String(localized: "Download"); case .upload: String(localized: "Upload"); case .both: String(localized: "Both ways") } }
         public func bytes(received: UInt64, sent: UInt64) -> UInt64 { switch self { case .download: received; case .upload: sent; case .both: received + sent } }
     }
 
@@ -44,7 +44,10 @@ public struct UsageComparison: Codable, Equatable, Sendable {
         /// Later than now.
         case notYet
         public var title: String {
-            switch self { case .beforeHistory: "Before history"; case .otherNetwork: "Other network"; case .asleep: "Asleep"; case .notRecorded: "Nothing recorded"; case .notYet: "Not yet" }
+            switch self {
+            case .beforeHistory: String(localized: "Before history"); case .otherNetwork: String(localized: "Other network"); case .asleep: String(localized: "Asleep")
+            case .notRecorded: String(localized: "Nothing recorded"); case .notYet: String(localized: "Not yet")
+            }
         }
     }
     public struct Gap: Codable, Equatable, Sendable {
@@ -70,8 +73,8 @@ public struct UsageComparison: Codable, Equatable, Sendable {
         public var id: String { rawValue }
         public var title: String {
             switch self {
-            case .last24Hours: "Last 24 hours"; case .today: "Today"; case .yesterday: "Yesterday"
-            case .last7Days: "Last 7 days"; case .thisMonth: "This month"; case .lastMonth: "Last month"
+            case .last24Hours: String(localized: "Last 24 hours"); case .today: String(localized: "Today"); case .yesterday: String(localized: "Yesterday")
+            case .last7Days: String(localized: "Last 7 days"); case .thisMonth: String(localized: "This month"); case .lastMonth: String(localized: "Last month")
             }
         }
         public func interval(now: Date = Date(), calendar: Calendar = .current) -> DateInterval {
@@ -130,12 +133,12 @@ public struct UsageComparison: Codable, Equatable, Sendable {
     public private(set) var reasons: [Reason] = []
 
     /// "all networks", or the counted networks' names, each once.
-    public var scopeName: String { allNetworks ? "all networks" : Self.list(networks.filter(\.counted).map(\.name)) }
+    public var scopeName: String { allNetworks ? String(localized: "all networks") : Self.list(networks.filter(\.counted).map(\.name)) }
     /// Names each once, the first four and how many more.
     static func list(_ names: [String]) -> String {
         var seen = Set<String>(), unique = names.filter { seen.insert($0).inserted }
-        if unique.count > 4 { unique = Array(unique.prefix(4)) + ["\(unique.count - 4) more"] }
-        return unique.count > 1 ? unique.dropLast().joined(separator: ", ") + " and " + unique[unique.count - 1] : unique.first ?? "no network"
+        if unique.count > 4 { unique = Array(unique.prefix(4)) + [String(localized: "\(unique.count - 4) more")] }
+        return unique.count > 1 ? String(localized: "\(unique.dropLast().joined(separator: ", ")) and \(unique[unique.count - 1])") : unique.first ?? String(localized: "no network")
     }
     /// Bytes in the comparison's unit, "31.2 GB".
     public func amount(_ bytes: UInt64) -> String { Text().amount(Double(bytes) / unit.size, unit) }
@@ -149,7 +152,7 @@ public struct UsageComparison: Codable, Equatable, Sendable {
                             now: Date = Date(), calendar: Calendar = .current) -> UsageComparison {
         let start = period.start, end = period.end, until = min(end, max(start, now))
         func counted(_ entry: UsageEntry) -> Bool { scope.map { entry.networkKey.map($0.contains) ?? false } ?? true }
-        func name(_ key: String?) -> String { key.flatMap { names[$0] } ?? (key == nil ? "Network not recorded" : "Unnamed network") }
+        func name(_ key: String?) -> String { key.flatMap { names[$0] } ?? (key == nil ? String(localized: "Network not recorded") : String(localized: "Unnamed network")) }
 
         var received: UInt64 = 0, sent: UInt64 = 0, local: UInt64 = 0, unattributed: UInt64 = 0, appsOnly = 0
         var perNetwork: [String: UInt64] = [:], apps: [String: UInt64] = [:]
@@ -205,12 +208,12 @@ public struct UsageComparison: Codable, Equatable, Sendable {
         let gapList = gaps.map { gap -> Gap in
             let detail: String
             switch gap.reason {
-            case .beforeHistory: detail = "Before Kilobat's history starts: it wasn't recording yet, or the history setting has since removed it"
-            case .otherNetwork: detail = "On another network: " + list(gap.networks.sorted())
-            case .asleep: detail = "The Mac was asleep"
-            case .notRecorded: detail = sleeps.isEmpty ? "Nothing recorded: the Mac was asleep, off or offline, Kilobat wasn't running, or nothing used the network"
-                : "Nothing recorded and not asleep: the Mac was off or offline, Kilobat wasn't running, or nothing used the network"
-            case .notYet: detail = "Hasn't happened yet"
+            case .beforeHistory: detail = String(localized: "Before Kilobat's history starts: it wasn't recording yet, or the history setting has since removed it")
+            case .otherNetwork: detail = String(localized: "On another network: \(list(gap.networks.sorted()))")
+            case .asleep: detail = String(localized: "The Mac was asleep")
+            case .notRecorded: detail = sleeps.isEmpty ? String(localized: "Nothing recorded: the Mac was asleep, off or offline, Kilobat wasn't running, or nothing used the network")
+                : String(localized: "Nothing recorded and not asleep: the Mac was off or offline, Kilobat wasn't running, or nothing used the network")
+            case .notYet: detail = String(localized: "Hasn't happened yet")
             }
             return Gap(start: gap.start, end: gap.end, hours: gap.end.timeIntervalSince(gap.start) / 3_600, reason: gap.reason, detail: detail)
         }
@@ -234,7 +237,6 @@ public struct UsageComparison: Codable, Equatable, Sendable {
     private func explained(text: Text, appsOnly: Int, monitoringScope: String?, sleepsKnown: Bool, now: Date, calendar: Calendar) -> UsageComparison {
         func amount(_ bytes: UInt64) -> String { text.amount(Double(bytes) / unit.size, unit) }
         let kilobatLower = differenceBytes > 0
-        let directionName = direction == .both ? "download and upload" : direction.rawValue
         var reasons: [Reason] = []
         func add(_ id: String, _ text: String) { reasons.append(Reason(id: id, text: text)) }
 
@@ -242,78 +244,101 @@ public struct UsageComparison: Codable, Equatable, Sendable {
         func coverageReason() {
             guard gapHours >= 0.5 else { return }
             var parts: [String] = []
-            for (reason, label) in [(GapReason.asleep, "asleep"), (.notRecorded, sleepsKnown ? "with nothing recorded (off, offline or Kilobat not running)" : "with nothing recorded (asleep, off, offline or Kilobat not running)"),
-                                    (.otherNetwork, "on other networks"), (.beforeHistory, "before Kilobat's history starts")] {
+            for reason in [GapReason.asleep, .notRecorded, .otherNetwork, .beforeHistory] {
                 let hours = gaps.filter { $0.reason == reason }.reduce(0) { $0 + $1.hours }
-                if hours >= 0.5 { parts.append("\(text.hours(hours)) hour\(text.hours(hours) == "1" ? "" : "s") \(label)") }
+                guard hours >= 0.5 else { continue }
+                let count = text.hours(hours), one = count == "1"
+                switch reason {
+                case .asleep: parts.append(one ? String(localized: "1 hour asleep") : String(localized: "\(count) hours asleep"))
+                case .notRecorded where sleepsKnown:
+                    parts.append(one ? String(localized: "1 hour with nothing recorded (off, offline or Kilobat not running)") : String(localized: "\(count) hours with nothing recorded (off, offline or Kilobat not running)"))
+                case .notRecorded:
+                    parts.append(one ? String(localized: "1 hour with nothing recorded (asleep, off, offline or Kilobat not running)") : String(localized: "\(count) hours with nothing recorded (asleep, off, offline or Kilobat not running)"))
+                case .otherNetwork: parts.append(one ? String(localized: "1 hour on other networks") : String(localized: "\(count) hours on other networks"))
+                default: parts.append(one ? String(localized: "1 hour before Kilobat's history starts") : String(localized: "\(count) hours before Kilobat's history starts"))
+                }
             }
-            add("coverage", "Kilobat recorded \(text.hours(recordedHours)) of the period's \(text.hours(periodHours)) hours. Missing: \(parts.joined(separator: ", ")). Anything this Mac used then isn't in Kilobat's total.")
+            add("coverage", String(localized: "Kilobat recorded \(text.hours(recordedHours)) of the period's \(text.hours(periodHours)) hours. Missing: \(parts.joined(separator: ", ")). Anything this Mac used then isn't in Kilobat's total."))
         }
         func directionReason() {
             // Only the reading that moves the figure toward Kilobat's.
             guard kilobatLower == (direction != .both) else { return }
-            if direction == .both { add("direction", "If the figure counts only downloads, Kilobat's download total is \(amount(downloadBytes)); uploads only, \(amount(uploadBytes)).") }
-            else { add("direction", "Many providers and routers count download and upload together. Both ways, Kilobat recorded \(amount(downloadBytes + uploadBytes)).") }
+            if direction == .both { add("direction", String(localized: "If the figure counts only downloads, Kilobat's download total is \(amount(downloadBytes)); uploads only, \(amount(uploadBytes)).")) }
+            else { add("direction", String(localized: "Many providers and routers count download and upload together. Both ways, Kilobat recorded \(amount(downloadBytes + uploadBytes)).")) }
         }
         let other = alternateBytes.map { Int64(clamping: $0) - Int64(clamping: kilobatBytes) }
         // Reading the figure in the other unit system takes away at least half the difference.
         let unitsExplain = other.map { $0.magnitude * 2 <= differenceBytes.magnitude } ?? false
         func unitReason() {
             guard let alternateUnit, let alternateBytes, let other else { return }
-            let sizes = "1 \(unit.rawValue) is \(text.count(unit.size)) bytes and 1 \(alternateUnit.rawValue) is \(text.count(alternateUnit.size))"
+            let sizes = String(localized: "1 \(unit.rawValue) is \(text.count(unit.size)) bytes and 1 \(alternateUnit.rawValue) is \(text.count(alternateUnit.size))")
             if other.magnitude < differenceBytes.magnitude {
-                add("units", "Providers and routers often write GB for either unit. If the figure means \(text.amount(externalAmount, alternateUnit)), that's \(text.amount(Double(alternateBytes) / unit.size, unit)), \(amount(other.magnitude)) \(other >= 0 ? "above" : "below") Kilobat's total; \(sizes).")
-            } else { add("units", "In \(alternateUnit.rawValue), Kilobat's total is \(text.amount(Double(kilobatBytes) / alternateUnit.size, alternateUnit)); \(sizes).") }
+                let meant = text.amount(externalAmount, alternateUnit), converted = text.amount(Double(alternateBytes) / unit.size, unit), apart = amount(other.magnitude)
+                add("units", other >= 0
+                    ? String(localized: "Providers and routers often write GB for either unit. If the figure means \(meant), that's \(converted), \(apart) above Kilobat's total; \(sizes).")
+                    : String(localized: "Providers and routers often write GB for either unit. If the figure means \(meant), that's \(converted), \(apart) below Kilobat's total; \(sizes)."))
+            } else { add("units", String(localized: "In \(alternateUnit.rawValue), Kilobat's total is \(text.amount(Double(kilobatBytes) / alternateUnit.size, alternateUnit)); \(sizes).")) }
         }
         func networksReason() {
             if !allNetworks, otherNetworkBytes > 0 {
                 let others = networks.filter { !$0.counted && $0.bytes > 0 }.map(\.name)
-                add("otherNetworks", "This Mac also used \(amount(otherNetworkBytes)) on \(Self.list(others)) in this period, not counted here. Add a network if the same plan or router covers it.")
+                add("otherNetworks", String(localized: "This Mac also used \(amount(otherNetworkBytes)) on \(Self.list(others)) in this period, not counted here. Add a network if the same plan or router covers it."))
             }
             let named = Dictionary(grouping: networks, by: \.name).filter { $0.value.contains(where: \.counted) && $0.value.contains { !$0.counted } }
             for (name, list) in named.sorted(by: { $0.key < $1.key }) {
-                add("sameName", "\(list.count) recorded networks are named \(name), told apart by their router or interface, and not all are counted. Check that the comparison counts the ones the figure covers.")
+                add("sameName", String(localized: "\(list.count) recorded networks are named \(name), told apart by their router or interface, and not all are counted. Check that the comparison counts the ones the figure covers."))
             }
             if allNetworks, networks.filter({ $0.bytes > 0 }).count > 1 {
-                add("allNetworks", "Kilobat's total covers \(networks.filter { $0.bytes > 0 }.count) networks. Pick the one the provider or router covers.")
+                add("allNetworks", String(localized: "Kilobat's total covers \(networks.filter { $0.bytes > 0 }.count) networks. Pick the one the provider or router covers."))
             }
         }
         func countingReasons() {
-            if localBytes > 0 { add("local", "\(amount(localBytes)) went to devices on the same network and AirDrop. It never reached the Internet, so Kilobat leaves it out; a provider doesn't see it either, but a router's per-device counter may count it.") }
-            if let monitoringScope, monitoringScope != "external" { add("monitoringScope", "Kilobat is set to count \(monitoringScope == "wifi" ? "Wi-Fi" : "wired connections") only, so this Mac's traffic over the other isn't in its total.") }
-            if appsOnly > 0 { add("appsOnly", "Part of this period was recorded before Kilobat 1.3 or without interface counters, when totals came from apps alone and left out packet headers.") }
-            let headers = unattributedBytes > 0 ? "Kilobat's total includes \(amount(unattributedBytes)) of unattributed traffic, mostly packet headers and acknowledgments. " : ""
-            add("overhead", headers + "Each counter measures at its own point and adds its own overhead, such as VPN, PPPoE or cellular framing, so a few percent apart is normal.")
+            if localBytes > 0 { add("local", String(localized: "\(amount(localBytes)) went to devices on the same network and AirDrop. It never reached the Internet, so Kilobat leaves it out; a provider doesn't see it either, but a router's per-device counter may count it.")) }
+            if let monitoringScope, monitoringScope != "external" {
+                add("monitoringScope", monitoringScope == "wifi"
+                    ? String(localized: "Kilobat is set to count Wi-Fi only, so this Mac's traffic over the other isn't in its total.")
+                    : String(localized: "Kilobat is set to count wired connections only, so this Mac's traffic over the other isn't in its total."))
+            }
+            if appsOnly > 0 { add("appsOnly", String(localized: "Part of this period was recorded before Kilobat 1.3 or without interface counters, when totals came from apps alone and left out packet headers.")) }
+            let headers = unattributedBytes > 0 ? String(localized: "Kilobat's total includes \(amount(unattributedBytes)) of unattributed traffic, mostly packet headers and acknowledgments.") + " " : ""
+            add("overhead", headers + String(localized: "Each counter measures at its own point and adds its own overhead, such as VPN, PPPoE or cellular framing, so a few percent apart is normal."))
         }
         func timingReason() {
-            add("timing", "Providers often count days in UTC or their own time zone and can post usage hours late. This comparison runs \(text.date(start)) to \(text.date(end)), \(timeZone).")
+            add("timing", String(localized: "Providers often count days in UTC or their own time zone and can post usage hours late. This comparison runs \(text.date(start)) to \(text.date(end)), \(timeZone)."))
             if let change = calendar.timeZone.nextDaylightSavingTimeTransition(after: start), change < end {
-                add("clockChange", "The clocks changed on \(text.date(change)), so this period is \(text.hours(end.timeIntervalSince(start) / 3_600)) hours long. Check that the provider's period follows the same clock.")
+                add("clockChange", String(localized: "The clocks changed on \(text.date(change)), so this period is \(text.hours(end.timeIntervalSince(start) / 3_600)) hours long. Check that the provider's period follows the same clock."))
             }
-            if end > now { add("notYet", "The period isn't over: Kilobat counts up to now, while the figure may cover the whole period or lag behind.") }
+            if end > now { add("notYet", String(localized: "The period isn't over: Kilobat counts up to now, while the figure may cover the whole period or lag behind.")) }
             let hourly = now.addingTimeInterval(-86_400), cut = { (date: Date) in date < hourly && calendar.dateInterval(of: .hour, for: date)?.start != date }
-            if cut(start) || cut(end) { add("boundary", "History older than a day is kept in hourly totals (daily after 30 days), so an hour that straddles the start or end counts by when it began.") }
+            if cut(start) || cut(end) { add("boundary", String(localized: "History older than a day is kept in hourly totals (daily after 30 days), so an hour that straddles the start or end counts by when it began.")) }
         }
 
         let summary: String
-        let both = "Kilobat recorded \(amount(kilobatBytes)) of \(directionName) on \(scopeName)"
+        let recorded = amount(kilobatBytes), entered = text.amount(externalAmount, unit), apart = amount(differenceBytes.magnitude)
+        let both = switch direction {
+        case .both: String(localized: "Kilobat recorded \(recorded) of download and upload on \(scopeName)")
+        case .download: String(localized: "Kilobat recorded \(recorded) of download on \(scopeName)")
+        case .upload: String(localized: "Kilobat recorded \(recorded) of upload on \(scopeName)")
+        }
         if agrees {
-            summary = "\(both); the figure you entered is \(text.amount(externalAmount, unit)). They're within 5%."
-            add("close", "Counters at different points add different overhead, so within 5% is about as close as two of them get.")
+            summary = String(localized: "\(both); the figure you entered is \(entered). They're within 5%.")
+            add("close", String(localized: "Counters at different points add different overhead, so within 5% is about as close as two of them get."))
             coverageReason(); directionReason(); unitReason(); timingReason(); networksReason(); countingReasons()
         } else if kilobatLower {
-            summary = "\(both), \(amount(differenceBytes.magnitude)) less than the \(text.amount(externalAmount, unit)) you entered" + (differencePercent.map { " (\(text.percent($0)))." } ?? ".")
+            summary = differencePercent.map { String(localized: "\(both), \(apart) less than the \(entered) you entered (\(text.percent($0))).") }
+                ?? String(localized: "\(both), \(apart) less than the \(entered) you entered.")
             coverageReason()
             if unitsExplain { unitReason() }
-            add("otherDevices", "A router or provider total covers every device on the network, such as phones, TVs, consoles and other computers. Kilobat measures only this Mac.")
+            add("otherDevices", String(localized: "A router or provider total covers every device on the network, such as phones, TVs, consoles and other computers. Kilobat measures only this Mac."))
             directionReason(); networksReason()
             if !unitsExplain { unitReason() }
             countingReasons(); timingReason()
         } else {
-            summary = "\(both), \(amount(differenceBytes.magnitude)) more than the \(text.amount(externalAmount, unit)) you entered" + (differencePercent.map { " (\(text.percent(-$0)))." } ?? ".")
+            summary = differencePercent.map { String(localized: "\(both), \(apart) more than the \(entered) you entered (\(text.percent(-$0))).") }
+                ?? String(localized: "\(both), \(apart) more than the \(entered) you entered.")
             if unitsExplain { unitReason() }
             directionReason(); timingReason()
-            add("planRules", "Some plans leave traffic out of their count, such as off-peak hours, zero-rated apps or the provider's own services.")
+            add("planRules", String(localized: "Some plans leave traffic out of their count, such as off-peak hours, zero-rated apps or the provider's own services."))
             networksReason()
             if !unitsExplain { unitReason() }
             countingReasons(); coverageReason()
@@ -364,9 +389,9 @@ public struct UsageComparison: Codable, Equatable, Sendable {
     /// A name for every network in the history: its saved name, or the start of its key once it's no longer saved.
     public static func networkNames(_ usage: [UsageEntry], sessions: [String: NetworkSession]) -> [String: String] {
         var names: [String: String] = [:]
-        for key in Set(usage.compactMap(\.networkKey)) { names[key] = "Network " + key.prefix(6) }
+        for key in Set(usage.compactMap(\.networkKey)) { names[key] = String(localized: "Network \(String(key.prefix(6)))") }
         for (key, session) in sessions { names[key] = session.name }
-        if names["unknown"] != nil { names["unknown"] = "Network not identified" }
+        if names["unknown"] != nil { names["unknown"] = String(localized: "Network not identified") }
         return names
     }
 

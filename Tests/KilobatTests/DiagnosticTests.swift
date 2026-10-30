@@ -36,6 +36,20 @@ struct DiagnosticTests {
         #expect(DiagnosticProbe.congestion(channel: 6, band: "2.4 GHz", networks: [network]) == 0)
         #expect(DiagnosticProbe.congestion(channel: 1, band: "5 GHz", networks: [network]) == 0)
     }
+    @MainActor @Test func placeCardUsesTheNewestCompleteTestOnThisNetwork() {
+        let journal = NetworkJournal(directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let ping = PingResult(host: "test", samples: [20, 21, 22], lossPercent: 0)
+        func test(_ mbps: Double) -> SpeedTestResult {
+            SpeedTestResult(date: Date(), downloadMbps: mbps, uploadMbps: mbps, baseline: ping, downloadLoaded: ping, uploadLoaded: ping, downloadSeconds: 8, uploadSeconds: 8, transferredBytes: 1000)
+        }
+        journal.speedTests = [SavedSpeedTest(networkKey: "cafe", networkName: "Cafe", result: test(40)),
+                              SavedSpeedTest(networkKey: "cafe", networkName: "Cafe", networkChanged: true, result: test(90)),
+                              SavedSpeedTest(networkKey: "home", networkName: "Home", result: test(300))]
+        #expect(journal.latestSpeedTest(onNetwork: "cafe")?.downloadMbps == 40)
+        #expect(journal.latestSpeedTest(onNetwork: "hotel") == nil)
+        #expect(journal.latestSpeedTest(onNetwork: "unknown") == nil)
+        #expect(journal.latestSpeedTest(onNetwork: nil) == nil)
+    }
     @Test func shortSpeedTestsDoNotClaimBufferbloatGrade() {
         let ping = PingResult(host: "test", samples: [10], lossPercent: 0)
         let loaded = PingResult(host: "test", samples: [100], lossPercent: 0)

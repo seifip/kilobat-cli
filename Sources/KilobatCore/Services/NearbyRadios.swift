@@ -13,24 +13,49 @@ public struct AWDLStatus: Codable, Sendable, Equatable {
         self.available = available; self.up = up; self.active = active; self.users = users; self.processes = processes
     }
     public var detail: String {
-        guard available else { return "Not on this Mac" }
-        guard up else { return "Paused" }
-        guard active || !users.isEmpty else { return "Idle" }
-        return "Active" + (users.isEmpty ? "" : " · used by " + NearbyRadios.list(users))
+        guard available else { return String(localized: "Not on this Mac", comment: "The AirDrop link (AWDL)") }
+        guard up else { return String(localized: "Paused", comment: "The AirDrop link (AWDL)") }
+        guard active || !users.isEmpty else { return String(localized: "Idle", comment: "The AirDrop link (AWDL)") }
+        return users.isEmpty ? String(localized: "Active", comment: "The AirDrop link (AWDL)") : String(localized: "Active · used by \(NearbyRadios.list(users))", comment: "The AirDrop link (AWDL)")
     }
-    public var summary: String { available ? "AirDrop link " + detail.prefix(1).lowercased() + detail.dropFirst() : "No AirDrop link on this Mac" }
+    public var summary: String {
+        guard available else { return String(localized: "No AirDrop link on this Mac") }
+        guard up else { return String(localized: "AirDrop link paused") }
+        guard active || !users.isEmpty else { return String(localized: "AirDrop link idle") }
+        return users.isEmpty ? String(localized: "AirDrop link active") : String(localized: "AirDrop link active · used by \(NearbyRadios.list(users))")
+    }
 }
 
 public enum AirDropVisibility: String, Codable, Sendable, CaseIterable {
     case everyone = "Everyone", contacts = "Contacts Only", off = "Off"
     public var key: String { switch self { case .everyone: "everyone"; case .contacts: "contacts"; case .off: "off" } }
-    public var title: String { self == .off ? "Receiving off" : rawValue }
+    /// `rawValue` is sharingd's own setting; `title` is how it's shown.
+    public var title: String {
+        switch self {
+        case .everyone: String(localized: "Everyone", comment: "Who can send by AirDrop")
+        case .contacts: String(localized: "Contacts Only", comment: "Who can send by AirDrop")
+        case .off: String(localized: "Receiving off", comment: "Who can send by AirDrop")
+        }
+    }
 }
 
 public struct BluetoothDevice: Codable, Sendable, Identifiable, Equatable {
     public enum Kind: String, Codable, Sendable, CaseIterable {
         case headphones, speaker, keyboard, mouse, trackpad, phone, watch, tablet, computer, other
-        public var title: String { self == .other ? "Other device" : rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+        public var title: String {
+            switch self {
+            case .headphones: String(localized: "Headphones")
+            case .speaker: String(localized: "Speaker")
+            case .keyboard: String(localized: "Keyboard")
+            case .mouse: String(localized: "Mouse")
+            case .trackpad: String(localized: "Trackpad")
+            case .phone: String(localized: "Phone")
+            case .watch: String(localized: "Watch")
+            case .tablet: String(localized: "Tablet")
+            case .computer: String(localized: "Computer")
+            case .other: String(localized: "Other device")
+            }
+        }
     }
     public let id: String
     public let name: String
@@ -91,7 +116,7 @@ public struct BluetoothDevice: Codable, Sendable, Identifiable, Equatable {
 
 public enum NearbyRadios {
     public static func list(_ names: [String]) -> String {
-        names.count <= 1 ? names.joined() : names.dropLast().joined(separator: ", ") + " and " + names.last!
+        names.count <= 1 ? names.joined() : String(localized: "\(names.dropLast().joined(separator: ", ")) and \(names.last!)", comment: "A list of names, the last two joined by and")
     }
     /// `up` is false while the interface is down (paused); `active` is the link status.
     public static func parseInterface(_ output: String) -> (up: Bool, active: Bool)? {
@@ -173,13 +198,15 @@ public enum NearbyRadios {
     public static func coexistence(wifiBand: String?, devices: [BluetoothDevice], fasterNetwork: String? = nil) -> String? {
         let sharing = devices.filter { sharesBand($0, wifiBand: wifiBand) }.map(\.name)
         guard !sharing.isEmpty else { return nil }
-        let move = fasterNetwork.map { "Switch to \($0) (5 GHz) if you can." } ?? "A 5 GHz network avoids that."
-        return "Your Wi-Fi is on 2.4 GHz, the band \(list(sharing)) \(sharing.count == 1 ? "also uses" : "also use"). Calls and audio may stutter. " + move
+        let move = fasterNetwork.map { String(localized: "Switch to \($0) (5 GHz) if you can.") } ?? String(localized: "A 5 GHz network avoids that.")
+        let band = sharing.count == 1 ? String(localized: "Your Wi-Fi is on 2.4 GHz, the band \(sharing[0]) also uses. Calls and audio may stutter.")
+            : String(localized: "Your Wi-Fi is on 2.4 GHz, the band \(list(sharing)) also use. Calls and audio may stutter.")
+        return band + " " + move
     }
     /// Plain words for an IOReturn from opening or closing a Bluetooth connection.
     public static func connectionError(_ status: Int32, connecting: Bool, name: String) -> String? {
         guard status != 0 else { return nil }
-        return connecting ? "\(name) didn't connect. Make sure it's on, nearby and not connected to another device." : "\(name) didn't disconnect. Try again, or use Bluetooth Settings."
+        return connecting ? String(localized: "\(name) didn't connect. Make sure it's on, nearby and not connected to another device.") : String(localized: "\(name) didn't disconnect. Try again, or use Bluetooth Settings.")
     }
 }
 

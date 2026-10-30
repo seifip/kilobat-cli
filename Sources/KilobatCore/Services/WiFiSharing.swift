@@ -22,24 +22,24 @@ extension WiFiConnection {
     /// Called only after an explicit sharing action and device-owner authentication.
     public func shareDetails(expectedName: String) throws -> WiFiShareDetails {
         guard let interface = CWWiFiClient.shared().interface(), interface.ssid() == expectedName,
-              let ssid = interface.ssidData() else { throw DiagnosticError("The connected network changed. Reopen sharing for the current network.") }
+              let ssid = interface.ssidData() else { throw DiagnosticError(String(localized: "The connected network changed. Reopen sharing for the current network.")) }
         let security = interface.security()
         guard [.none, .WEP, .wpaPersonal, .wpaPersonalMixed, .wpa2Personal, .wpa3Personal, .wpa3Transition].contains(security) else {
-            throw DiagnosticError("This network uses enterprise or unsupported security. Share its setup instructions instead of a password.")
+            throw DiagnosticError(String(localized: "This network uses enterprise or unsupported security. Share its setup instructions instead of a password."))
         }
         if security == .none { return WiFiShareDetails(name: expectedName, password: "", security: "nopass") }
         var password: NSString?
         var status = CWKeychainFindWiFiPassword(.user, ssid, &password)
         if status == errSecItemNotFound { status = CWKeychainFindWiFiPassword(.system, ssid, &password) }
         guard status == errSecSuccess, let password else {
-            throw DiagnosticError(status == errSecUserCanceled ? "Password access was cancelled." : "The saved password is unavailable to Kilobat. You can look for this network in Apple’s Passwords app.")
+            throw DiagnosticError(status == errSecUserCanceled ? String(localized: "Password access was cancelled.") : String(localized: "The saved password is unavailable to Kilobat. You can look for this network in Apple’s Passwords app."))
         }
-        guard interface.ssid() == expectedName else { throw DiagnosticError("The connected network changed. Try again.") }
+        guard interface.ssid() == expectedName else { throw DiagnosticError(String(localized: "The connected network changed. Try again.")) }
         return WiFiShareDetails(name: expectedName, password: password as String, security: security == .WEP ? "WEP" : "WPA")
     }
 
     public func restart() async throws {
-        guard let interface = CWWiFiClient.shared().interface() else { throw DiagnosticError("No Wi-Fi interface is available.") }
+        guard let interface = CWWiFiClient.shared().interface() else { throw DiagnosticError(String(localized: "No Wi-Fi interface is available.")) }
         guard interface.powerOn() else { try interface.setPower(true); return }
         try interface.setPower(false)
         do { try await Task.sleep(for: .seconds(2)) }

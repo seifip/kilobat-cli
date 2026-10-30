@@ -77,10 +77,10 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
 
     public func activate(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
-        guard bundled else { message = "This build has no signed network extension. Use a provisioned build to enable filtering."; return }
+        guard bundled else { message = String(localized: "This build has no signed network extension. Use a provisioned build to enable filtering."); return }
         configuration = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
         busy = true
-        message = "Approve Kilobat in System Settings → General → Login Items & Extensions → Network Extensions."
+        message = String(localized: "Approve Kilobat in System Settings → General → Login Items & Extensions → Network Extensions.")
         let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
         request.delegate = self
         activationRequest = request
@@ -118,7 +118,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         }
         busy = false
         extensionEnabled = false
-        message = removed ? "Network filter removed." : "The network filter is turned off and will be removed after a restart."
+        message = removed ? String(localized: "Network filter removed.") : String(localized: "The network filter is turned off and will be removed after a restart.")
         return removed
     }
 
@@ -159,7 +159,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
                 provider.filterDataProviderBundleIdentifier = Self.identifier
                 provider.vendorConfiguration = self.configuration
                 self.manager.providerConfiguration = provider
-                self.manager.localizedDescription = "Kilobat app access rules"
+                self.manager.localizedDescription = String(localized: "Kilobat app access rules")
                 self.manager.isEnabled = enabled
                 self.manager.saveToPreferences { [weak self] error in
                     Task { @MainActor in
@@ -168,7 +168,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
                         self.enabled = enabled
                         self.lastPolicy = try? JSONSerialization.data(withJSONObject: self.configuration, options: .sortedKeys)
                         self.busy = false
-                        self.message = enabled ? "Network filter enabled." : "Network filter disabled. All traffic allowed."
+                        self.message = enabled ? String(localized: "Network filter enabled.") : String(localized: "Network filter disabled. All traffic allowed.")
                         if enabled, let pending = self.pendingPolicy {
                             self.pendingPolicy = nil
                             let encoded = try? JSONSerialization.data(withJSONObject: pending, options: .sortedKeys)
@@ -181,7 +181,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
     private func fail(_ error: Error) { pendingPolicy = nil; busy = false; message = error.localizedDescription; refresh() }
     public func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
-        message = "Waiting for approval in System Settings → General → Login Items & Extensions."
+        message = String(localized: "Waiting for approval in System Settings → General → Login Items & Extensions.")
     }
     public func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction { .replace }
     public func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
@@ -193,7 +193,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         guard request === activationRequest else { return }
         activationRequest = nil
         if result == .completed { extensionEnabled = true; save(enabled: true) }
-        else { busy = false; message = "Restart your Mac to finish installing the network extension." }
+        else { busy = false; message = String(localized: "Restart your Mac to finish installing the network extension.") }
     }
     public func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
         let ours = properties.filter { $0.bundleIdentifier == Self.identifier && $0.isEnabled }

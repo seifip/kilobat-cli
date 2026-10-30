@@ -81,18 +81,17 @@ public enum UpdaterPause {
         public var limits: String
     }
 
-    public static let limits = "The filter stops new connections, so a download already running when the network became metered can finish. "
-        + "Apps that download updates inside their own process can't be paused without blocking the app; bytes macOS services move for several apps at once can't be split."
+    public static let limits = String(localized: "The filter stops new connections, so a download already running when the network became metered can finish. Apps that download updates inside their own process can't be paused without blocking the app; bytes macOS services move for several apps at once can't be split.")
 
     public static func report(_ preferences: SavedPreferences, metered: Bool, filterActive: Bool?, apps: [AppTraffic]?, delegations: [DelegatedFlows],
                               events: [FilterEvent], inProcess: [InProcessApp], now: Date = Date()) -> Report {
         let enabled = enabled(preferences), paused = active(preferences, metered: metered)
-        let summary: String = if !enabled { "Off: updaters run on every network." }
-            else if !metered { "On: updaters wait while this Mac is on a metered network. This one isn’t metered, so they run." }
-            else if !paused { "This network is metered, but the Unrestricted profile allows every connection, so updaters aren’t paused." }
-            else if filterActive == false { "This network is metered, but the network filter is off, so updaters aren’t paused." }
-            else if filterActive == nil { "This network is metered: updaters are paused while the Kilobat app’s network filter is on." }
-            else { "Paused: updaters can’t start new connections until this Mac leaves the metered network." }
+        let summary: String = if !enabled { String(localized: "Off: updaters run on every network.") }
+            else if !metered { String(localized: "On: updaters wait while this Mac is on a metered network. This one isn’t metered, so they run.") }
+            else if !paused { String(localized: "This network is metered, but the Unrestricted profile allows every connection, so updaters aren’t paused.") }
+            else if filterActive == false { String(localized: "This network is metered, but the network filter is off, so updaters aren’t paused.") }
+            else if filterActive == nil { String(localized: "This network is metered: updaters are paused while the Kilobat app’s network filter is on.") }
+            else { String(localized: "Paused: updaters can’t start new connections until this Mac leaves the metered network.") }
         let covered = UpdaterHelpers.helpers.map { Report.Covered(id: $0.id, name: $0.name, detail: $0.detail, downloads: $0.downloads) }
         let paused24h = events.filter { $0.reason == UpdaterHelpers.reason && now.timeIntervalSince($0.date) < 86_400 }.count
         return Report(enabled: enabled, metered: metered, paused: paused, filterActive: filterActive, covered: covered,

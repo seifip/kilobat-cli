@@ -14,7 +14,7 @@ public final class GeoIP: @unchecked Sendable {
     }
 
     public static let shared = GeoIP()
-    public static let attribution = "IP geolocation by DB-IP (db-ip.com), CC BY 4.0"
+    public static let attribution = String(localized: "IP geolocation by DB-IP (db-ip.com), CC BY 4.0")
     private let lock = NSLock()
     private var loaded = false
     private var v4: [UInt32] = [], v4Codes: [UInt16] = []

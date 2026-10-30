@@ -70,8 +70,8 @@ public struct AgentInstall: Equatable, Sendable {
         else if parts.contains("node_modules") { origin = "npm" + (node.map { " (node \($0.hasPrefix("v") ? String($0.dropFirst()) : $0))" } ?? "") }
         else if parts.contains(".bun") { origin = "bun" }
         else if parts.contains(".cargo") { origin = "cargo" }
-        else if let support = parts.firstIndex(of: "Application Support"), support + 1 < parts.count { origin = parts[support + 1] + " app" }
-        else if let bundle = parts.first(where: { $0.hasSuffix(".app") }) { origin = String(bundle.dropLast(4)) + " app" }
+        else if let support = parts.firstIndex(of: "Application Support"), support + 1 < parts.count { origin = String(localized: "\(parts[support + 1]) app") }
+        else if let bundle = parts.first(where: { $0.hasSuffix(".app") }) { origin = String(localized: "\(String(bundle.dropLast(4))) app") }
         else if path.hasPrefix(home + "/.local/") { origin = "~/.local" }
         // An npm package's own version, from its package.json; a cheap read.
         if version == nil, let modules = parts.lastIndex(of: "node_modules"), modules + 1 < parts.count {

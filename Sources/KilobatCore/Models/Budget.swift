@@ -5,11 +5,11 @@ public enum BudgetPeriod: String, Codable, CaseIterable, Identifiable, Sendable 
     case session, daily, weekly, monthly
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .session: "Until reset"; case .daily: "Daily"; case .weekly: "Weekly"; case .monthly: "Monthly" }
+        switch self { case .session: String(localized: "Until reset"); case .daily: String(localized: "Daily"); case .weekly: String(localized: "Weekly"); case .monthly: String(localized: "Monthly") }
     }
     /// "this month", for "1.2 of 5 GB this month".
     public var phrase: String {
-        switch self { case .session: "this session"; case .daily: "today"; case .weekly: "this week"; case .monthly: "this month" }
+        switch self { case .session: String(localized: "this session"); case .daily: String(localized: "today"); case .weekly: String(localized: "this week"); case .monthly: String(localized: "this month") }
     }
 }
 
@@ -64,16 +64,17 @@ public struct BudgetCycle: Codable, Equatable, Sendable {
     public func summary(calendar: Calendar = .current) -> String {
         switch period {
         case .session, .daily: return period.title
-        case .weekly: return "Weekly from " + calendar.weekdaySymbols[min(7, max(1, anchor ?? calendar.firstWeekday)) - 1]
-        case .monthly: return "Monthly from day \(min(31, max(1, anchor ?? 1)))"
+        case .weekly: return String(localized: "Weekly from \(calendar.weekdaySymbols[min(7, max(1, anchor ?? calendar.firstWeekday)) - 1])")
+        case .monthly: return String(localized: "Monthly from day \(min(31, max(1, anchor ?? 1)))")
         }
     }
 
     /// "1.2 of 5 GB this month · resets 1 Nov"; a session budget has no reset date.
     public func progress(used: UInt64, limitGB: Double, now: Date = Date(), calendar: Calendar = .current) -> String {
         let gb = Double(used) / 1_000_000_000
-        var text = gb.formatted(.number.precision(.fractionLength(0...(gb < 0.1 ? 2 : 1)))) + " of \(limitGB.formatted()) GB \(period.phrase)"
-        if let end = interval(containing: now, calendar: calendar)?.end { text += " · resets " + end.formatted(.dateTime.day().month()) }
+        let amount = gb.formatted(.number.precision(.fractionLength(0...(gb < 0.1 ? 2 : 1)))), limit = limitGB.formatted(), phrase = period.phrase
+        var text = String(localized: "\(amount) of \(limit) GB \(phrase)")
+        if let end = interval(containing: now, calendar: calendar)?.end { text += " · " + String(localized: "resets \(end.formatted(.dateTime.day().month()))") }
         return text
     }
 
@@ -154,7 +155,7 @@ public struct UploadAnomaly: Equatable, Sendable {
     public static let factor = 5.0
 
     /// "Dropbox uploaded 2.1 GB in the last hour, 9× its usual."
-    public var message: String { "\(app) uploaded \(TrafficFormat.bytes(bytes)) in the last hour, \(Int(ratio.rounded()))× its usual." }
+    public var message: String { String(localized: "\(app) uploaded \(TrafficFormat.bytes(bytes)) in the last hour, \(Int(ratio.rounded()))× its usual.") }
 
     /// Apps that uploaded at least 50 MB in the hour before `now`, and at least five times their usual: the
     /// average over the hours of the week before in which they uploaded anything. Apps with fewer than three such

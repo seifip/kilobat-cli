@@ -22,7 +22,7 @@ public struct AppTrafficGroup: Identifiable {
         }
         return buckets.map { key, members in
             let path = key.hasPrefix("owner:") ? String(key.dropFirst(6)) : nil
-            let name = key == systemDownloads ? "System downloads" : path.map(displayName) ?? members[0].name
+            let name = key == systemDownloads ? String(localized: "System downloads") : path.map(displayName) ?? members[0].name
             var summary = AppTraffic(id: key, name: name, bundlePath: path ?? (key == systemDownloads ? nil : members[0].bundlePath))
             for member in members {
                 summary.received += member.received; summary.sent += member.sent

@@ -10,7 +10,7 @@ public extension DiagnosticSnapshot {
         let identity = [wifi?.ssid ?? "SSID unavailable", gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"].joined(separator: "|")
         return SHA256.hash(data: Data(identity.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
-    var networkName: String { (wiredInterface == nil ? radio.ssid : nil) ?? networkService ?? "Unknown network" }
+    var networkName: String { (wiredInterface == nil ? radio.ssid : nil) ?? networkService ?? String(localized: "Unknown network") }
     /// Wi-Fi without its name (macOS hides it without Location) looks the same as any network behind the same router address.
     var networkIdentified: Bool { gateway != nil && (wiredInterface != nil || radio.interface == nil || radio.ssid != nil) }
 }
@@ -51,7 +51,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         samples = read("health-samples.json") ?? []; events = read("events.json") ?? []; speedTests = read("speed-tests.json") ?? []
         alerts = UserDefaults.standard.bool(forKey: "networkAlerts")
         // A previous process may have stopped mid-incident. Do not count unobserved time.
-        for i in events.indices where events[i].end == nil { events[i].end = events[i].start; events[i].detail += " · monitoring interrupted" }
+        for i in events.indices where events[i].end == nil { events[i].end = events[i].start; events[i].detail += " · " + String(localized: "monitoring interrupted") }
     }
     private func read<T: Decodable>(_ name: String) -> T? { StoredJSON.read(directory.appendingPathComponent(name)) }
     private func save<T: Encodable>(_ value: T, _ name: String) {
@@ -59,7 +59,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         catch { persistenceError = error.localizedDescription }
     }
     public func suspend(at date: Date = Date()) {
-        finish(at: date, reason: "Monitoring paused")
+        finish(at: date, reason: String(localized: "Monitoring paused"))
         failures = 0; successes = 0; degraded = 0; failureStart = nil; lastDate = nil
     }
     private func finish(at date: Date, reason: String) {
@@ -72,15 +72,15 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         if let previous = lastDate, date.timeIntervalSince(previous) > max(180, 3 * interval + 30) { suspend(at: previous) }
         let sameNetwork = lastNetwork == sample.networkKey
         if !sameNetwork {
-            finish(at: lastDate ?? date, reason: "Network changed")
-            if lastNetwork != nil { events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Network changed", detail: "New network baseline")) }
+            finish(at: lastDate ?? date, reason: String(localized: "Network changed"))
+            if lastNetwork != nil { events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Network changed", detail: String(localized: "New network baseline"))) }
             lastNetwork = sample.networkKey; failures = 0; failureStart = nil; degraded = 0
         }
         if samples.last.map({ date.timeIntervalSince($0.date) >= 60 }) ?? true {
             samples.append(sample); samples = Array(samples.suffix(1440)); save(samples, "health-samples.json")
         }
         if sameNetwork, let previous = lastBSSID, let current = sample.radio.bssid, previous != current {
-            events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Wi-Fi roam", detail: "Access point changed from \(previous) to \(current)"))
+            events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Wi-Fi roam", detail: String(localized: "Access point changed from \(previous) to \(current)")))
         }
         lastBSSID = sample.radio.bssid
         lastDate = date
@@ -88,18 +88,18 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         targetStatus = "1.1.1.1: \(sample.internet.average == nil ? "no ICMP reply" : "reachable") · 8.8.8.8: \(secondary.average == nil ? "no ICMP reply" : "reachable")" + (httpReachable.map { " · HTTPS: \($0 ? "reachable" : "failed")" } ?? "")
         if reachable {
             failures = 0; failureStart = nil; successes += 1
-            if successes >= 2 { finish(at: date, reason: "Recovered after two successful checks") }
+            if successes >= 2 { finish(at: date, reason: String(localized: "Recovered after two successful checks")) }
         } else {
             successes = 0; failures += 1
             if failureStart == nil { failureStart = date }
             if failures == 3 && !events.contains(where: { $0.end == nil }) {
-                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure."))
-                notify("Connection unreachable", "Three consecutive checks failed on \(sample.networkName).")
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: String(localized: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure.")))
+                notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }
         }
         let slow = (sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.radio.health == .poor
         degraded = slow ? degraded + 1 : 0
-        if degraded == 3 { notify("Connection quality dropped", "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).") }
+        if degraded == 3 { notify(String(localized: "Connection quality dropped"), String(localized: "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).")) }
         events = Array(events.suffix(500)); save(events, "events.json")
     }
     /// A change worth a line in the event log, such as a VPN going on or off. Never an alert.
@@ -108,8 +108,13 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         events = Array(events.suffix(500)); save(events, "events.json")
     }
     public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false) {
-        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? "Unknown network", networkChanged: networkChanged, result: test))
+        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, result: test))
         speedTests = Array(speedTests.suffix(200)); save(speedTests, "speed-tests.json")
+    }
+    /// The newest test that ran start to finish on this network, for the This place card.
+    public func latestSpeedTest(onNetwork key: String?) -> SpeedTestResult? {
+        guard let key, key != "unknown" else { return nil }
+        return speedTests.last { $0.networkKey == key && $0.networkChanged != true }?.result
     }
     public func requestAlerts() async {
         do { alerts = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }

@@ -65,7 +65,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var speedStarted: Date?
     public var speedBytes = 0
     public var speedRunning = false
-    public var speedProgress = "Ready when you are."
+    public var speedProgress = String(localized: "Ready when you are.")
     /// The result shown while idle; nil during a run so live progress shows instead.
     public var speed: SpeedTestResult? { speedRunning ? nil : lastSpeed }
     /// The latest completed test. A cancelled or failed run never clears it.
@@ -139,11 +139,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         visible = surfaces.values.contains { $0.menuBar || NSApp.isActive }
     }
     public var guidance: String {
-        guard let score = radio?.score else { return "Connect to Wi-Fi to start finding a better spot." }
-        if score >= 85 { return "Great spot. Stay here." }
-        if bestScore - score >= 10 { return "Go back. Your previous spot was stronger." }
-        if score >= 65 { return "Getting warmer. Keep going." }
-        return "Keep going. Try closer to the router."
+        guard let score = radio?.score else { return String(localized: "Connect to Wi-Fi to start finding a better spot.") }
+        if score >= 85 { return String(localized: "Great spot. Stay here.") }
+        if bestScore - score >= 10 { return String(localized: "Go back. Your previous spot was stronger.") }
+        if score >= 65 { return String(localized: "Getting warmer. Keep going.") }
+        return String(localized: "Keep going. Try closer to the router.")
     }
     public func requestLocation() {
         if location.authorizationStatus == .notDetermined { location.requestWhenInUseAuthorization() }
@@ -223,7 +223,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             if publicLookup, path.interface != nil {
                 lookingUp = true; lookupAttempt = Date(); defer { lookingUp = false }
                 do { path.publicAddress = try await ExitPath.publicAddress(); lookupError = nil }
-                catch { lookupError = "Couldn’t get the public IP: \(error.localizedDescription)" }
+                catch { lookupError = String(localized: "Couldn’t get the public IP: \(error.localizedDescription)") }
             }
         } else if path.interface == exitPath?.interface, path.vpn == exitPath?.vpn { path.publicAddress = exitPath?.publicAddress }
         // Lookup could have been turned off while Cloudflare answered.
@@ -233,7 +233,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public func scan() async {
         guard !scanning else { return }
-        guard locationAllowed else { error = "Enable Location access to scan nearby Wi-Fi networks. macOS uses this permission for Wi-Fi names and scanning."; return }
+        guard locationAllowed else { error = String(localized: "Enable Location access to scan nearby Wi-Fi networks. macOS uses this permission for Wi-Fi names and scanning."); return }
         scanning = true
         defer { scanning = false }
         do { networks = try await probe.scan(); survey.saveScan(networks) }
@@ -262,9 +262,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                 self.lastSpeed = result
                 self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
-                self.speedProgress = "Test complete."
-            } catch is CancellationError { self.speedProgress = "Test cancelled." }
-            catch { self.speedProgress = Task.isCancelled ? "Test cancelled." : error.localizedDescription }
+                self.speedProgress = String(localized: "Test complete.")
+            } catch is CancellationError { self.speedProgress = String(localized: "Test cancelled.") }
+            catch { self.speedProgress = Task.isCancelled ? String(localized: "Test cancelled.") : error.localizedDescription }
         }
     }
     public func cancelSpeedTest() { speedTask?.cancel() }
@@ -276,51 +276,67 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         guard let result = lastSpeed, result.date != previous else { throw SpeedTestFailure(message: speedProgress) }
         return result
     }
+
+    #if DEBUG
+    /// Made-up results for App Store screenshots; debug builds only.
+    public func preview(speed: SpeedTestResult?, exit: ExitPath?) { lastSpeed = speed; exitPath = exit }
+    #endif
     public func flushDNS() async {
         guard !flushingDNS else { return }
         flushingDNS = true; defer { flushingDNS = false }
-        do { try await NetworkTools.flushDNS(); notice = "DNS cache flushed."; await diagnose() }
+        do { try await NetworkTools.flushDNS(); notice = String(localized: "DNS cache flushed."); await diagnose() }
         catch { self.error = error.localizedDescription }
     }
     public func changeDNS(_ provider: DNSProvider) async {
-        guard let service = snapshot?.networkService else { error = "Could not determine the current network service. Run diagnostics first."; return }
+        guard let service = snapshot?.networkService else { error = String(localized: "Could not determine the current network service. Run diagnostics first."); return }
         guard !changingDNS else { return }
         changingDNS = true
         defer { changingDNS = false }
         do {
             try await DNSService.set(provider, service: service)
-            notice = "\(service) now uses \(provider.rawValue) DNS."
+            notice = String(localized: "\(service) now uses \(provider.rawValue) DNS.")
             await diagnose()
         } catch { self.error = error.localizedDescription }
     }
     public var textReport: String {
-        guard let snapshot else { return "No diagnostic sample yet. Run a check first." }
+        guard let snapshot else { return String(localized: "No diagnostic sample yet. Run a check first.") }
         return Self.report(snapshot, speed: speed)
     }
     public static func report(_ sample: DiagnosticSnapshot, speed: SpeedTestResult? = nil) -> String {
-        func ms(_ number: Double?) -> String { number.map { String(format: "%.1f ms", $0) } ?? "Unavailable" }
-        var lines = ["Kilobat · Network diagnostic", ISO8601DateFormatter().string(from: sample.date),
-                     "Health: \(sample.health.rawValue)", "Network: \(sample.radio.ssid ?? "Name unavailable (Location permission may be required)")",
-                     "Signal: \(sample.radio.rssi.map { "\($0) dBm" } ?? "Unavailable")",
-                     "Noise: \(sample.radio.noise.map { "\($0) dBm" } ?? "Unavailable")",
-                     "SNR: \(sample.radio.snr.map { "\($0) dB" } ?? "Unavailable")",
-                     "Transmit rate: \(sample.radio.transmitMbps.map { String(format: "%.0f Mbps", $0) } ?? "Unavailable")",
-                     "Channel: \(sample.radio.channel.map(String.init) ?? "Unavailable") · \(sample.radio.band ?? "Unknown band")",
-                     "Router: \(sample.gateway ?? "Unknown") · \(ms(sample.router?.average))",
-                     "Internet ICMP (1.1.1.1): \(ms(sample.internet.average))", "Jitter: \(ms(sample.internet.jitter))",
-                     "Packet loss: \(sample.internet.lossPercent.map { "\($0)%" } ?? "Unavailable")",
-                     "DNS lookup (example.com): \(ms(sample.dnsMilliseconds))", "Resolvers: \(sample.dnsServers.joined(separator: ", "))",
-                     "Captive portal: \(sample.captivePortal.map { $0 ? "Suspected" : "Not detected" } ?? "Unknown")"]
+        let unavailable = String(localized: "Unavailable")
+        func ms(_ number: Double?) -> String { number.map { String(format: "%.1f ms", $0) } ?? unavailable }
+        let radio = sample.radio, health = sample.health.rawValue
+        let network = radio.ssid ?? String(localized: "Name unavailable (Location permission may be required)")
+        let signal = radio.rssi.map { "\($0) dBm" } ?? unavailable, noise = radio.noise.map { "\($0) dBm" } ?? unavailable, snr = radio.snr.map { "\($0) dB" } ?? unavailable
+        let rate = radio.transmitMbps.map { String(format: "%.0f Mbps", $0) } ?? unavailable
+        let channel = radio.channel.map(String.init) ?? unavailable, band = radio.band ?? String(localized: "Unknown band")
+        let router = sample.gateway ?? String(localized: "Unknown"), loss = sample.internet.lossPercent.map { "\($0)%" } ?? unavailable
+        let resolvers = sample.dnsServers.joined(separator: ", ")
+        let portal = sample.captivePortal.map { $0 ? String(localized: "Suspected", comment: "A captive portal") : String(localized: "Not detected", comment: "A captive portal") } ?? String(localized: "Unknown")
+        var lines = [String(localized: "Kilobat · Network diagnostic"), ISO8601DateFormatter().string(from: sample.date),
+                     String(localized: "Health: \(health)"), String(localized: "Network: \(network)"),
+                     String(localized: "Signal: \(signal)"),
+                     String(localized: "Noise: \(noise)"),
+                     String(localized: "SNR: \(snr)"),
+                     String(localized: "Transmit rate: \(rate)"),
+                     String(localized: "Channel: \(channel) · \(band)"),
+                     String(localized: "Router: \(router) · \(ms(sample.router?.average))"),
+                     String(localized: "Internet ICMP (1.1.1.1): \(ms(sample.internet.average))"), String(localized: "Jitter: \(ms(sample.internet.jitter))"),
+                     String(localized: "Packet loss: \(loss)"),
+                     String(localized: "DNS lookup (example.com): \(ms(sample.dnsMilliseconds))"), String(localized: "Resolvers: \(resolvers)"),
+                     String(localized: "Captive portal: \(portal)")]
         if let speed {
-            lines += [String(format: "Speed: %.1f Mbps down / %.1f Mbps up", speed.downloadMbps, speed.uploadMbps), "Bufferbloat: \(speed.bufferbloat) · added latency \(ms(speed.addedLatency))"]
+            let down = String(format: "%.1f", speed.downloadMbps), up = String(format: "%.1f", speed.uploadMbps), bufferbloat = speed.bufferbloat
+            lines += [String(localized: "Speed: \(down) Mbps down / \(up) Mbps up"), String(localized: "Bufferbloat: \(bufferbloat) · added latency \(ms(speed.addedLatency))")]
         }
-        lines += ["", "Suggestions:"] + sample.advice.map { "• " + $0 }
-        lines += ["", "A sample, not proof of root cause. ICMP may be blocked; Wi-Fi transmit rate is not internet speed."]
+        // The advice is stored English (the app matches it by its opening words); the app's catalog translates it.
+        lines += ["", String(localized: "Suggestions:")] + sample.advice.map { "• " + Bundle.main.localizedString(forKey: $0, value: $0, table: nil) }
+        lines += ["", String(localized: "A sample, not proof of root cause. ICMP may be blocked; Wi-Fi transmit rate is not internet speed.")]
         return lines.joined(separator: "\n")
     }
     public func copyReport() {
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(textReport, forType: .string)
-        reportNotice = "Report copied."; reportNoticeTask?.cancel()
+        reportNotice = String(localized: "Report copied."); reportNoticeTask?.cancel()
         reportNoticeTask = Task { [weak self] in do { try await Task.sleep(for: .seconds(3)); self?.reportNotice = nil } catch {} }
     }
 }
