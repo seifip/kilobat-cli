@@ -13,7 +13,7 @@ import KilobatCore
     For where traffic leaves (VPN or not) use get_exit_path; ask for public_ip only when the user wants it, since that contacts Cloudflare, and never present a VPN or an exit country as proof of privacy. \
     For slow hops along a route over time, trace_route with rounds and get_route_history; for the local network alone, run_lan_test against a device running iperf3 -s. \
     When calls, game streaming or remote desktops stutter but speed looks fine, run run_stutter_test, then get_nearby_radios for AirDrop and Bluetooth. \
-    For which CS2, Dota 2, Deadlock or Fortnite region to play on, get_game_ping pings each data center and names the closest. \
+    For which region to play on in CS2, Dota 2, Fortnite, Apex, Siege, Age of Empires and other games, get_game_ping pings each data center and names the closest; with game match it pings the server of the match being played, for any game. \
     When one site, API or app can't connect, diagnose_connection finds the layer that stops it. \
     Before a large download or upload or a long unattended run, call get_conditions: it reports metered links, Low Data Mode, VPN, battery and heat. \
     get_updaters says which updaters Kilobat pauses on metered networks, which update bytes still got through, and which apps update from inside themselves. \
@@ -528,17 +528,14 @@ import KilobatCore
             catch let error as DiagnosticError { throw MCPToolError(error.message) }
         },
         MCPTool(name: "get_game_ping", title: "Ping game data centers",
-                description: "Pings each data center of a game 5 times and returns them fastest first, with the `best` one for this Mac. `game` is cs2, dota2 or deadlock (Valve's relay in each data center, from Steam's public relay list for that game) or fortnite (Epic's ping server in each matchmaking subregion); without it, all four, which takes about 20 seconds. Each region has `pingMs` (median), `jitterMs`, `lossPercent`, `method` (icmp, or tcp where ping is blocked) and `host`. This is ping to the region's data center, not to a match server. `overlayTarget` (such as cs2:fra) is what `kilobat overlay --target` takes to show that ping on stream. Valorant, League of Legends and Apex Legends have no public target that answers ping and return an error saying so. Takes about 5 seconds per game and sends pings only. Same JSON as `kilobat games --json`.",
-                inputSchema: schema(["game": ["type": "string", "description": "cs2, dota2, deadlock or fortnite. All four when left out; pass one when the user named a game."]]),
+                description: "Pings each data center of a game 5 times and returns them fastest first, with the `best` one for this Mac. `game` is a game id or name: cs2, dota2, deadlock and tf2 (Valve's relay in each data center), fortnite (Epic's ping server per subregion), apex, dbd and marathon (Amazon GameLift's ping beacon in each AWS region the game uses), r6, aoe2, aoe3, aoe4 and aom (PlayFab's beacon in each Azure region the game uses), brawlhalla and hunt (the maker's published test hosts). Each region has `pingMs` (median), `jitterMs`, `lossPercent`, `method` (udp, icmp, or tcp), `host` and, for cloud regions, `cloud` (such as AWS eu-central-1). This is ping to the region's data center, not to a match server. `overlayTarget` (such as cs2:fra) is what `kilobat overlay --target` takes to show that ping on stream. Without `game`, returns the list of games (`games`, `notMeasured` with the reason each is missing) without pinging. `game: match` finds the game being played (the app in front, or any running game), its busiest UDP connection, and pings that server: `state` (found, noGame, noServer, hidden when the game's socket names no address), `server` (`address`, `port`, `country`, `knownDataCenter`), `answersPing` (false means the server ignores ping, which is not loss) and `pingMs`. Games in `notMeasured` (Valorant, League of Legends, Overwatch 2, Call of Duty and others) return an error with the reason; use `game: match` while the user plays them. Takes about 5 seconds per game and sends pings only. Same JSON as `kilobat games --json`.",
+                inputSchema: schema(["game": ["type": "string", "description": "A game id or name (cs2, fortnite, apex, r6, aoe2…), or match for the server of the match being played. Leave out to list the games."]]),
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { arguments, _ in
-            if let name = (arguments["game"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) {
-                let game: GameServerTable.Game
-                do { game = try GamesCLI.game(name) } catch let error as CLIError { throw MCPToolError(error.message) }
-                return .json(try object(GamesCLI.reportJSON(await GamePing.run(game))))
-            }
-            var reports: [[String: Any]] = []
-            for game in GameServerTable.bundled.games { reports.append(GamesCLI.reportJSON(await GamePing.run(game))) }
-            return .json(try object(["games": reports, "notIncluded": GameServerTable.unsupported]))
+            guard let name = (arguments["game"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) else { return .json(try object(GamesCLI.listJSON())) }
+            if name.lowercased() == CurrentMatch.overlayTarget { return .json(try object(GamesCLI.matchJSON(await CurrentMatch.check()))) }
+            let game: GameServerTable.Game
+            do { game = try GamesCLI.game(name) } catch let error as CLIError { throw MCPToolError(error.message) }
+            return .json(try object(GamesCLI.reportJSON(await GamePing.run(game))))
         },
         MCPTool(name: "get_nearby_radios", title: "AirDrop and Bluetooth",
                 description: "The radios that share this Mac's Wi-Fi chip or band: `awdl` (whether the AirDrop link is up and active and which features use it: AirDrop, Universal Control, Sidecar, iPhone Mirroring, Continuity), AirDrop `visibility` (everyone, contacts, off), Bluetooth `devices` (`name`, `kind`, `connected`, `sharesBand`), the Wi-Fi band and coexistence `advice` when Bluetooth audio or input devices share 2.4 GHz with Wi-Fi.",

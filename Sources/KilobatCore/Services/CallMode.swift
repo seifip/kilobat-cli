@@ -35,7 +35,7 @@ public enum CallMode {
 
     /// The frontmost app is a game, by its App Store category or because a launcher, Wine or CrossOver runs it.
     public static func gameInFront(bundleURL: URL?, executable: String?) -> Bool {
-        if let executable, ["wine64-preloader", "wine-preloader", "wine64", "wine"].contains(executable) { return true }
+        if let executable, ["wine64-preloader", "wine-preloader", "wine64", "wine", "wineloader"].contains(executable) { return true }
         guard let bundleURL else { return false }
         if bundleURL.path.contains("/steamapps/") || bundleURL.path.contains("/CrossOver/") { return true }
         let category = Bundle(url: bundleURL)?.object(forInfoDictionaryKey: "LSApplicationCategoryType") as? String

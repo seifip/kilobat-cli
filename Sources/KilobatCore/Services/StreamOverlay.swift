@@ -24,7 +24,8 @@ public final class StreamOverlay: @unchecked Sendable {
     private let queue = DispatchQueue(label: "co.seifi.kilobat.overlay")
     private var listener: NWListener?
 
-    /// `target` is "internet" (1.1.1.1), "router", a game region such as "cs2:fra", or a host name.
+    /// `target` is "internet" (1.1.1.1), "router", a game region such as "cs2:fra", "match" for the server of the match
+    /// being played, or a host name.
     /// `rates` reads this Mac's traffic, if the caller has it.
     public init(port: UInt16 = StreamOverlay.defaultPort, target: String = "internet", rates: @escaping @Sendable () async -> Rates? = { nil },
                 unbranded: @escaping @Sendable () async -> Bool = { false }) {
@@ -84,32 +85,110 @@ public final class StreamOverlay: @unchecked Sendable {
 }
 
 /// One ping a second to the target, kept for the last minute. Missed replies count as loss.
+/// A game region is pinged the way the panel measures it (GameLift's and PlayFab's UDP echo, ping, or a TCP connect);
+/// `match` pings the server of the match being played and looks for it again every 30 seconds.
 actor LivePing {
+    enum Probe: Equatable { case icmp(String), udp(String, GameServerTable.Region.Endpoint), tcp(String, Int) }
     private var target: String
     private var process: Process?
+    private var loop: Task<Void, Never>?
+    private var watcher: Task<Void, Never>?
     private var samples: [Double?] = []
     private var host = ""
     /// "CS2 · Frankfurt" for a game region, shown on the pill.
     private var label: String?
+    /// The match's server doesn't answer ping: its misses aren't loss.
+    private var silentServer = false
     init(target: String) { self.target = target }
 
-    /// A game region pings its data center; anything else goes through the stutter test's targets.
+    /// What a target pings and how it's named on the pill.
     static func host(for target: String) async -> (host: String, label: String?) {
-        if let (game, region) = GameServerTable.bundled.target(target) { return (region.hosts[0], "\(game.short) · \(region.name)") }
-        return ((try? await StutterTest.host(for: target)) ?? "1.1.1.1", nil)
+        let (probe, label) = await probe(for: target)
+        switch probe {
+        case let .icmp(host)?: return (host, label)
+        case let .udp(host, _)?: return (host, label)
+        case let .tcp(host, _)?: return (host, label)
+        case nil: return ("", label)
+        }
+    }
+
+    /// A game region pings its data center, `match` the match's server; anything else goes through the stutter test's targets.
+    static func probe(for target: String) async -> (Probe?, String?) {
+        if let (game, region) = GameServerTable.bundled.target(target) {
+            let label = "\(game.short) · \(region.name)"
+            if let udp = region.udp, let address = await GamePing.resolve(udp.host) { return (.udp(address, udp), label) }
+            if let host = region.hosts.first { return (.icmp(host), label) }
+            if let tcp = region.tcp, let address = await GamePing.resolve(tcp.host) { return (.tcp(address, tcp.port), label) }
+            return (nil, label)
+        }
+        if target == CurrentMatch.overlayTarget {
+            guard let server = await CurrentMatch.check(ping: false).server else { return (nil, "Match · none found") }
+            return (.icmp(server.address), "Match · " + (server.place ?? server.address))
+        }
+        return (.icmp((try? await StutterTest.host(for: target)) ?? "1.1.1.1"), nil)
     }
 
     /// Pings another target from now on; the last minute starts over.
     func retarget(_ target: String) async {
         guard target != self.target else { return }
-        let running = process != nil
+        let running = process != nil || loop != nil || watcher != nil
         stop(); self.target = target
         if running { await start() }
     }
 
     func start() async {
-        guard process == nil else { return }
-        (host, label) = await Self.host(for: target)
+        guard process == nil, loop == nil else { return }
+        let (probe, label) = await Self.probe(for: target)
+        self.label = label
+        if target == CurrentMatch.overlayTarget, watcher == nil { watch() }
+        switch probe {
+        case let .icmp(host)?: self.host = host; launch(host)
+        case let .udp(address, endpoint)?:
+            host = address
+            loop = Task { [weak self] in
+                while !Task.isCancelled {
+                    let started = Date()
+                    let ms = await GamePing.echoOnce(address, endpoint)
+                    await self?.append(ms)
+                    try? await Task.sleep(for: .seconds(max(0.05, 1 - Date().timeIntervalSince(started))))
+                }
+            }
+        case let .tcp(address, port)?:
+            host = address
+            loop = Task { [weak self] in
+                while !Task.isCancelled {
+                    let started = Date()
+                    let attempt = await ConnectionProbe.open(host: address, port: port, timeout: 1)
+                    await self?.append([.connected, .refused].contains(attempt.outcome) ? Double(attempt.ms) : nil)
+                    try? await Task.sleep(for: .seconds(max(0.05, 1 - Date().timeIntervalSince(started))))
+                }
+            }
+        case nil: host = ""
+        }
+    }
+
+    /// Every 30 seconds, the match's server again: a new match is a new server.
+    private func watch() {
+        watcher = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled, let self else { return }
+                await self.refreshMatch()
+            }
+        }
+    }
+    private func refreshMatch() async {
+        let (probe, label) = await Self.probe(for: CurrentMatch.overlayTarget)
+        var address: String?
+        if case let .icmp(found)? = probe { address = found }
+        self.label = label
+        guard address != (host.isEmpty ? nil : host) else { return }
+        stopProbe(); samples = []; silentServer = false
+        host = address ?? ""
+        if let address { launch(address) }
+    }
+
+    private func launch(_ host: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ping")
         // -n numeric, 1 s apart, 1 s wait each: a reply later than that counts as lost, as a stream would feel it.
@@ -125,9 +204,14 @@ actor LivePing {
     }
 
     func stop() {
+        watcher?.cancel(); watcher = nil
+        stopProbe(); samples = []; silentServer = false
+    }
+    private func stopProbe() {
         // Unhooked first, so the old target's last replies don't land in the new target's minute.
         (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        process?.terminate(); process = nil; samples = []
+        process?.terminate(); process = nil
+        loop?.cancel(); loop = nil
     }
 
     private func ingest(_ text: String) {
@@ -139,6 +223,8 @@ actor LivePing {
     private func append(_ value: Double?) {
         samples.append(value)
         if samples.count > 60 { samples.removeFirst(samples.count - 60) }
+        // A match server that has never answered isn't losing packets; it doesn't answer ping.
+        silentServer = target == CurrentMatch.overlayTarget && samples.count >= 5 && samples.allSatisfy { $0 == nil }
     }
 
     struct Summary: Encodable, Sendable {
@@ -163,6 +249,9 @@ actor LivePing {
         let recent = Array(samples.suffix(30)), replies = recent.compactMap { $0 }
         let jitter = replies.count > 1 ? zip(replies, replies.dropFirst()).map { abs($1 - $0) }.reduce(0, +) / Double(replies.count - 1) : nil
         let loss = recent.isEmpty ? nil : Double(recent.filter { $0 == nil }.count) / Double(recent.count) * 100
+        if silentServer {
+            return Summary(host: host, target: target, label: (label ?? "Match") + " · doesn't answer ping", pingMs: nil, jitterMs: nil, lossPercent: nil, history: [])
+        }
         return Summary(host: host, target: target, label: label, pingMs: samples.last.flatMap { $0 }, jitterMs: jitter, lossPercent: loss, history: samples)
     }
 }
