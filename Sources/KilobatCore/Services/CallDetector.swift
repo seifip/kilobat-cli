@@ -25,6 +25,7 @@ public enum CallDetector {
         (["org.whispersystems.signal-desktop"], "Signal", false, []),
         (["com.google.Chrome"], "Chrome", true, []),
         (["company.thebrowser.Browser"], "Arc", true, []),
+        (["company.thebrowser.dia"], "Dia", true, []),
         (["com.microsoft.edgemac"], "Edge", true, []),
         (["org.mozilla.firefox"], "Firefox", true, []),
         (["com.brave.Browser"], "Brave", true, []),

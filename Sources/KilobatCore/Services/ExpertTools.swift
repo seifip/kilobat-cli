@@ -178,7 +178,12 @@ public enum ExpertTools {
     public var output = ""
     public var busy = false
     public var names: [String: String] = UserDefaults.standard.dictionary(forKey: "deviceNames") as? [String: String] ?? [:]
-    public func rename(_ device: LANDevice, to name: String) { names[device.mac] = name; UserDefaults.standard.set(names, forKey: "deviceNames") }
+    public func rename(_ device: LANDevice, to name: String) { rename(mac: device.mac, to: name) }
+    /// An empty name removes it.
+    public func rename(mac: String, to name: String) {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        names[mac] = clean.isEmpty ? nil : clean; UserDefaults.standard.set(names, forKey: "deviceNames")
+    }
     public func refreshSockets() async {
         busy = true; defer { busy = false }
         do {

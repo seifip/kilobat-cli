@@ -39,6 +39,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let journal = NetworkJournal()
     public var snapshot: DiagnosticSnapshot?
     public let survey = SurveyJournal()
+    /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
+    public let knownDevices = DeviceRegistry()
     public var radio: RadioSample?
     public var networks: [NearbyNetwork] = []
     public var signalHistory: [Double] = []

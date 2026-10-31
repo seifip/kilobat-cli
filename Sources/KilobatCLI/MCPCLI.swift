@@ -212,9 +212,10 @@ import KilobatCore
             .json(try DiagnosticsCLI.encode(try await ExpertTools.destinations(pid: try integer(arguments, "pid", in: 1...Int(Int32.max)).map(Int32.init))))
         },
         MCPTool(name: "list_devices", title: "Devices on the local network",
-                description: "Devices this Mac has recently talked to on the local network (the ARP neighbor cache): `address`, `mac`, `interface` and `name`, including names the user gave them in Kilobat. Not a full network scan. Same JSON as `kilobat devices --json`.",
-                annotations: readOnly) { _, _ in
-            .json(try DiagnosticsCLI.encode(try await ExpertCLI.namedDevices()))
+                description: "Devices this Mac has recently talked to on the local network (the ARP neighbor cache), with what Kilobat remembers about each on this network: `address`, `mac`, `interface`, `name` (the user's name for it, else the device's own or its maker's), `status` (new: joined since Kilobat began watching this home network and not answered yet; known: the user's, or there when watching began; unknown: the user said they don't recognise it; ignored; null when Kilobat hasn't recorded this network), `verdict`, `friendlyName`, `hostname`, `vendor`, `privateAddress` (a randomised Wi-Fi address with no maker), `firstSeen`, `lastSeen` and `present`. Pass `all` to add remembered devices that aren't in the cache now. Not a full network scan. Never present a new or unknown device as an intruder: it is a device the user hasn't identified. Same JSON as `kilobat devices --json`.",
+                inputSchema: schema(["all": ["type": "boolean", "default": false, "description": "Also list devices remembered on this network that aren't in the neighbor cache now."]]),
+                annotations: readOnly) { arguments, _ in
+            .json(try DiagnosticsCLI.encode(try await ExpertCLI.deviceListing(all: try boolean(arguments, "all") ?? false)))
         },
         MCPTool(name: "trace_route", title: "Trace the route to a host",
                 description: "A 12-hop route probe to `host`, as plain text. A latency jump that persists to the last hop is real; a single slow hop that recovers is usually a router deprioritizing probes. Each trace is saved. Pass `rounds` (2–5) to trace several times with three probes a hop, like mtr: the text then ends with each hop's loss, best, average, worst and last delay over every saved trace to that host and a line on where the delay starts. Takes up to about 30 seconds a round. Same output as `kilobat trace <host> [--rounds N]`.",

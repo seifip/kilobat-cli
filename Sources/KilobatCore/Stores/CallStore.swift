@@ -215,6 +215,12 @@ import Observation
         if report, starlink?.present == true, let history = await Starlink.history() { samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: live.start) } }
         guard report, end.timeIntervalSince(live.start) >= Self.shortest, !samples.internet.isEmpty else { return }
         let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        // Devices that joined around the call, so a freeze the router blames on another device can name it.
+        if let key = network?.0, let devices = diagnostics?.knownDevices {
+            devices.reload()
+            samples.arrivals = devices.book.arrivals(network: key, from: live.start.addingTimeInterval(-CallAnalysis.joinWindow), to: end)
+                .map { .init(at: $0.arrived.timeIntervalSince(live.start), name: $0.callName) }
+        }
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
         reports.append(card); reports = Array(reports.suffix(200))

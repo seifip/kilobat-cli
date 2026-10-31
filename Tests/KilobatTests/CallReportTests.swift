@@ -116,6 +116,7 @@ struct CallReportTests {
         #expect(CallDetector.call(microphone: ["us.zoom.xos"])?.app == "Zoom")
         #expect(CallDetector.call(microphone: ["com.google.Chrome.helper"]) == CallDetector.Call(app: "Chrome", browser: true, own: ["com.google.Chrome"]))
         #expect(CallDetector.call(microphone: ["com.google.Chrome.helper", "com.microsoft.teams2"])?.app == "Microsoft Teams")
+        #expect(CallDetector.call(microphone: ["company.thebrowser.dia.helper"]) == CallDetector.Call(app: "Dia", browser: true, own: ["company.thebrowser.dia"]))
         #expect(CallDetector.call(microphone: ["com.apple.avconferenced"])?.own.contains("avconferenced") == true)
         #expect(CallDetector.call(microphone: ["com.apple.VoiceMemos"]) == nil)
     }

@@ -180,7 +180,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.14.0"
+    static let version = "0.15.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -487,7 +487,7 @@ struct KilobatCLI {
         "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
         "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
-        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
+        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "mark", "mine", "unknown", "ignored", "--all", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
         "blocklist": ["status", "import", "clear"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
     ]
@@ -710,8 +710,9 @@ struct KilobatCLI {
       connection-rule allow|block <app> <host> [port] [direction]
       remove-connection-rule <UUID>       Remove a destination rule
       destinations [--pid PID] [--json]   Observed process sockets
-      devices [--bonjour] [--json]        Local neighbor cache / services
+      devices [--all] [--bonjour] [--json]  Local neighbor cache: new, known or unknown on this network
       devices name <MAC> <name>           Name a device; an empty name removes it
+      devices mark <MAC> mine|unknown|ignored  Answer for a new device, as the app's alert does
       interfaces [--json]                 Separate physical / VPN counters
       trace <host>                        Bounded 12-hop route probe
         [--rounds 2…10]                   Trace several times, 3 probes a hop, and show each hop's loss and delay

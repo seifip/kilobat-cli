@@ -15,27 +15,36 @@ import KilobatCore
             let rows = try await ExpertTools.destinations(pid: pid)
             if args.contains("--json") { try json(rows) } else { for row in rows { print("\(row.pid)\t\(row.process)\t\(row.transport)\t\(row.endpoint)\t\(row.state)") } }
         case "devices":
-            if args.count > 1, args[1] == "name" {
-                // Piped output appends --json; naming has no JSON form, so it is ignored here.
-                let args = args.filter { $0 != "--json" }
-                // Shares the names the app shows in its Devices view.
+            let parsed: DeviceCommand
+            do { parsed = try DeviceCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
+            let registry = DeviceRegistry()
+            switch parsed {
+            case .name(let mac, let name):
+                // Kept with the device on every network that has it, and in the names the app shared before devices were remembered per network.
                 var names = KilobatCLI.appDefaults.dictionary(forKey: "deviceNames") as? [String: String] ?? [:]
-                let mac = args.count == 4 ? args[2].lowercased() : "", name = args.count == 4 ? args[3].trimmingCharacters(in: .whitespaces) : ""
-                guard mac.split(separator: ":").count == 6 else { throw CLIError("Use devices name <MAC-address> <name>; an empty name removes it.") }
+                for key in names.keys where MACAddress.normalized(key) == mac { names[key] = nil }
                 names[mac] = name.isEmpty ? nil : name
                 KilobatCLI.appDefaults.set(names, forKey: "deviceNames")
-                print(name.isEmpty ? "Name removed for \(mac)." : "✓ \(mac) is now “\(name)”."); return
-            }
-            try allow(["--bonjour", "--json"])
-            let rows = try await namedDevices()
-            let services = args.contains("--bonjour") ? await ExpertTools.bonjour() : nil
-            if args.contains("--json") {
-                struct Output: Encodable { let devices: [LANDevice]; let bonjour: String? }
-                if let services { try json(Output(devices: rows, bonjour: services)) } else { try json(rows) }
-            } else {
-                if rows.isEmpty { print("No devices in the neighbor cache. Devices appear after this Mac talks to them.") }
-                for row in rows { print("\(row.address)\t\(row.mac)\t\(row.interface)\t\(row.name)") }
-                if let services { print(services) }
+                registry.rename(mac: mac, to: name)
+                print(name.isEmpty ? "Name removed for \(mac)." : "✓ \(mac) is now “\(name)”.")
+            case .mark(let mac, let verdict):
+                guard registry.setVerdict(verdict, mac: mac) else {
+                    throw CLIError("Kilobat hasn't recorded \(mac) on any network yet. Open Kilobat › Tools › Devices and choose Discover, then try again.")
+                }
+                print("✓ \(mac) marked as \(verdict == .mine ? "yours" : verdict == .unknown ? "unknown to you" : "ignored").")
+            case .list(let all, let bonjour, let asJSON):
+                let rows = try await deviceListing(all: all, registry: registry)
+                let services = bonjour ? await ExpertTools.bonjour() : nil
+                if asJSON {
+                    struct Output: Encodable { let devices: [DeviceListing]; let bonjour: String? }
+                    if let services { try json(Output(devices: rows, bonjour: services)) } else { try json(rows) }
+                } else {
+                    if rows.isEmpty { print("No devices in the neighbor cache. Devices appear after this Mac talks to them.") }
+                    for row in rows { print("\(row.address)\t\(row.mac)\t\(row.present ? row.interface : "away")\t\(row.name)\t\(row.status?.rawValue ?? "-")") }
+                    let fresh = rows.filter { $0.status == .new }.count
+                    if fresh > 0 { print("\n\(fresh) new since Kilobat began watching. Answer with kilobat devices mark <MAC> mine|unknown|ignored.") }
+                    if let services { print(services) }
+                }
             }
         case "http-check":
             let url = args.dropFirst().filter { $0 != "--json" }
@@ -184,15 +193,24 @@ import KilobatCore
                 "summary": path.summary, "note": lookedUp ? ExitPath.registryNote : "Read from this Mac's routes and VPN list; nothing was sent anywhere."]
     }
 
-    /// Neighbor cache with the names the user gave devices in the app.
-    static func namedDevices() async throws -> [LANDevice] {
+    /// The neighbor cache with what Kilobat remembers about each device on this network: the names the user gave,
+    /// new, known, unknown or ignored, maker and when it was first seen. `all` adds remembered devices that aren't here now.
+    static func deviceListing(all: Bool, registry: DeviceRegistry = DeviceRegistry()) async throws -> [DeviceListing] {
         let names = KilobatCLI.appDefaults.dictionary(forKey: "deviceNames") as? [String: String] ?? [:]
-        let rows = await ExpertTools.devices()
+        let normalized = Dictionary(names.compactMap { key, value in MACAddress.normalized(key).map { ($0, value) } }, uniquingKeysWith: { first, _ in first })
+        let rows = await ExpertTools.devices(), gateway = await defaultGateway()
         // With a router there is always at least its entry; an empty cache means macOS withheld it from this process.
-        if rows.isEmpty, await defaultGateway() != nil {
+        if rows.isEmpty, gateway != nil {
             throw CLIError("macOS hid the device list from the CLI. Open Kilobat › Tools › Devices, or allow Local Network access for your terminal in System Settings › Privacy & Security › Local Network.")
         }
-        return rows.map { row in var row = row; if let name = names[row.mac.lowercased()] ?? names[row.mac] { row.name = name }; return row }
+        let network = await deviceNetwork(registry.book, rows: rows, gateway: gateway).flatMap { registry.book.networks[$0] }
+        return DeviceListing.rows(live: rows, network: network, names: normalized, all: all)
+    }
+    /// The network the Mac is on, as the app names it, or failing that the one whose router has the gateway's MAC address.
+    static func deviceNetwork(_ book: DeviceBook, rows: [LANDevice], gateway: String?) async -> String? {
+        if let app = await WiFiCLI.connection(timeout: .seconds(2)), let key = app["networkKey"] as? String, key != "unknown", app["networkIdentified"] as? Bool != false { return key }
+        guard let gateway, let router = rows.first(where: { $0.address == gateway })?.mac else { return nil }
+        return book.network(router: router)
     }
     static func defaultGateway() async -> String? {
         DiagnosticProbe.matches(#"gateway:\s+(\S+)"#, in: await CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3).output).first

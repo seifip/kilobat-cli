@@ -13,8 +13,10 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
         public var weakSignal: Bool? = nil
         /// What the Starlink dish logged at the time, for `starlink`: obstructed, noSatellites, reboot or other.
         public var dish: String? = nil
-        public init(kind: Kind, app: String? = nil, uploading: Bool? = nil, weakSignal: Bool? = nil, dish: String? = nil) {
-            self.kind = kind; self.app = app; self.uploading = uploading; self.weakSignal = weakSignal; self.dish = dish
+        /// The device that joined the network just before, for `otherDevice`, when it was the only one: "Rita’s iPad".
+        public var device: String? = nil
+        public init(kind: Kind, app: String? = nil, uploading: Bool? = nil, weakSignal: Bool? = nil, dish: String? = nil, device: String? = nil) {
+            self.kind = kind; self.app = app; self.uploading = uploading; self.weakSignal = weakSignal; self.dish = dish; self.device = device
         }
         /// Reads on from "caused by" or "on": "Dropbox uploading", "weak Wi-Fi".
         public var phrase: String {
@@ -23,8 +25,14 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
                                          : String(localized: "caused by \(app ?? "another app") downloading", comment: "Call report: what caused a freeze; the argument is an app")
             case .wifi: weakSignal == true ? String(localized: "on weak Wi-Fi", comment: "Call report: where a freeze happened")
                                            : String(localized: "on the Wi-Fi or router", comment: "Call report: where a freeze happened")
-            case .otherDevice: uploading == true ? String(localized: "caused by another device on your network uploading", comment: "Call report: a TV, phone or console on the same network was uploading")
-                                                 : String(localized: "caused by another device on your network downloading", comment: "Call report: a TV, phone or console on the same network was downloading")
+            case .otherDevice:
+                if let device {
+                    uploading == true ? String(localized: "caused by \(device) uploading", comment: "Call report: a device on the same network was uploading; the argument is its name, such as “Rita’s iPad”")
+                                      : String(localized: "caused by \(device) downloading", comment: "Call report: a device on the same network was downloading; the argument is its name, such as “Rita’s iPad”")
+                } else {
+                    uploading == true ? String(localized: "caused by another device on your network uploading", comment: "Call report: a TV, phone or console on the same network was uploading")
+                                      : String(localized: "caused by another device on your network downloading", comment: "Call report: a TV, phone or console on the same network was downloading")
+                }
             case .airDrop: String(localized: "caused by AirDrop scanning", comment: "Call report: AirDrop's radio hopping channels caused a freeze")
             case .beyondRouter: String(localized: "beyond your router", comment: "Call report: the freeze happened between the router and the call's server")
             case .starlink: CallSamples.Dish.phrase(dish)
@@ -36,7 +44,8 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .app: String(localized: "Pause \(app ?? "that app") before calls, or block it with a profile while you’re on one.", comment: "Call report advice; the argument is an app")
             case .wifi: weakSignal == true ? String(localized: "Move closer to the router, or use Radar to find a stronger spot.", comment: "Call report advice")
                                            : String(localized: "Restart the router, or try a cable or the 5 GHz band.", comment: "Call report advice")
-            case .otherDevice: String(localized: "A TV, console or phone on your network was busy. Pause its download or stream before calls, or turn on your router’s QoS for calls.", comment: "Call report advice")
+            case .otherDevice: device.map { String(localized: "\($0) joined your network just before the freeze, while your router saw another device busy. Pause its downloads or streams before calls, or turn on your router’s QoS for calls.", comment: "Call report advice; the argument is a device's name, such as “Rita’s iPad”") }
+                ?? String(localized: "A TV, console or phone on your network was busy. Pause its download or stream before calls, or turn on your router’s QoS for calls.", comment: "Call report advice")
             case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Call report advice")
             case .starlink: CallSamples.Dish.advice(dish)
@@ -160,6 +169,10 @@ public struct CallSamples: Sendable {
     /// What other devices on the network moved, from the router's internet counters minus this Mac, in bytes a second.
     public struct Household: Sendable { public let at: Double; public let upload: Double; public let download: Double; public init(at: Double, upload: Double, download: Double) { self.at = at; self.upload = upload; self.download = download } }
     public var household: [Household]? = nil
+    /// Devices that joined the network, or came back to it, around the call, from Kilobat's device scans; seconds from the
+    /// call's start, negative before it. `name` is how the report names it, nil when nothing specific is known.
+    public struct Arrival: Sendable { public let at: Double; public let name: String?; public init(at: Double, name: String?) { self.at = at; self.name = name } }
+    public var arrivals: [Arrival] = []
     /// The Mac's own load, every few seconds.
     public struct Load: Sendable { public let at: Double; public let load: MacLoad; public init(at: Double, load: MacLoad) { self.at = at; self.load = load } }
     public var load: [Load] = []
@@ -222,9 +235,18 @@ public enum CallAnalysis {
         // Router samples are a few seconds apart, so look a little wider.
         let others = (samples.household ?? []).filter { $0.at >= start - 8 && $0.at <= end + 3 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
         if let top = others.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
-            return .init(kind: .otherDevice, uploading: top.upload / uploadLoad >= top.download / downloadLoad)
+            return .init(kind: .otherDevice, uploading: top.upload / uploadLoad >= top.download / downloadLoad, device: joined(from: start, to: end, samples.arrivals))
         }
         return .init(kind: .beyondRouter)
+    }
+
+    /// A device joining up to this long before a freeze may be what the router saw busy.
+    static let joinWindow = 600.0
+    /// The device to name for a freeze the router blames on another device: only when exactly one joined (or came back)
+    /// in the ten minutes before it ended and something specific is known about it. Two or none, and the report stays generic.
+    static func joined(from start: Double, to end: Double, _ arrivals: [CallSamples.Arrival]) -> String? {
+        let near = arrivals.filter { $0.at >= start - joinWindow && $0.at <= end + 3 }
+        return near.count == 1 ? near[0].name : nil
     }
 
     /// Each kind of strain that lasted at least 15 seconds, longest first. Samples are a few seconds apart.
