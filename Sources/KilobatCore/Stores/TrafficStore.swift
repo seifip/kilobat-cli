@@ -203,6 +203,8 @@ public final class TrafficStore {
                 WidgetSnapshot.hours(entries, pending: pendingReceived + pendingSent, now: now, calendar: calendar))
     }
     public func uploadAnomalies(now: Date = Date()) -> [UploadAnomaly] { UploadAnomaly.detect(usage, pending: pendingAppsSent, now: now) }
+    /// Everything a process has sent since it started, as nettop last counted it; for Send later's time left.
+    public func sentSinceStart(pid: Int32) -> UInt64? { previous[pid]?.traffic.sent }
     public var allowedCount: Int { apps.filter { isAllowed($0.id) }.count }
     public var filteredApps: [AppTraffic] {
         apps.filter {

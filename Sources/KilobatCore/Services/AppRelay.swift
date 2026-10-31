@@ -6,7 +6,7 @@ import Foundation
 /// A request carries a whitelisted action name and a reply ID; the few actions that take arguments check them.
 public enum AppRelay {
     public static let appBundleID = "co.seifi.kilobat"
-    public static let actions: Set<String> = ["scan", "connection", "approvals", "decide", "agent", "bluetooth", "lid", "updaters", "power"]
+    public static let actions: Set<String> = ["scan", "connection", "approvals", "decide", "agent", "bluetooth", "lid", "updaters", "power", "uploads"]
     /// An action may carry arguments after a `|`, such as `decide|allow|com.example.App`.
     static func known(_ action: String) -> Bool { actions.contains(String(action.prefix { $0 != "|" })) }
     static let request = Notification.Name("co.seifi.kilobat.relay.request")

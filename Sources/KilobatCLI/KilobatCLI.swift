@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test", "plan", "games", "starlink"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "games", "starlink"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -37,6 +37,7 @@ struct KilobatCLI {
         case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
         case "limit", "quota": try await QuotaCLI.run(args)
         case "updaters": try await UpdatersCLI.run(args)
+        case "uploads": try await UploadsCLI.run(args)
         case "agent-event": await AgentCLI.run(args)
         case "overlay": try await OverlayCLI.run(args)
         case "games": try await GamesCLI.run(args)
@@ -181,7 +182,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.18.0"
+    static let version = "0.19.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -451,7 +452,7 @@ struct KilobatCLI {
 
     static let commands: [(name: String, detail: String)] = [
         ("status", "Live per-app traffic"), ("profile", "List or select a profile"), ("allow", "Save an allow rule"),
-        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the data budget and its cycle"), ("quota", "Per-app data quotas"), ("updaters", "Pause updaters on metered networks"),
+        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the data budget and its cycle"), ("quota", "Per-app data quotas"), ("updaters", "Pause updaters on metered networks"), ("uploads", "Big uploads, held for a better network"),
         ("report", "Usage history, or compare it with a router or provider"), ("open", "Open the Mac app"), ("doctor", "Check your setup"),
         ("mcp", "MCP server for AI agents (stdio)"),
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
@@ -479,7 +480,7 @@ struct KilobatCLI {
     ]
     static let commandValues: [String: [String]] = [
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
-        "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
+        "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "uploads": ["hold", "resume", "--until", "unmetered", "fast", "manual", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
         "sessions": ["--days", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
@@ -695,6 +696,9 @@ struct KilobatCLI {
       quota --list [--json]  Quotas with use in the current cycle
       updaters [--json]     Updaters paused on metered networks, update bytes that got through, apps that update inside
       updaters on|off       Pause updater helpers while the network is metered (on by default); the apps keep working
+      uploads [--json]      Apps uploading a lot now: rate, sent so far, time left when the total is known; and held ones
+      uploads hold <app> [--until unmetered|fast|fast:<Mbps>|2h|manual]  Hold an app's upload for a better network (Pro)
+      uploads resume <app>  Let a held upload go now
       settings [name [value]]  Read or change Kilobat's settings; new-apps allow|ask|block
       approvals [--json]    Apps waiting for approval while new-apps is ask
       approve|deny <app-id>  deny blocks a waiting app at once; approve asks you to confirm in the app
