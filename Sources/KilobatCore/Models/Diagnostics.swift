@@ -52,10 +52,13 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     public let internet: PingResult
     public let dnsMilliseconds: Double?
     public let dnsServers: [String]
-    public let captivePortal: Bool?
+    /// A sign-in page is in the way. The app fills it from its own checks (PortalWatch), not every sample.
+    public var captivePortal: Bool?
     public let networkService: String?
     /// The Ethernet or USB interface traffic leaves through while Wi-Fi stays joined, such as a tethered phone.
     public var wiredInterface: String? = nil
+    /// The sign-in page came back on a network that was signed in to: the Wi-Fi logged you out, the internet isn't down.
+    public var portalLoggedOut: Bool? = nil
     public var health: ConnectionHealth {
         if captivePortal == true { return .poor }
         if radio.health == .poor || (internet.lossPercent ?? 0) >= 20 { return .poor }
@@ -63,8 +66,12 @@ public struct DiagnosticSnapshot: Codable, Sendable {
         return internet.average == nil ? .unknown : .good
     }
     public var advice: [String] {
+        // A sign-in page in the way explains everything else that fails, so it's the only finding.
+        if captivePortal == true {
+            return [portalLoggedOut == true ? "The Wi-Fi’s sign-in page logged you out. Sign in again; the internet isn’t down."
+                                            : "This network may require a login. Open the login page before testing again."]
+        }
         var tips: [String] = []
-        if captivePortal == true { tips.append("This network may require a login. Open the login page before testing again.") }
         if radio.health == .poor || radio.health == .degraded { tips.append("Wi-Fi signal is weak or noisy. Use Radar to find a stronger spot, or try a different channel.") }
         if (router?.average ?? 0) > 20 { tips.append("The local link to your router is slow. Move closer, reduce competing traffic, then retest before restarting the router.") }
         if (internet.average ?? 0) > 120 && (router?.average ?? 100) < 20 { tips.append("Your router responds quickly, but the internet path is slow. Compare another network or test again later; the upstream connection may be congested.") }

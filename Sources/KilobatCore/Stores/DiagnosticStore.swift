@@ -37,6 +37,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var onSnapshot: ((DiagnosticSnapshot) -> Void)?
     public let tools = ToolsStore()
     public let journal = NetworkJournal()
+    /// The network's sign-in page, when it has one, and how long a sign-in lasts there.
+    public let portal = PortalWatch()
     public var snapshot: DiagnosticSnapshot?
     public let survey = SurveyJournal()
     /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
@@ -99,6 +101,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public override init() {
         super.init()
         stutter.starlink = { [weak self] in self?.starlink.present ?? false }
+        stutter.portal = { [weak self] in self?.portal.intercepting == true }
         lastSpeed = journal.speedTests.last?.result
         nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil
         scheduleNetwork.start { [weak self] connected, metered, _ in
@@ -202,9 +205,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         guard !diagnosing, !sleeping else { return }
         diagnosing = true
         async let secondary = DiagnosticProbe.ping("8.8.8.8", count: 2)
-        let sample = await probe.snapshot()
+        var sample = await probe.snapshot(checkPortal: false)
         let other = await secondary
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
+        await checkPortal(&sample, internetFailed: fallback == false)
         snapshot = sample; onSnapshot?(sample)
         await refreshExit()
         if !sleeping {
@@ -217,6 +221,16 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             }
         }
         diagnosing = false
+    }
+    /// Looks for the network's sign-in page when PortalWatch says it's due, and marks the sample with what it knows.
+    private func checkPortal(_ sample: inout DiagnosticSnapshot, internetFailed: Bool) async {
+        let key = sample.networkKey
+        if portal.due(network: key, internetFailed: internetFailed) {
+            portal.observe(await CaptivePortal.check(), network: key, name: sample.networkName, identified: sample.networkIdentified)
+        }
+        portal.tick()
+        sample.captivePortal = portal.intercepting
+        if portal.loggedOut, sample.captivePortal == true { sample.portalLoggedOut = true }
     }
     /// Reads the route and VPN list (local), asks Cloudflare for the public address when that's on and due,
     /// and logs a VPN going on or off and a changed public address.

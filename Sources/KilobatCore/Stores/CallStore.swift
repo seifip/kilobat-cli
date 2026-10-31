@@ -178,6 +178,7 @@ import Observation
             samples.traffic.append(.init(at: at, app: top.name, upload: top.uploadRate, download: top.downloadRate))
         }
         if diagnostics.snapshot?.radio.health == .poor { samples.weakSignal.append(at) }
+        if samples.loggedOut == nil, case .loggedOut(let since) = diagnostics.portal.status { samples.loggedOut = max(0, since.timeIntervalSince(start)) }
         if let starlink, let status = starlink.status, status.date != lastDish, starlink.present {
             starlink.watching = true; lastDish = status.date
             if let sample = CallSamples.Dish(status: status, start: start) { samples.dish.append(sample) }

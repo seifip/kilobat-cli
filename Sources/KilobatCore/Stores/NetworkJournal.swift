@@ -94,7 +94,11 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         } else {
             successes = 0; failures += 1
             if failureStart == nil { failureStart = date }
-            if failures == 3 && !events.contains(where: { $0.end == nil }) {
+            if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.captivePortal == true {
+                // The Wi-Fi's sign-in page, not an outage: logged, not counted against the provider, no alert (PortalWatch has its own).
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Wi-Fi sign-in",
+                                           detail: sample.portalLoggedOut == true ? String(localized: "The Wi-Fi’s sign-in page logged this Mac out.") : String(localized: "The Wi-Fi’s sign-in page is waiting for you to sign in.")))
+            } else if failures == 3 && !events.contains(where: { $0.end == nil }) {
                 events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: String(localized: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure.")))
                 notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }

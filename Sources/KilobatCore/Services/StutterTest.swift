@@ -29,6 +29,8 @@ public struct StutterResult: Codable, Sendable {
     public var started: Date? = nil
     /// The Mac was on a Starlink dish's network during the test.
     public var starlink: Bool? = nil
+    /// The Wi-Fi's sign-in page was in the way at the end of the test.
+    public var portal: Bool? = nil
     public var received: Int { samples.compactMap { $0 }.count }
     public var lossPercent: Double { samples.isEmpty ? 0 : Double(samples.count - received) / Double(samples.count) * 100 }
     public var seconds: Double { Double(samples.count) * interval }
@@ -57,6 +59,10 @@ public struct StutterResult: Codable, Sendable {
         let loss = pingLimited ? " " + (local ? String(localized: "The router answered only some of the fast pings; that's rate limiting, not lost traffic.")
                                               : String(localized: "It answered only some of the fast pings; that's rate limiting, not lost traffic."))
             : lossPercent >= 2 ? " " + String(localized: "\(String(format: "%.0f", lossPercent))% of pings got no reply.") : ""
+        // Past the router, a sign-in page in the way stops every reply; that's the cause, not the line.
+        if portal == true, !local, pattern == .noReplies || lossPercent >= 50 {
+            return String(localized: "The Wi-Fi’s sign-in page is holding the connection, so pings past the router go unanswered. Sign in again, then run the test.", comment: "Stutter test verdict while a hotel or café Wi-Fi's sign-in page is in the way")
+        }
         if handoverAligned, pattern != .noReplies {
             return String(localized: "Spikes up to \(peak) land on Starlink’s satellite handovers, every 15 seconds at :12, :27, :42 and :57 past the minute. That’s how Starlink switches satellites, not your Wi-Fi or AirDrop, and nothing at home changes it.", comment: "Stutter test verdict on Starlink; the argument is a latency such as 180 ms") + loss
         }
@@ -230,6 +236,8 @@ public enum StutterTest {
     public var error: String?
     /// Whether the Mac is on a Starlink dish's network right now; set by the diagnostics store.
     public var starlink: (@MainActor () -> Bool)?
+    /// Whether the Wi-Fi's sign-in page is in the way right now; set by the diagnostics store.
+    public var portal: (@MainActor () -> Bool)?
     public init() {}
     #if DEBUG
     /// A made-up result for screenshots; debug builds only.
@@ -254,7 +262,11 @@ public enum StutterTest {
     private func measure() async -> StutterResult? {
         running = true; started = Date(); error = nil
         defer { running = false; started = nil }
-        do { return try await StutterTest.run(target: target, seconds: seconds, starlink: starlink?() == true ? true : nil) }
+        do {
+            var result = try await StutterTest.run(target: target, seconds: seconds, starlink: starlink?() == true ? true : nil)
+            if !result.local, portal?() == true { result.portal = true }
+            return result
+        }
         catch { self.error = error.localizedDescription; return nil }
     }
 }

@@ -84,13 +84,14 @@ public actor DiagnosticProbe {
         }
         return nil
     }
-    public func snapshot() async -> DiagnosticSnapshot {
+    /// `checkPortal` false leaves `captivePortal` nil, for the app, which looks for a sign-in page on its own schedule.
+    public func snapshot(checkPortal: Bool = true) async -> DiagnosticSnapshot {
         let radio = radio()
         async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"])
         async let services = CommandRunner.run("/usr/sbin/networksetup", ["-listnetworkserviceorder"])
         async let internet = Self.ping("1.1.1.1")
         async let dns = CommandRunner.run("/usr/bin/dig", ["+time=2", "+tries=1", "example.com"])
-        async let portal = Self.portal()
+        async let portal = checkPortal ? Self.portal() : nil
         let routeOutput = await route.output
         let gateway = Self.matches("gateway:\\s+([^\\s]+)", in: routeOutput).first
         let router = if let gateway { await Self.ping(gateway) } else { nil as PingResult? }
@@ -104,16 +105,13 @@ public actor DiagnosticProbe {
         return await DiagnosticSnapshot(date: Date(), radio: radio, gateway: gateway, router: router, internet: internet,
                                         dnsMilliseconds: dnsTime, dnsServers: servers, captivePortal: portal, networkService: service, wiredInterface: wired)
     }
+    /// True when a sign-in page is in the way, nil when neither check page answered.
     public static func portal() async -> Bool? {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 4
-        let session = URLSession(configuration: config)
-        defer { session.invalidateAndCancel() }
-        do {
-            let (data, response) = try await session.data(from: URL(string: "http://captive.apple.com/hotspot-detect.html")!)
-            guard let http = response as? HTTPURLResponse else { return nil }
-            return http.statusCode != 200 || !(String(decoding: data, as: UTF8.self).contains("<TITLE>Success</TITLE>")) || http.url?.host != "captive.apple.com"
-        } catch { return nil }
+        switch await CaptivePortal.check(timeout: 4).state {
+        case .open: false
+        case .portal: true
+        case .offline: nil
+        }
     }
     /// Congestion estimate based on visible access points, not a spectrum measurement.
     public static func congestion(channel: Int, band: String, networks: [NearbyNetwork]) -> Double {

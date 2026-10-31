@@ -43,6 +43,7 @@ public struct DoctorStep: Codable, Identifiable, Sendable {
         case "Transfer": String(localized: "Transfer", comment: "Connection check layer")
         case "Context": String(localized: "Context", comment: "Connection check layer")
         case "Provider": String(localized: "Provider", comment: "Connection check layer")
+        case "Wi-Fi sign-in": String(localized: "Wi-Fi sign-in", comment: "Connection check layer: a hotel or café Wi-Fi's sign-in page")
         default: layer
         }
     }
@@ -219,7 +220,21 @@ public enum ConnectionDoctor {
     public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
         let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt)
         guard !report.steps.isEmpty else { return report }
-        return await withProxyApp(report)
+        return await withPortal(await withProxyApp(report))
+    }
+
+    /// A failed check behind the Wi-Fi's sign-in page: that page is the cause, not DNS, the secure connection or the server.
+    static func withPortal(_ report: DoctorReport, check: PortalCheck? = nil) async -> DoctorReport {
+        guard !report.ok else { return report }
+        let found: PortalCheck
+        if let check { found = check } else { found = await CaptivePortal.check(timeout: 4) }
+        guard found.state == .portal else { return report }
+        let page = found.host.map { String(localized: "The sign-in page at \($0) answers for every website until you sign in.", comment: "Connection check: a hotel or café Wi-Fi's sign-in page; the argument is its host") }
+            ?? String(localized: "A sign-in page answers for every website until you sign in.", comment: "Connection check: a hotel or café Wi-Fi's sign-in page")
+        return DoctorReport(target: report.target, host: report.host, app: report.app, verdict: String(localized: "The Wi-Fi’s sign-in page is in the way."),
+                            next: String(localized: "Sign in on the network’s page (kilobat portal open), then try again."),
+                            steps: [DoctorStep(layer: "Wi-Fi sign-in", status: .failed, detail: page)] + report.steps,
+                            hops: report.hops, date: report.date, client: report.client, method: report.method, path: report.path, failedAt: report.failedAt)
     }
 
     /// When a proxy app with a readable API runs, its mode and how its current nodes answer, as one more layer.

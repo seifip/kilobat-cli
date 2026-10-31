@@ -4,7 +4,7 @@ import Foundation
 public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     /// Why a freeze happened, judged from the router ping, the Wi-Fi and every other app's traffic at that moment.
     public struct Cause: Codable, Sendable, Hashable {
-        public enum Kind: String, Codable, Sendable { case app, otherDevice, wifi, airDrop, beyondRouter, starlink }
+        public enum Kind: String, Codable, Sendable { case app, otherDevice, wifi, airDrop, beyondRouter, starlink, portal }
         public let kind: Kind
         /// The app moving data at the time, for `app`.
         public var app: String? = nil
@@ -36,6 +36,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .airDrop: String(localized: "caused by AirDrop scanning", comment: "Call report: AirDrop's radio hopping channels caused a freeze")
             case .beyondRouter: String(localized: "beyond your router", comment: "Call report: the freeze happened between the router and the call's server")
             case .starlink: CallSamples.Dish.phrase(dish)
+            case .portal: String(localized: "after the Wi-Fi’s sign-in page logged you out", comment: "Call report: where a freeze came from; a hotel or café Wi-Fi's sign-in ran out")
             }
         }
         /// What to try before the next call.
@@ -49,6 +50,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Call report advice")
             case .starlink: CallSamples.Dish.advice(dish)
+            case .portal: String(localized: "Sign in again on the Wi-Fi’s page. Once Kilobat has seen how long sign-ins last here, it warns you five minutes before the next one runs out.", comment: "Call report advice after a hotel or café Wi-Fi's sign-in ran out")
             }
         }
     }
@@ -182,6 +184,8 @@ public struct CallSamples: Sendable {
     public var airDrop = false
     /// What a Starlink dish logged during the call: outages and moments it was obstructed.
     public var dish: [Dish] = []
+    /// Seconds into the call from which the Wi-Fi's sign-in page had logged the Mac out (the last check that still went through).
+    public var loggedOut: Double? = nil
     public init() {}
 }
 
@@ -221,6 +225,8 @@ public enum CallAnalysis {
     static func cause(from start: Double, to end: Double, samples: CallSamples) -> CallReport.Cause {
         let routerReplies = samples.router.compactMap(\.ms).sorted()
         let routerMedian = StutterTest.percentile(routerReplies, 50) ?? 0
+        // Logged out by the sign-in page, nothing past the router answers until you sign in again.
+        if let out = samples.loggedOut, end + 1 >= out { return .init(kind: .portal) }
         let local = samples.router.contains { $0.at >= start - 1 && $0.at <= end + 1 && ($0.ms.map { $0 > routerMedian + 100 } ?? true) }
         if local {
             let weak = samples.weakSignal.contains { abs($0 - start) < 60 }
