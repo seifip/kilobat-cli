@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test", "plan"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test", "plan", "games"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -39,6 +39,7 @@ struct KilobatCLI {
         case "updaters": try await UpdatersCLI.run(args)
         case "agent-event": await AgentCLI.run(args)
         case "overlay": try await OverlayCLI.run(args)
+        case "games": try await GamesCLI.run(args)
         case "proxy", "vpn": try await ProxyCLI.run(args)
         case "calls": try CallsCLI.run(args)
         case "plan": try PlanCLI.run(args)
@@ -178,7 +179,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.12.0"
+    static let version = "0.13.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -468,7 +469,7 @@ struct KilobatCLI {
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
         ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks"), ("calls", "Report cards after calls"),
-        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"),
+        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers, find the closest"),
         ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
         ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
@@ -481,7 +482,7 @@ struct KilobatCLI {
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["--json"], "calls": ["--limit", "--json"], "plan": ["--days", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["--json"], "calls": ["--limit", "--json"], "plan": ["--days", "--json"], "games": ["--game", "cs2", "dota2", "deadlock", "fortnite", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
         "stutter": ["--seconds", "--target", "router", "internet", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
         "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
@@ -580,6 +581,7 @@ struct KilobatCLI {
       access-policy <bundle-id> [--json]  The connections an app's developer declares, and why
       health-history [--hours 1…720] [--json]  Router, internet and DNS checks over time
       overlay [--port 7171] [--target internet|router]  Live ping overlay for OBS at localhost, until Ctrl-C
+        [--target <game>:<region>]  A game's data center, such as cs2:fra; kilobat games finds yours
       proxy [--json]        Proxy apps (Clash, Surge, sing-box…), the system proxy and what's wrong with them
       proxy routes [--app <name>]  Which rule and proxy node each app's connections took
       proxy test            How fast each proxy group's current node answers
@@ -609,6 +611,8 @@ struct KilobatCLI {
       stutter [--json]     Ping every 50 ms to find latency spikes and how regular they are
         [--seconds 10…60]   Test length (20 s default)
         [--target router|internet|<host>]  What to ping (the router by default)
+      games [--json]        Ping each data center of CS2, Dota 2, Deadlock and Fortnite 5 times; name the closest
+        [--game cs2|dota2|deadlock|fortnite]  One game only
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
 
     Wi-Fi

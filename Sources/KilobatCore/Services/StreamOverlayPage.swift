@@ -3,6 +3,7 @@ extension StreamOverlay {
     /// blue and smiling when the line is good, violet when it's slow, rose and frowning when it's poor.
     /// Options go in the URL: `?show=ping,jitter,loss,graph,speed&theme=dark|light|clear&size=s|m|l`.
     /// With Pro, `brand=0` hides the wordmark and `face=0` shows a plain dot instead of the bat.
+    /// A game target names its data center on the pill ("CS2 · Frankfurt"); `server=0` hides it.
     static let page = #"""
     <!doctype html><html lang="en"><head><meta charset="utf-8"><title>Kilobat overlay</title>
     <style>
@@ -26,6 +27,7 @@ extension StreamOverlay {
     .value { min-width: 2.6em; }
     svg.graph { width: 6.2em; height: 1.55em; overflow: visible; }
     .graph .line { stroke: var(--status); transition: stroke .4s; } .graph .area { fill: var(--status); opacity: .16; transition: fill .4s; }
+    .where { color: var(--muted); font-size: .74em; font-weight: 600; white-space: nowrap; margin-right: -4px; }
     .brand { color: var(--muted); font-size: .7em; font-weight: 700; letter-spacing: .02em; opacity: .85; }
     .hidden { display: none !important; }
     </style></head>
@@ -36,6 +38,7 @@ extension StreamOverlay {
         <path class="mouth" id="mouth" d="M12.3 17.8 Q15 20.3 17.7 17.8"/>
       </svg>
       <span class="dot hidden" id="dot"></span>
+      <span class="where hidden" id="where"></span>
       <div class="group" id="ping"><span class="big" id="pingValue">—</span><span class="unit">ms</span></div>
       <div class="rule" id="rule1"></div>
       <div class="group" id="jitter"><span class="label">jitter</span><span class="value" id="jitterValue">—</span></div>
@@ -60,6 +63,7 @@ extension StreamOverlay {
       $("brand").classList.toggle("hidden", d.unbrandedAllowed && query.get("brand") === "0");
       const plain = d.unbrandedAllowed && query.get("face") === "0";
       $("face").classList.toggle("hidden", plain); $("dot").classList.toggle("hidden", !plain);
+      $("where").textContent = d.label || ""; $("where").classList.toggle("hidden", !d.label || query.get("server") === "0");
       const ping = d.pingMs, loss = d.lossPercent ?? 0, jitter = d.jitterMs ?? 0;
       const state = ping == null || loss >= 5 || ping > 150 ? "poor" : loss > 0 || ping > 60 || jitter > 20 ? "slow" : "good";
       $("pill").style.setProperty("--status", `var(--${state})`);

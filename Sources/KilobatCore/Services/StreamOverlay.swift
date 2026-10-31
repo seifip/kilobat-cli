@@ -24,7 +24,8 @@ public final class StreamOverlay: @unchecked Sendable {
     private let queue = DispatchQueue(label: "co.seifi.kilobat.overlay")
     private var listener: NWListener?
 
-    /// `target` is "internet" (1.1.1.1), "router" or a host name. `rates` reads this Mac's traffic, if the caller has it.
+    /// `target` is "internet" (1.1.1.1), "router", a game region such as "cs2:fra", or a host name.
+    /// `rates` reads this Mac's traffic, if the caller has it.
     public init(port: UInt16 = StreamOverlay.defaultPort, target: String = "internet", rates: @escaping @Sendable () async -> Rates? = { nil },
                 unbranded: @escaping @Sendable () async -> Bool = { false }) {
         self.port = port; self.pinger = LivePing(target: target); self.rates = rates; self.unbranded = unbranded
@@ -45,6 +46,11 @@ public final class StreamOverlay: @unchecked Sendable {
     public func stop() {
         listener?.cancel(); listener = nil
         Task { await pinger.stop() }
+    }
+
+    /// Switches what the overlay pings without closing the page's port, so OBS keeps its source.
+    public func retarget(_ target: String) {
+        Task { await pinger.retarget(target) }
     }
 
     private func serve(_ connection: NWConnection) {
@@ -79,15 +85,31 @@ public final class StreamOverlay: @unchecked Sendable {
 
 /// One ping a second to the target, kept for the last minute. Missed replies count as loss.
 actor LivePing {
-    private let target: String
+    private var target: String
     private var process: Process?
     private var samples: [Double?] = []
     private var host = ""
+    /// "CS2 · Frankfurt" for a game region, shown on the pill.
+    private var label: String?
     init(target: String) { self.target = target }
+
+    /// A game region pings its data center; anything else goes through the stutter test's targets.
+    static func host(for target: String) async -> (host: String, label: String?) {
+        if let (game, region) = GameServerTable.bundled.target(target) { return (region.hosts[0], "\(game.short) · \(region.name)") }
+        return ((try? await StutterTest.host(for: target)) ?? "1.1.1.1", nil)
+    }
+
+    /// Pings another target from now on; the last minute starts over.
+    func retarget(_ target: String) async {
+        guard target != self.target else { return }
+        let running = process != nil
+        stop(); self.target = target
+        if running { await start() }
+    }
 
     func start() async {
         guard process == nil else { return }
-        host = (try? await StutterTest.host(for: target)) ?? "1.1.1.1"
+        (host, label) = await Self.host(for: target)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ping")
         // -n numeric, 1 s apart, 1 s wait each: a reply later than that counts as lost, as a stream would feel it.
@@ -103,6 +125,8 @@ actor LivePing {
     }
 
     func stop() {
+        // Unhooked first, so the old target's last replies don't land in the new target's minute.
+        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process?.terminate(); process = nil; samples = []
     }
 
@@ -118,7 +142,7 @@ actor LivePing {
     }
 
     struct Summary: Encodable, Sendable {
-        let host: String, target: String
+        let host: String, target: String, label: String?
         let pingMs: Double?, jitterMs: Double?, lossPercent: Double?
         /// The last minute, oldest first; null for a missed reply.
         let history: [Double?]
@@ -126,19 +150,19 @@ actor LivePing {
         var unbrandedAllowed = false
         func encode(to encoder: Encoder) throws {
             var c = encoder.container(keyedBy: CodingKeys.self)
-            try c.encode(host, forKey: .host); try c.encode(target, forKey: .target)
+            try c.encode(host, forKey: .host); try c.encode(target, forKey: .target); try c.encodeIfPresent(label, forKey: .label)
             try c.encode(pingMs, forKey: .pingMs); try c.encode(jitterMs, forKey: .jitterMs); try c.encode(lossPercent, forKey: .lossPercent)
             try c.encode(history, forKey: .history)
             try c.encodeIfPresent(downloadBytesPerSecond, forKey: .downloadBytesPerSecond); try c.encodeIfPresent(uploadBytesPerSecond, forKey: .uploadBytesPerSecond)
             try c.encode(unbrandedAllowed, forKey: .unbrandedAllowed)
         }
-        enum CodingKeys: String, CodingKey { case host, target, pingMs, jitterMs, lossPercent, history, downloadBytesPerSecond, uploadBytesPerSecond, unbrandedAllowed }
+        enum CodingKeys: String, CodingKey { case host, target, label, pingMs, jitterMs, lossPercent, history, downloadBytesPerSecond, uploadBytesPerSecond, unbrandedAllowed }
     }
 
     func summary() -> Summary {
         let recent = Array(samples.suffix(30)), replies = recent.compactMap { $0 }
         let jitter = replies.count > 1 ? zip(replies, replies.dropFirst()).map { abs($1 - $0) }.reduce(0, +) / Double(replies.count - 1) : nil
         let loss = recent.isEmpty ? nil : Double(recent.filter { $0 == nil }.count) / Double(recent.count) * 100
-        return Summary(host: host, target: target, pingMs: samples.last.flatMap { $0 }, jitterMs: jitter, lossPercent: loss, history: samples)
+        return Summary(host: host, target: target, label: label, pingMs: samples.last.flatMap { $0 }, jitterMs: jitter, lossPercent: loss, history: samples)
     }
 }

@@ -82,6 +82,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var flushingDNS = false
     public let lowLatency = LowLatencyMode()
     public let stutter = StutterStore()
+    public let games = GameServerStore()
     public let nearby = NearbyStore()
     public let bluetooth = BluetoothState()
     private let probe = DiagnosticProbe()
