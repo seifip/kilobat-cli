@@ -25,6 +25,10 @@ public struct StutterResult: Codable, Sendable {
     public let periodSeconds: Double?
     public let pattern: Pattern
     public let awdl: AWDLStatus?
+    /// When the first ping went out, to line spikes up with the clock.
+    public var started: Date? = nil
+    /// The Mac was on a Starlink dish's network during the test.
+    public var starlink: Bool? = nil
     public var received: Int { samples.compactMap { $0 }.count }
     public var lossPercent: Double { samples.isEmpty ? 0 : Double(samples.count - received) / Double(samples.count) * 100 }
     public var seconds: Double { Double(samples.count) * interval }
@@ -42,11 +46,20 @@ public struct StutterResult: Codable, Sendable {
         return runs.filter { $0 <= 2 }.reduce(0, +) * 10 >= lost * 9
     }
 
+    /// On Starlink, spikes beyond the router that land on its 15-second satellite handovers (:12, :27, :42, :57).
+    public var handoverAligned: Bool {
+        guard starlink == true, !local, let started else { return false }
+        return Starlink.alignedWithHandovers(spikes.map { started.addingTimeInterval($0.at) })
+    }
+
     public var verdict: String {
         let peak = max.map { String(format: "%.0f ms", $0) } ?? "—"
         let loss = pingLimited ? " " + (local ? String(localized: "The router answered only some of the fast pings; that's rate limiting, not lost traffic.")
                                               : String(localized: "It answered only some of the fast pings; that's rate limiting, not lost traffic."))
             : lossPercent >= 2 ? " " + String(localized: "\(String(format: "%.0f", lossPercent))% of pings got no reply.") : ""
+        if handoverAligned, pattern != .noReplies {
+            return String(localized: "Spikes up to \(peak) land on Starlink’s satellite handovers, every 15 seconds at :12, :27, :42 and :57 past the minute. That’s how Starlink switches satellites, not your Wi-Fi or AirDrop, and nothing at home changes it.", comment: "Stutter test verdict on Starlink; the argument is a latency such as 180 ms") + loss
+        }
         switch pattern {
         case .noReplies:
             return local ? String(localized: "Your router didn't answer. Some routers ignore ping; try the internet target.") : String(localized: "No replies from \(host). It may not answer ping.")
@@ -135,14 +148,14 @@ public enum StutterTest {
     public static func every(_ seconds: Double) -> String {
         abs(seconds - 1) < 0.15 ? String(localized: "about every second") : String(localized: "about every \(String(format: seconds < 10 ? "%.1f" : "%.0f", seconds)) s")
     }
-    public static func analyze(_ samples: [Double?], target: String, host: String, interval: Double = interval, awdl: AWDLStatus? = nil, date: Date = Date()) -> StutterResult {
+    public static func analyze(_ samples: [Double?], target: String, host: String, interval: Double = interval, awdl: AWDLStatus? = nil, date: Date = Date(), started: Date? = nil, starlink: Bool? = nil) -> StutterResult {
         let sorted = samples.compactMap { $0 }.sorted()
         let spikes = spikes(samples, interval: interval)
         let period = period(spikes.map(\.at))
         let pattern: StutterResult.Pattern = sorted.isEmpty ? .noReplies : spikes.isEmpty ? .steady : period != nil ? .periodic : spikes.count < 3 ? .few : .irregular
         return StutterResult(date: date, target: target, host: host, interval: interval, samples: samples,
                              p50: percentile(sorted, 50), p95: percentile(sorted, 95), p99: percentile(sorted, 99), max: sorted.last,
-                             threshold: percentile(sorted, 50).map(threshold), spikes: spikes, periodSeconds: period, pattern: pattern, awdl: awdl)
+                             threshold: percentile(sorted, 50).map(threshold), spikes: spikes, periodSeconds: period, pattern: pattern, awdl: awdl, started: started, starlink: starlink)
     }
     /// One slot per probe, filled by icmp_seq; duplicates and late strays outside the run are ignored.
     public static func parse(_ output: String, count: Int) -> [Double?] {
@@ -168,14 +181,19 @@ public enum StutterTest {
     }
     /// /sbin/ping sends every 50 ms without root on current macOS (only intervals under 2 ms need it).
     /// If an older ping refuses, it falls back to 100 ms over the same time.
-    public static func run(target: String, seconds: Int = 20) async throws -> StutterResult {
+    /// `starlink` says whether the Mac is on a Starlink dish's network, for the handover check; nil looks for a dish.
+    public static func run(target: String, seconds: Int = 20, starlink: Bool? = nil) async throws -> StutterResult {
         let host = try await host(for: target), seconds = Swift.min(Swift.max(seconds, Self.seconds.lowerBound), Self.seconds.upperBound)
         async let before = NearbyRadios.awdlStatus()
+        // Only a test beyond the router can show Starlink's handovers.
+        var onStarlink = starlink
+        if onStarlink == nil, target != "router" { onStarlink = await Starlink.detect() }
         var interval = Self.interval
+        var started = Date()
         var count = Int(Double(seconds) / interval)
         var result = await ping(host, count: count, interval: interval)
         if result.output.contains("too short") {
-            interval = 0.1; count = seconds * 10
+            interval = 0.1; count = seconds * 10; started = Date()
             result = await ping(host, count: count, interval: interval)
         }
         if result.status != 0 && !result.output.contains("icmp_seq") && result.output.contains("ping:") {
@@ -186,7 +204,7 @@ public enum StutterTest {
         awdl.up = awdl.up && after.up; awdl.active = awdl.active || after.active
         for user in after.users where !awdl.users.contains(user) { awdl.users.append(user) }
         awdl.processes = Array(Set(awdl.processes + after.processes)).sorted()
-        return analyze(parse(result.output, count: count), target: target, host: host, interval: interval, awdl: awdl)
+        return analyze(parse(result.output, count: count), target: target, host: host, interval: interval, awdl: awdl, started: started, starlink: onStarlink)
     }
     private static func ping(_ host: String, count: Int, interval: Double) async -> CommandResult {
         await CommandRunner.run("/sbin/ping", ["-n", "-c", String(count), "-i", String(interval), "-W", "1000", host], timeout: Double(count) * interval + 5)
@@ -210,7 +228,13 @@ public enum StutterTest {
     public private(set) var result: StutterResult?
     public private(set) var before: StutterResult?
     public var error: String?
+    /// Whether the Mac is on a Starlink dish's network right now; set by the diagnostics store.
+    public var starlink: (@MainActor () -> Bool)?
     public init() {}
+    #if DEBUG
+    /// A made-up result for screenshots; debug builds only.
+    public func preview(_ result: StutterResult) { self.result = result; before = nil }
+    #endif
     public func run() async {
         guard !running else { return }
         before = nil
@@ -230,7 +254,7 @@ public enum StutterTest {
     private func measure() async -> StutterResult? {
         running = true; started = Date(); error = nil
         defer { running = false; started = nil }
-        do { return try await StutterTest.run(target: target, seconds: seconds) }
+        do { return try await StutterTest.run(target: target, seconds: seconds, starlink: starlink?() == true ? true : nil) }
         catch { self.error = error.localizedDescription; return nil }
     }
 }

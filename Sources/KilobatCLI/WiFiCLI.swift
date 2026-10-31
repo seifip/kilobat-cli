@@ -319,8 +319,13 @@ import KilobatCore
         let journal = NetworkJournal()
         let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
         let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
+        // The dish's own log, when this network is a Starlink dish's; a live reading adds what the app hasn't saved yet.
+        var dish = StarlinkJournal.load()
+        let status = dish.network == journal.samples.last?.networkKey ? await Starlink.status() : nil
+        if status != nil, let history = await Starlink.history() { dish.merge(history.outages); dish.lastSeen = Date() }
         return SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
-                                  hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check)
+                                  hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
+                                  starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours))
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {

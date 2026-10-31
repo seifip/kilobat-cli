@@ -16,6 +16,15 @@ public extension SupportReport {
         default: status
         }
     }
+    private static func seconds(_ evidence: StarlinkEvidence, _ side: StarlinkOutage.Side) -> Double? {
+        let value = switch side { case .setup: evidence.setupSeconds; case .network: evidence.networkSeconds; case .dish: evidence.dishSeconds }
+        return value > 0 ? value : nil
+    }
+    /// "No satellites (Starlink’s network)".
+    private static func cause(_ outage: StarlinkEvidence.Outage) -> String {
+        let cause = StarlinkOutage.Cause(rawValue: outage.cause) ?? .unknown
+        return "\(cause.title) (\((StarlinkOutage.Side(rawValue: outage.side) ?? cause.side).title))"
+    }
     /// Label and value pairs for the plan check, in the order every format shows them.
     private static func planRows(_ plan: PlanSummary) -> [(String, String)] {
         [(String(localized: "Plan", comment: "The internet plan’s download speed, in the provider report’s plan check"), PlanSummary.mbps(plan.planMbps)),
@@ -47,6 +56,11 @@ public extension SupportReport {
         if !outages.isEmpty {
             lines += ["", String(localized: "Outages:", comment: "A heading in the provider report")] + outages.map { "  \($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())) – \($0.end.formatted(date: .omitted, time: .shortened)) (\(Self.minutes($0.minutes)))" }
         }
+        if let starlink {
+            lines += ["", String(localized: "Starlink dish log:", comment: "A heading in the provider report")]
+            lines += StarlinkOutage.Side.allCases.compactMap { side in Self.seconds(starlink, side).map { "  \(side.title): \(StarlinkEvidence.length($0))" } }
+            lines += starlink.outages.suffix(20).map { "  \($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute().second()))  \(StarlinkEvidence.length($0.seconds))  \(Self.cause($0))" }
+        }
         if !speedTests.isEmpty {
             lines += ["", String(localized: "Speed tests:", comment: "A heading in the provider report")] + speedTests.map { test in
                 let when = test.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
@@ -74,6 +88,10 @@ public extension SupportReport {
         if !outages.isEmpty {
             lines += ["", "## Outages", "", "| Started | Ended | Length |", "|---|---|---|"]
             lines += outages.map { "| \($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \($0.end.formatted(date: .omitted, time: .shortened)) | \(Self.minutes($0.minutes)) |" }
+        }
+        if let starlink {
+            lines += ["", "## Starlink dish log", ""] + StarlinkOutage.Side.allCases.compactMap { side in Self.seconds(starlink, side).map { "- \(side.title): \(StarlinkEvidence.length($0))" } }
+            lines += ["", "| Started | Length | Cause |", "|---|---|---|"] + starlink.outages.suffix(20).map { "| \($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute().second())) | \(StarlinkEvidence.length($0.seconds)) | \(Self.cause($0)) |" }
         }
         if !speedTests.isEmpty {
             lines += ["", "## Speed tests", "", "| When | Download | Upload | Idle latency | Under load |", "|---|---|---|---|---|"]
@@ -115,6 +133,13 @@ public extension SupportReport {
                 + "<th>\(esc(String(localized: "Ended", comment: "When an outage ended")))</th><th>\(esc(String(localized: "Length", comment: "How long an outage lasted")))</th></tr>"
             body += outages.map { "<tr><td>\(when($0.start))</td><td>\(esc($0.end.formatted(date: .omitted, time: .shortened)))</td><td>\(esc(Self.minutes($0.minutes)))</td></tr>" }.joined()
             body += "</table></section>"
+        }
+        if let starlink {
+            body += "<section><h2>\(esc(String(localized: "Starlink dish log", comment: "A heading in the provider report")))</h2><div class=\"stats sides\">"
+            for side in StarlinkOutage.Side.allCases { body += "<div><span>\(esc(side.title))</span><b>\(esc(Self.seconds(starlink, side).map(StarlinkEvidence.length) ?? "0 s"))</b></div>" }
+            body += "</div><table><tr><th>\(esc(String(localized: "Started", comment: "When an outage started")))</th><th>\(esc(String(localized: "Length", comment: "How long an outage lasted")))</th><th>\(esc(String(localized: "Cause", comment: "Why the Starlink dish was offline, in the provider report")))</th></tr>"
+            body += starlink.outages.suffix(20).map { "<tr><td>\(esc($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute().second())))</td><td>\(esc(StarlinkEvidence.length($0.seconds)))</td><td>\(esc(Self.cause($0)))</td></tr>" }.joined()
+            body += "</table><p class=\"note\">\(esc(String(localized: "From the dish’s own outage log. Your setup: obstructions, heat, power save, cable. Starlink’s network: no satellite in view, no reply from the ground station.", comment: "The provider report’s note under the Starlink outage log")))</p></section>"
         }
         if !speedTests.isEmpty {
             body += "<section><h2>\(esc(String(localized: "Speed tests", comment: "A heading in the provider report")))</h2><table><tr>"
@@ -187,6 +212,7 @@ public extension SupportReport {
         .findings ul { margin: 0; padding-left: 18px; } .findings li { margin: 6px 0; }
         .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
         .stats div { border: 1px solid #ececf2; border-radius: 9px; padding: 8px 10px; }
+        .stats.sides { grid-template-columns: repeat(3, 1fr); margin-bottom: 10px; }
         .stats span { display: block; color: #6e7287; font-size: 11px; } .stats b { font-size: 15px; font-variant-numeric: tabular-nums; }
         .chart { width: 100%; height: 150px; margin-top: 12px; } .chart text { font-size: 10px; fill: #6e7287; }
         table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }

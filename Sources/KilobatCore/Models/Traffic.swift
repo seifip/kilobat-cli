@@ -97,7 +97,7 @@ public struct UsageEntry: Codable, Identifiable {
     public var total: UInt64 { received + sent }
 }
 
-public enum NetworkProfile: String, Codable, CaseIterable, Identifiable {
+public enum NetworkProfile: String, Codable, CaseIterable, Identifiable, Sendable {
     case travel = "Travel", work = "Work", unrestricted = "Unrestricted"
     public var id: String { rawValue }
     /// The name as shown; `rawValue` is what rules and preferences store.
@@ -171,6 +171,8 @@ public struct SavedPreferences: Codable, Equatable {
     public var networkCost: [String: String]? = nil
     /// Block updater helpers while the network is metered; nil means on. See `UpdaterPause`.
     public var pauseUpdaters: Bool? = nil
+    /// A Focus filter pauses updaters on every network while its Focus is on; nil otherwise. See `FocusFilterStore`.
+    public var focusPausesUpdaters: Bool? = nil
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]

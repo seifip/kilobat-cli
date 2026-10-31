@@ -4,15 +4,17 @@ import Foundation
 public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     /// Why a freeze happened, judged from the router ping, the Wi-Fi and every other app's traffic at that moment.
     public struct Cause: Codable, Sendable, Hashable {
-        public enum Kind: String, Codable, Sendable { case app, otherDevice, wifi, airDrop, beyondRouter }
+        public enum Kind: String, Codable, Sendable { case app, otherDevice, wifi, airDrop, beyondRouter, starlink }
         public let kind: Kind
         /// The app moving data at the time, for `app`.
         public var app: String? = nil
         public var uploading: Bool? = nil
         /// The Wi-Fi signal was weak at the time, for `wifi`.
         public var weakSignal: Bool? = nil
-        public init(kind: Kind, app: String? = nil, uploading: Bool? = nil, weakSignal: Bool? = nil) {
-            self.kind = kind; self.app = app; self.uploading = uploading; self.weakSignal = weakSignal
+        /// What the Starlink dish logged at the time, for `starlink`: obstructed, noSatellites, reboot or other.
+        public var dish: String? = nil
+        public init(kind: Kind, app: String? = nil, uploading: Bool? = nil, weakSignal: Bool? = nil, dish: String? = nil) {
+            self.kind = kind; self.app = app; self.uploading = uploading; self.weakSignal = weakSignal; self.dish = dish
         }
         /// Reads on from "caused by" or "on": "Dropbox uploading", "weak Wi-Fi".
         public var phrase: String {
@@ -25,6 +27,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
                                                  : String(localized: "caused by another device on your network downloading", comment: "Call report: a TV, phone or console on the same network was downloading")
             case .airDrop: String(localized: "caused by AirDrop scanning", comment: "Call report: AirDrop's radio hopping channels caused a freeze")
             case .beyondRouter: String(localized: "beyond your router", comment: "Call report: the freeze happened between the router and the call's server")
+            case .starlink: CallSamples.Dish.phrase(dish)
             }
         }
         /// What to try before the next call.
@@ -36,6 +39,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .otherDevice: String(localized: "A TV, console or phone on your network was busy. Pause its download or stream before calls, or turn on your router’s QoS for calls.", comment: "Call report advice")
             case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Call report advice")
+            case .starlink: CallSamples.Dish.advice(dish)
             }
         }
     }
@@ -163,6 +167,8 @@ public struct CallSamples: Sendable {
     public var weakSignal: [Double] = []
     /// AirDrop's link was busy at some point in the call.
     public var airDrop = false
+    /// What a Starlink dish logged during the call: outages and moments it was obstructed.
+    public var dish: [Dish] = []
     public init() {}
 }
 
@@ -208,6 +214,7 @@ public enum CallAnalysis {
             if samples.airDrop && !weak { return .init(kind: .airDrop) }
             return .init(kind: .wifi, weakSignal: weak)
         }
+        if let dish = CallSamples.Dish.overlapping(samples.dish, from: start, to: end) { return .init(kind: .starlink, dish: dish.reason) }
         let busy = samples.traffic.filter { $0.at >= start - 5 && $0.at <= end + 1 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
         if let top = busy.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
             return .init(kind: .app, app: top.app, uploading: top.upload / uploadLoad >= top.download / downloadLoad)

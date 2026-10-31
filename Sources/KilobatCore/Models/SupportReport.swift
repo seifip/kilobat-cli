@@ -66,13 +66,15 @@ public struct SupportReport: Codable, Sendable {
     public let check: Check?
     /// What was left out on purpose, said in the report so the reader knows it isn't missing by accident.
     public let leftOut: [String]
+    /// The Starlink dish's own outage log, when the report's network is a dish's.
+    public var starlink: StarlinkEvidence? = nil
 
     public static let footer = String(localized: "Measured with Kilobat · kilobat.app", comment: "The last line of the report for an internet provider")
 
     /// Builds the report for the network the latest check ran on. `plans` are the plans set per network
     /// (`PlanSpeeds`); `planMbps` stands in for a network without one.
     public static func make(samples: [DiagnosticSnapshot], events: [NetworkEvent], speedTests: [SavedSpeedTest],
-                            hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil,
+                            hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil, starlink: StarlinkEvidence? = nil,
                             mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
@@ -95,13 +97,20 @@ public struct SupportReport: Codable, Sendable {
             Check(host: report.host, ok: report.ok, verdict: redact(report.verdict),
                   steps: report.steps.map { Step(layer: $0.title, status: $0.status.rawValue, detail: redact($0.detail)) })
         }
+        var lines = findings(latency: latency, outages: outages, speeds: Array(speeds), plan: plan, planCheck: planCheck, check: doctor, hours: hours)
+        // The dish's log goes right after Kilobat's own outages, or replaces the "nothing recorded yet" line.
+        if let line = starlink?.finding {
+            if latency == nil, outages.isEmpty, speeds.isEmpty, planCheck == nil, doctor == nil { lines = [line] } else { lines.insert(line, at: outages.isEmpty ? 0 : 1) }
+        }
         return SupportReport(created: now, hours: hours, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
-                             findings: findings(latency: latency, outages: outages, speeds: Array(speeds), plan: plan, planCheck: planCheck, check: doctor, hours: hours),
+                             findings: lines,
                              latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, planCheck: planCheck, check: doctor,
                              leftOut: [String(localized: "the network’s name", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "every IP address on your network, including the router’s", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "device names and hardware addresses", comment: "Left out of the provider report; items are joined with semicolons"),
-                                       String(localized: "which apps used the network", comment: "Left out of the provider report; items are joined with semicolons")])
+                                       String(localized: "which apps used the network", comment: "Left out of the provider report; items are joined with semicolons")]
+                                     + (starlink == nil ? [] : [String(localized: "the dish’s serial number and location", comment: "Left out of the provider report; items are joined with semicolons")]),
+                             starlink: starlink?.outages.isEmpty == false ? starlink : nil)
     }
 
     // MARK: Measurements

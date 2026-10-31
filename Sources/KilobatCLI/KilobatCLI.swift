@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test", "plan", "games"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "ip", "speed-compare", "lan-test", "plan", "games", "starlink"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -45,6 +45,7 @@ struct KilobatCLI {
         case "plan": try PlanCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "support-report", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
         case "stutter", "airdrop", "bluetooth": try await NearbyCLI.run(args)
+        case "starlink": try await StarlinkCLI.run(args)
         case "--help", "-h", "help": print(help)
         case "completion":
             guard args.count <= 2 else { throw CLIError("Use completion [zsh|bash|fish].") }
@@ -179,7 +180,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.13.0"
+    static let version = "0.14.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -469,7 +470,7 @@ struct KilobatCLI {
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
         ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks"), ("calls", "Report cards after calls"),
-        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers, find the closest"),
+        ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers, find the closest"), ("starlink", "Starlink dish: status, obstructions, outages"),
         ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
         ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
@@ -483,7 +484,7 @@ struct KilobatCLI {
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
         "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["--json"], "calls": ["--limit", "--json"], "plan": ["--days", "--json"], "games": ["--game", "cs2", "dota2", "deadlock", "fortnite", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
-        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
+        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
         "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
         "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
@@ -611,6 +612,8 @@ struct KilobatCLI {
       stutter [--json]     Ping every 50 ms to find latency spikes and how regular they are
         [--seconds 10…60]   Test length (20 s default)
         [--target router|internet|<host>]  What to ping (the router by default)
+      starlink [--json]     A Starlink dish on this network: state, ground-station ping, alerts, sky map, outages
+        [--hours 1…720]     Outages over this window (24 h default), split into your setup and Starlink's network
       games [--json]        Ping each data center of CS2, Dota 2, Deadlock and Fortnite 5 times; name the closest
         [--game cs2|dota2|deadlock|fortnite]  One game only
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush

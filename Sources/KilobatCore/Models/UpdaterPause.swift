@@ -6,9 +6,10 @@ import Foundation
 public enum UpdaterPause {
     /// The setting; on unless turned off.
     public static func enabled(_ preferences: SavedPreferences) -> Bool { preferences.pauseUpdaters != false }
-    /// Whether the filter pauses updaters now. Unrestricted allows every connection, so it never does.
+    /// Whether the filter pauses updaters now: on a metered network with the setting on, or while a Focus filter asks
+    /// to on any network. Unrestricted allows every connection, so it never does.
     public static func active(_ preferences: SavedPreferences, metered: Bool) -> Bool {
-        enabled(preferences) && metered && preferences.profile != .unrestricted
+        (enabled(preferences) && metered || preferences.focusPausesUpdaters == true) && preferences.profile != .unrestricted
     }
 
     /// An installed app whose updater runs inside the app's own process, so pausing it would mean blocking the app.
@@ -86,7 +87,9 @@ public enum UpdaterPause {
     public static func report(_ preferences: SavedPreferences, metered: Bool, filterActive: Bool?, apps: [AppTraffic]?, delegations: [DelegatedFlows],
                               events: [FilterEvent], inProcess: [InProcessApp], now: Date = Date()) -> Report {
         let enabled = enabled(preferences), paused = active(preferences, metered: metered)
-        let summary: String = if !enabled { String(localized: "Off: updaters run on every network.") }
+        let summary: String = if paused, preferences.focusPausesUpdaters == true, filterActive != false {
+                String(localized: "Paused by your Focus: updaters can’t start new connections until the Focus ends.") }
+            else if !enabled { String(localized: "Off: updaters run on every network.") }
             else if !metered { String(localized: "On: updaters wait while this Mac is on a metered network. This one isn’t metered, so they run.") }
             else if !paused { String(localized: "This network is metered, but the Unrestricted profile allows every connection, so updaters aren’t paused.") }
             else if filterActive == false { String(localized: "This network is metered, but the network filter is off, so updaters aren’t paused.") }

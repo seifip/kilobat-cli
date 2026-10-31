@@ -55,6 +55,52 @@ struct CallModeTests {
         #expect(Preflight(date: Date(), issues: []).clear)
     }
 
+    @Test func resumesOnlyOnceNobodyHoldsIt() throws {
+        let ledger = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString).json")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep"); child.arguments = ["30"]
+        try child.run()
+        defer { kill(child.processIdentifier, SIGCONT); child.terminate(); try? FileManager.default.removeItem(at: ledger) }
+        #expect(CallMode.hold([child.processIdentifier], app: "Dropbox", owner: CallMode.focus, ledger: ledger).count == 1)
+        #expect(CallMode.hold([child.processIdentifier], app: "Dropbox", owner: CallMode.call, ledger: ledger).count == 1)
+        // The same owner twice adds nothing.
+        #expect(CallMode.hold([child.processIdentifier], app: "Dropbox", owner: CallMode.call, ledger: ledger).isEmpty)
+        #expect(CallMode.held(ledger: ledger).map(\.holders) == [[CallMode.focus, CallMode.call]])
+        #expect(CallMode.resume(owner: CallMode.call, ledger: ledger).isEmpty)
+        #expect(status(child.processIdentifier) == UInt32(SSTOP))
+        #expect(CallMode.held(ledger: ledger).map(\.holders) == [[CallMode.focus]])
+        #expect(CallMode.resume(app: "Dropbox", owner: CallMode.focus, ledger: ledger).count == 1)
+        #expect(status(child.processIdentifier) != UInt32(SSTOP))
+        #expect(!FileManager.default.fileExists(atPath: ledger.path))
+    }
+
+    @Test func anyOwnerLetsEverythingGoAtLaunch() throws {
+        let ledger = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString).json")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep"); child.arguments = ["30"]
+        try child.run()
+        defer { kill(child.processIdentifier, SIGCONT); child.terminate() }
+        CallMode.hold([child.processIdentifier], app: "Steam", owner: CallMode.focus, ledger: ledger)
+        CallMode.hold([child.processIdentifier], app: "Steam", owner: CallMode.call, ledger: ledger)
+        #expect(CallMode.resume(ledger: ledger).count == 1)
+        #expect(status(child.processIdentifier) != UInt32(SSTOP))
+    }
+
+    @Test func aLedgerFromBeforeFocusFiltersBelongsToCalls() throws {
+        let ledger = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString).json")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep"); child.arguments = ["30"]
+        try child.run()
+        defer { kill(child.processIdentifier, SIGCONT); child.terminate() }
+        kill(child.processIdentifier, SIGSTOP)
+        let started = try #require(CallMode.startTime(child.processIdentifier))
+        try Data(#"[{"pid":\#(child.processIdentifier),"started":\#(started),"app":"Steam"}]"#.utf8).write(to: ledger)
+        #expect(CallMode.resume(owner: CallMode.focus, ledger: ledger).isEmpty)
+        #expect(status(child.processIdentifier) == UInt32(SSTOP))
+        #expect(CallMode.resume(owner: CallMode.call, ledger: ledger).count == 1)
+        #expect(status(child.processIdentifier) != UInt32(SSTOP))
+    }
+
     @Test func knowsTheAppsItHolds() {
         #expect(CallMode.name(of: "com.getdropbox.dropbox") == "Dropbox")
         #expect(CallMode.name(of: "com.valvesoftware.steam.helper") == "Steam")

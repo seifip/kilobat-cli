@@ -45,37 +45,70 @@ public enum CallMode {
     /// The longest Kilobat holds anything, in case a call never seems to end.
     public static let limit: TimeInterval = 3 * 60 * 60
 
+    /// Who holds a process: a call, or a Focus filter. Each lets go only of its own, and a process resumes once nobody holds it.
+    public static let call = "call", focus = "focus"
+
     /// One suspended process, with its start time so a reused PID is never resumed by mistake.
     public struct Held: Codable, Sendable, Equatable {
         public let pid: Int32
         public let started: UInt64
         public let app: String
+        /// Missing in ledgers written before Focus filters, when only calls held anything.
+        public var owners: [String]?
+        public var holders: [String] { owners ?? [CallMode.call] }
+        public init(pid: Int32, started: UInt64, app: String, owners: [String]? = nil) {
+            self.pid = pid; self.started = started; self.app = app; self.owners = owners
+        }
     }
 
     public static var ledgerURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/call-mode-held.json")
     }
 
-    /// Suspends `pids` that belong to this user, noting each before it stops. Returns what was held.
-    public static func hold(_ pids: [Int32], app: String, ledger: URL = ledgerURL) -> [Held] {
+    /// Suspends `pids` that belong to this user for `owner`, noting each before it stops. Returns what this owner now
+    /// holds that it didn't: a process another owner already stopped is only noted as this one's too.
+    public static func hold(_ pids: [Int32], app: String, owner: String = call, ledger: URL = ledgerURL) -> [Held] {
         var held = load(ledger)
         var now: [Held] = []
-        for pid in Set(pids) where pid > 1 && pid != getpid() && owned(pid) && !held.contains(where: { $0.pid == pid }) {
+        for pid in Set(pids) where pid > 1 && pid != getpid() && owned(pid) {
             guard let started = startTime(pid) else { continue }
-            let entry = Held(pid: pid, started: started, app: app)
+            if let index = held.firstIndex(where: { $0.pid == pid }) {
+                if held[index].started == started {
+                    guard !held[index].holders.contains(owner) else { continue }
+                    held[index].owners = held[index].holders + [owner]; save(held, ledger)
+                    now.append(held[index]); continue
+                }
+                // The PID was reused by a process nobody stopped; the old line is stale.
+                held.remove(at: index); save(held, ledger)
+            }
+            let entry = Held(pid: pid, started: started, app: app, owners: [owner])
             held.append(entry); save(held, ledger)
-            if kill(pid, SIGSTOP) == 0 { now.append(entry) } else { held.removeAll { $0 == entry }; save(held, ledger) }
+            if kill(pid, SIGSTOP) == 0 { now.append(entry) } else { held.removeAll { $0.pid == pid }; save(held, ledger) }
         }
         return now
     }
 
-    /// Resumes every held process (or only those of `app`) that is still the same process, and forgets them.
-    @discardableResult public static func resume(app: String? = nil, ledger: URL = ledgerURL) -> [Held] {
-        let held = load(ledger)
-        let chosen = held.filter { app == nil || $0.app == app }
-        for entry in chosen where startTime(entry.pid) == entry.started { kill(entry.pid, SIGCONT) }
-        save(held.filter { !chosen.contains($0) }, ledger)
-        return chosen
+    /// Lets go of what `owner` holds (or every owner's, with nil), of every app or only `app`. A process resumes when no
+    /// owner holds it any more, and only if it's still the same process. Returns the processes resumed.
+    @discardableResult public static func resume(app: String? = nil, owner: String? = nil, ledger: URL = ledgerURL) -> [Held] {
+        var kept: [Held] = [], resumed: [Held] = []
+        for var entry in load(ledger) {
+            guard app == nil || entry.app == app, owner.map(entry.holders.contains) ?? true else { kept.append(entry); continue }
+            let rest = owner.map { owner in entry.holders.filter { $0 != owner } } ?? []
+            if rest.isEmpty { resumed.append(entry) } else { entry.owners = rest; kept.append(entry) }
+        }
+        for entry in resumed where startTime(entry.pid) == entry.started { kill(entry.pid, SIGCONT) }
+        save(kept, ledger)
+        return resumed
+    }
+
+    @MainActor private static var recovered = false
+    /// Resumes everything a previous run left suspended, once per launch, before anything here holds again: whichever
+    /// of call mode and Focus filters starts first runs it, so neither can resume what the other has just held.
+    @MainActor public static func recoverAtLaunch(ledger: URL = ledgerURL) {
+        guard !recovered else { return }
+        recovered = true
+        resume(ledger: ledger)
     }
 
     public static func held(ledger: URL = ledgerURL) -> [Held] { load(ledger) }

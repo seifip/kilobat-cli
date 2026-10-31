@@ -82,6 +82,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var flushingDNS = false
     public let lowLatency = LowLatencyMode()
     public let stutter = StutterStore()
+    /// A Starlink dish on this network, when one answers.
+    public let starlink = StarlinkStore()
     public let games = GameServerStore()
     public let nearby = NearbyStore()
     public let bluetooth = BluetoothState()
@@ -94,6 +96,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
 
     public override init() {
         super.init()
+        stutter.starlink = { [weak self] in self?.starlink.present ?? false }
         lastSpeed = journal.speedTests.last?.result
         nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil
         scheduleNetwork.start { [weak self] connected, metered, _ in
@@ -182,6 +185,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public func start() {
         startRadio()
+        starlink.start(visible: { [weak self] in self?.visible ?? false }, network: { [weak self] in self?.snapshot?.networkKey })
         guard diagnosticTask == nil else { return }
         diagnosticTask = Task { [weak self] in
             while !Task.isCancelled {

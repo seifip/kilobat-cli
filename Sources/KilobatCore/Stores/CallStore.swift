@@ -56,7 +56,7 @@ import Observation
         file = folder.appendingPathComponent("calls.json")
         reports = StoredJSON.read(file) ?? []
         // A previous run that quit or crashed mid-call never leaves anything suspended.
-        CallMode.resume()
+        CallMode.recoverAtLaunch()
     }
 
     #if DEBUG
@@ -67,6 +67,10 @@ import Observation
     nonisolated public static func load(directory: URL? = nil) -> [CallReport] {
         StoredJSON.read((directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")).appendingPathComponent("calls.json")) ?? []
     }
+
+    /// The dish while one answers, for freezes it explains; set by the app.
+    @ObservationIgnored public var starlink: StarlinkStore?
+    @ObservationIgnored private var lastDish: Date?
 
     public func start(traffic: TrafficStore, diagnostics: DiagnosticStore) {
         guard loop == nil else { return }
@@ -154,13 +158,13 @@ import Observation
     }
 
     private func resume(_ name: String) {
-        CallMode.resume(app: name)
+        CallMode.resume(app: name, owner: CallMode.call)
         holding.removeAll { $0 == name }; heldSince[name] = nil
     }
 
-    /// Resumes everything call mode holds; the app also calls this when it quits.
+    /// Resumes everything call mode holds, but not what a Focus filter holds too; the app also calls this when it quits.
     public func release() {
-        CallMode.resume()
+        CallMode.resume(owner: CallMode.call)
         for id in blocked { traffic?.clearTemporary(id) }
         blocked = []; holding = []; heldSince = [:]
         if airDropHeld { diagnostics?.lowLatency.release(); airDropHeld = false }
@@ -174,6 +178,10 @@ import Observation
             samples.traffic.append(.init(at: at, app: top.name, upload: top.uploadRate, download: top.downloadRate))
         }
         if diagnostics.snapshot?.radio.health == .poor { samples.weakSignal.append(at) }
+        if let starlink, let status = starlink.status, status.date != lastDish, starlink.present {
+            starlink.watching = true; lastDish = status.date
+            if let sample = CallSamples.Dish(status: status, start: start) { samples.dish.append(sample) }
+        }
         if now.timeIntervalSince(lastLoad) >= 5 {
             lastLoad = now
             if let previous = ticks { Task { if let (load, next) = await MacLoad.sample(since: previous) { self.ticks = next; self.samples.load.append(.init(at: at, load: load)) } } }
@@ -200,9 +208,11 @@ import Observation
     private func stop(report: Bool, end: Date = Date(), diagnostics: DiagnosticStore? = nil) async {
         guard let live else { return }
         samples.internet = await internet?.stop() ?? []; samples.router = await router?.stop() ?? []
-        internet = nil; router = nil; self.live = nil; silentSince = nil
+        internet = nil; router = nil; self.live = nil; silentSince = nil; starlink?.watching = false; lastDish = nil
         let held = holding
         release()
+        // The dish's own log has each outage to the second, with its cause.
+        if report, starlink?.present == true, let history = await Starlink.history() { samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: live.start) } }
         guard report, end.timeIntervalSince(live.start) >= Self.shortest, !samples.internet.isEmpty else { return }
         let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
