@@ -85,6 +85,33 @@ struct CallReportTests {
         #expect(MacLoad.ticks() != nil)
     }
 
+    @Test func blamesAnotherDeviceOnTheNetwork() {
+        var samples = CallSamples()
+        samples.internet = pings(Array(repeating: 30, count: 100) + [nil, 600, nil] + Array(repeating: 30, count: 100))
+        samples.router = pings(Array(repeating: 3, count: 203))
+        samples.traffic = [.init(at: 99, app: "Mail", upload: 2_000, download: 4_000)]
+        samples.household = [.init(at: 95, upload: 20_000, download: 4_000_000)]
+        let card = report(samples)
+        #expect(card.freezes.first?.cause.kind == .otherDevice)
+        #expect(card.verdict == "1 freezes, caused by another device on your network downloading")
+        #expect(card.household == true)
+        // Without the router's counters, Kilobat says it couldn't see other devices.
+        samples.household = nil
+        let blind = report(samples)
+        #expect(blind.freezes.first?.cause.kind == .beyondRouter)
+        #expect(blind.advice?.contains("UPnP") == true)
+    }
+
+    @Test func findsTheRoutersCounters() {
+        let reply = "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=120\r\nLOCATION: http://192.168.1.1:5000/rootDesc.xml\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n"
+        #expect(RouterCounters.locationHeader(reply) == "http://192.168.1.1:5000/rootDesc.xml")
+        let description = Data("""
+        <root><device><serviceList><service><serviceType>urn:schemas-upnp-org:service:Layer3Forwarding:1</serviceType><controlURL>/ctl/L3F</controlURL></service>
+        <service><serviceType>urn:schemas-upnp-org:service:WANCommonInterfaceConfig:1</serviceType><controlURL>/ctl/CmnIfCfg</controlURL></service></serviceList></device></root>
+        """.utf8)
+        #expect(RouterCounters.controlURL(description: description, base: URL(string: "http://192.168.1.1:5000/rootDesc.xml")!) == "http://192.168.1.1:5000/ctl/CmnIfCfg")
+    }
+
     @Test func findsTheCallingApp() {
         #expect(CallDetector.call(microphone: ["us.zoom.xos"])?.app == "Zoom")
         #expect(CallDetector.call(microphone: ["com.google.Chrome.helper"]) == CallDetector.Call(app: "Chrome", browser: true, own: ["com.google.Chrome"]))

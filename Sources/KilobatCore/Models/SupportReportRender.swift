@@ -16,6 +16,21 @@ public extension SupportReport {
         default: status
         }
     }
+    /// Label and value pairs for the plan check, in the order every format shows them.
+    private static func planRows(_ plan: PlanSummary) -> [(String, String)] {
+        [(String(localized: "Plan", comment: "The internet plan’s download speed, in the provider report’s plan check"), PlanSummary.mbps(plan.planMbps)),
+         (String(localized: "Median", comment: "Median download over the plan check, in the provider report"), "\(PlanSummary.mbps(plan.downloadMedianMbps)) (\(PlanSummary.percent(plan.percentOfPlan)))"),
+         (String(localized: "Upload", comment: "Median upload over the plan check, in the provider report"), PlanSummary.mbps(plan.uploadMedianMbps)),
+         (String(localized: "Evenings", comment: "Median download between 7 and 11 pm, in the provider report"), plan.peakMedianMbps.map(PlanSummary.mbps) ?? "—"),
+         (String(localized: "Rest of the day", comment: "Median download outside 7 to 11 pm, in the provider report"), plan.offPeakMedianMbps.map(PlanSummary.mbps) ?? "—"),
+         (String(localized: "Under half", comment: "Share of speed tests below half the plan, in the provider report"), PlanSummary.percent(plan.underHalfPercent))]
+    }
+    private var planHeading: String {
+        guard let planCheck else { return "" }
+        return planCheck.scheduledOnly
+            ? String(localized: "Against the plan: \(planCheck.checks) scheduled checks over \(planCheck.days) days", comment: "A heading in the provider report: a count of automatic speed tests and the days they cover")
+            : String(localized: "Against the plan: \(planCheck.checks) speed tests over \(planCheck.days) days", comment: "A heading in the provider report: a count of speed tests and the days they cover")
+    }
     private static func grade(_ bufferbloat: String) -> String { Bundle.main.localizedString(forKey: bufferbloat, value: bufferbloat, table: nil) }
 
     /// For pasting into a support chat or an email.
@@ -37,6 +52,9 @@ public extension SupportReport {
                 let when = test.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
                 return "  " + String(localized: "\(when)  ↓ \(Self.mbps(test.downloadMbps))  ↑ \(Self.mbps(test.uploadMbps))  idle \(Self.ms(test.idleMs))  under load \(Self.grade(test.bufferbloat))", comment: "One speed test in the provider report: when, download, upload, idle latency and the bufferbloat grade (Low, Moderate, High)")
             }
+        }
+        if let planCheck {
+            lines += ["", planHeading + ":", "  " + Self.planRows(planCheck).map { "\($0.0) \($0.1)" }.joined(separator: " · ")]
         }
         if let check {
             lines += ["", String(localized: "Check of \(check.host):", comment: "A heading in the provider report: a site that was checked layer by layer")]
@@ -60,6 +78,10 @@ public extension SupportReport {
         if !speedTests.isEmpty {
             lines += ["", "## Speed tests", "", "| When | Download | Upload | Idle latency | Under load |", "|---|---|---|---|---|"]
             lines += speedTests.map { "| \($0.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \(Self.mbps($0.downloadMbps)) | \(Self.mbps($0.uploadMbps)) | \(Self.ms($0.idleMs)) | \($0.bufferbloat) |" }
+        }
+        if let planCheck {
+            let rows = Self.planRows(planCheck)
+            lines += ["", "## " + planHeading, "", "| " + rows.map(\.0).joined(separator: " | ") + " |", "|" + String(repeating: "---|", count: rows.count), "| " + rows.map(\.1).joined(separator: " | ") + " |"]
         }
         if let check {
             lines += ["", "## Check of \(check.host)", "", "| Layer | Result | Detail |", "|---|---|---|"]
@@ -99,6 +121,10 @@ public extension SupportReport {
                 + [String(localized: "When"), String(localized: "Download"), String(localized: "Upload"), String(localized: "Idle latency"), String(localized: "Under load")].map { "<th>\(esc($0))</th>" }.joined() + "</tr>"
             body += speedTests.map { "<tr><td>\(when($0.date))</td><td>\(esc(Self.mbps($0.downloadMbps)))</td><td>\(esc(Self.mbps($0.uploadMbps)))</td><td>\(esc(Self.ms($0.idleMs)))</td><td>\(esc(Self.grade($0.bufferbloat)))</td></tr>" }.joined()
             body += "</table>" + (planMbps.map { "<p class=\"note\">\(esc(String(localized: "Plan: \(Self.mbps($0)) download.", comment: "The internet plan’s download speed, in the provider report")))</p>" } ?? "") + "</section>"
+        }
+        if let planCheck {
+            body += "<section><h2>\(esc(planHeading))</h2><div class=\"stats\">" + Self.planRows(planCheck).map { "<div><span>\(esc($0.0))</span><b>\(esc($0.1))</b></div>" }.joined()
+            body += "</div><p class=\"note\">\(esc(String(localized: "Evenings are 7 to 11 pm, when home connections are busiest. Under half: tests below half the plan’s speed.", comment: "The provider report’s plan check note")))</p></section>"
         }
         if let check {
             body += "<section><h2>\(esc(String(localized: "Check of \(check.host)", comment: "A heading in the provider report: a site that was checked layer by layer")))</h2><p class=\"\(check.ok ? "ok" : "bad")\">\(esc(check.verdict))</p><table>"

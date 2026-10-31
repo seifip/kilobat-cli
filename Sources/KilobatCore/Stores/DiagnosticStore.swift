@@ -104,7 +104,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                 guard let self else { return }
                 if Self.scheduledTestDue(next: self.nextScheduledTest, hours: self.scheduleHours, connected: self.scheduleConnected, metered: self.metered?() ?? self.scheduleMetered, busy: self.sleeping || self.speedRunning) {
                     self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600)
-                    self.runSpeedTest()
+                    self.runSpeedTest(scheduled: true)
                 }
             }
         }
@@ -239,7 +239,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         do { networks = try await probe.scan(); survey.saveScan(networks) }
         catch { self.error = error.localizedDescription }
     }
-    public func runSpeedTest(maximumBytes: Int = 80_000_000) {
+    /// `streams` overrides the Single or Parallel choice; `scheduled` marks a test Kilobat started on its own.
+    public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false) {
         guard !speedRunning else { return }
         speedRunning = true
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
@@ -249,7 +250,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             guard let self else { return }
             defer { self.speedRunning = false }
             do {
-                let result = try await SpeedTest.run(maximumBytes: maximumBytes, streams: self.speedStreams, updates: { [weak self] update in
+                let result = try await SpeedTest.run(maximumBytes: maximumBytes, streams: streams ?? self.speedStreams, updates: { [weak self] update in
                     Task { @MainActor in
                         guard let self, self.speedRunning else { return }
                         self.speedPhase = update.phase; self.speedFraction = update.fraction; self.speedBytes = update.bytes
@@ -260,7 +261,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                     }
                 }, progress: { [weak self] text in Task { @MainActor in self?.speedProgress = text } })
                 self.lastSpeed = result
-                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey)
+                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = String(localized: "Test complete.")
             } catch is CancellationError { self.speedProgress = String(localized: "Test cancelled.") }

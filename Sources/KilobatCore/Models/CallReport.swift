@@ -4,7 +4,7 @@ import Foundation
 public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     /// Why a freeze happened, judged from the router ping, the Wi-Fi and every other app's traffic at that moment.
     public struct Cause: Codable, Sendable, Hashable {
-        public enum Kind: String, Codable, Sendable { case app, wifi, airDrop, beyondRouter }
+        public enum Kind: String, Codable, Sendable { case app, otherDevice, wifi, airDrop, beyondRouter }
         public let kind: Kind
         /// The app moving data at the time, for `app`.
         public var app: String? = nil
@@ -21,6 +21,8 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
                                          : String(localized: "caused by \(app ?? "another app") downloading", comment: "Call report: what caused a freeze; the argument is an app")
             case .wifi: weakSignal == true ? String(localized: "on weak Wi-Fi", comment: "Call report: where a freeze happened")
                                            : String(localized: "on the Wi-Fi or router", comment: "Call report: where a freeze happened")
+            case .otherDevice: uploading == true ? String(localized: "caused by another device on your network uploading", comment: "Call report: a TV, phone or console on the same network was uploading")
+                                                 : String(localized: "caused by another device on your network downloading", comment: "Call report: a TV, phone or console on the same network was downloading")
             case .airDrop: String(localized: "caused by AirDrop scanning", comment: "Call report: AirDrop's radio hopping channels caused a freeze")
             case .beyondRouter: String(localized: "beyond your router", comment: "Call report: the freeze happened between the router and the call's server")
             }
@@ -31,6 +33,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .app: String(localized: "Pause \(app ?? "that app") before calls, or block it with a profile while you’re on one.", comment: "Call report advice; the argument is an app")
             case .wifi: weakSignal == true ? String(localized: "Move closer to the router, or use Radar to find a stronger spot.", comment: "Call report advice")
                                            : String(localized: "Restart the router, or try a cable or the 5 GHz band.", comment: "Call report advice")
+            case .otherDevice: String(localized: "A TV, console or phone on your network was busy. Pause its download or stream before calls, or turn on your router’s QoS for calls.", comment: "Call report advice")
             case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Call report advice")
             }
@@ -89,6 +92,10 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     public let freezes: [Freeze]
     /// When the Mac itself was the bottleneck, longest first.
     public let strain: [Strain]
+    /// Whether the router's counters showed what other devices on the network were doing; nil when they weren't read.
+    public var household: Bool? = nil
+    /// The apps call mode held until the call ended. Nil in reports from before call mode.
+    public var held: [String]? = nil
     /// The internet ping, at most 240 points, each the worst of its stretch; nil where every ping was lost.
     public let line: [Double?]
 
@@ -123,7 +130,13 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
         return String(localized: "\(count): \(parts.formatted(.list(type: .and)))", comment: "Call report verdict with mixed causes")
     }
     /// What to try first: for the most frequent freeze cause, or for the Mac when the line was clean.
-    public var advice: String? { causes.first?.cause.advice ?? strain.first?.advice }
+    public var advice: String? {
+        guard let first = causes.first?.cause else { return strain.first?.advice }
+        if first.kind == .beyondRouter, household != true {
+            return String(localized: "If others share this network, a TV or console may be the cause; Kilobat sees other devices only when your router shares its traffic counters (UPnP).", comment: "Call report advice")
+        }
+        return first.advice
+    }
     /// The Mac's side in a sentence or two, when it struggled.
     public var macDetail: String? { strain.isEmpty ? nil : strain.prefix(2).map(\.sentence).joined(separator: " ") }
 }
@@ -140,6 +153,9 @@ public struct CallSamples: Sendable {
     public var internet: [Ping] = []
     public var router: [Ping] = []
     public var traffic: [Traffic] = []
+    /// What other devices on the network moved, from the router's internet counters minus this Mac, in bytes a second.
+    public struct Household: Sendable { public let at: Double; public let upload: Double; public let download: Double; public init(at: Double, upload: Double, download: Double) { self.at = at; self.upload = upload; self.download = download } }
+    public var household: [Household]? = nil
     /// The Mac's own load, every few seconds.
     public struct Load: Sendable { public let at: Double; public let load: MacLoad; public init(at: Double, load: MacLoad) { self.at = at; self.load = load } }
     public var load: [Load] = []
@@ -154,7 +170,7 @@ public enum CallAnalysis {
     /// A ping this much slower than the call's median, or lost, is a bad second; two in a row the other side hears.
     static let spike = 200.0
     /// Another app moving this much at the time is enough to choke a call: about 1 Mbps up, 12 Mbps down.
-    static let uploadLoad = 125_000.0, downloadLoad = 1_500_000.0
+    public static let uploadLoad = 125_000.0, downloadLoad = 1_500_000.0
 
     public static func report(app: String, browser: Bool, start: Date, end: Date, network: (key: String, name: String)?, samples: CallSamples) -> CallReport {
         let replies = samples.internet.compactMap(\.ms).sorted()
@@ -164,8 +180,10 @@ public enum CallAnalysis {
         let freezes = runs(samples.internet, median: median).map { run in
             CallReport.Freeze(run: run, cause: cause(from: run.first!.at, to: run.last!.at, samples: samples))
         }
-        return CallReport(app: app, browser: browser, start: start, end: end, networkKey: network?.key, networkName: network?.name,
+        var card = CallReport(app: app, browser: browser, start: start, end: end, networkKey: network?.key, networkName: network?.name,
                           median: median, jitter: jitter, lossPercent: loss, freezes: freezes, strain: strain(samples.load), line: line(samples.internet, points: 240))
+        card.household = samples.household != nil
+        return card
     }
 
     /// Bad seconds two or more in a row, with lone good replies inside a freeze bridged over.
@@ -193,6 +211,11 @@ public enum CallAnalysis {
         let busy = samples.traffic.filter { $0.at >= start - 5 && $0.at <= end + 1 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
         if let top = busy.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
             return .init(kind: .app, app: top.app, uploading: top.upload / uploadLoad >= top.download / downloadLoad)
+        }
+        // Router samples are a few seconds apart, so look a little wider.
+        let others = (samples.household ?? []).filter { $0.at >= start - 8 && $0.at <= end + 3 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
+        if let top = others.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
+            return .init(kind: .otherDevice, uploading: top.upload / uploadLoad >= top.download / downloadLoad)
         }
         return .init(kind: .beyondRouter)
     }

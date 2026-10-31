@@ -122,12 +122,35 @@ public struct SpeedTestResult: Codable, Sendable {
         guard let tier else { return "Low bandwidth" }
         return (baseline.lossPercent ?? 0) > 2 ? "\(tier) · may buffer" : "\(tier) bandwidth"
     }
+    public enum Readiness: Sendable { case good, fair, poor }
     /// Coding agents make many small round trips and upload context, so latency, jitter and loss matter more than speed.
-    public var agentReadiness: String {
+    public var agentLevel: Readiness {
         let latency = baseline.average ?? 0, jitter = baseline.jitter ?? 0, loss = baseline.lossPercent ?? 0
-        if loss > 2 || (addedLatency ?? 0) > 200 || uploadMbps < 0.5 { return String(localized: "May stall", comment: "How a coding agent may run on this connection") }
-        if latency > 150 || jitter > 50 || uploadMbps < 2 { return String(localized: "Sluggish", comment: "How a coding agent may run on this connection") }
-        return String(localized: "Smooth", comment: "How a coding agent may run on this connection")
+        if loss > 2 || (addedLatency ?? 0) > 200 || uploadMbps < 0.5 { return .poor }
+        return latency > 150 || jitter > 50 || uploadMbps < 2 ? .fair : .good
+    }
+    public var agentReadiness: String {
+        switch agentLevel {
+        case .poor: String(localized: "May stall", comment: "How a coding agent may run on this connection")
+        case .fair: String(localized: "Sluggish", comment: "How a coding agent may run on this connection")
+        case .good: String(localized: "Smooth", comment: "How a coding agent may run on this connection")
+        }
+    }
+    /// Online games send little data but need every packet on time: latency, jitter, loss and the delay a busy line adds.
+    /// Judged against the test's nearby server, so a game's own servers further away add their distance on top.
+    public var gamingLevel: Readiness? {
+        guard baseline.samples.count >= 3, let latency = baseline.average else { return nil }
+        let jitter = baseline.jitter ?? 0, loss = baseline.lossPercent ?? 0, added = addedLatency ?? 0
+        if loss > 1 || jitter > 30 || latency > 100 || added > 100 { return .poor }
+        return latency > 50 || jitter > 12 || added > 40 ? .fair : .good
+    }
+    public var gamingReadiness: String {
+        switch gamingLevel {
+        case nil: String(localized: "Latency unknown", comment: "How online games may play on this connection")
+        case .poor: String(localized: "Laggy", comment: "How online games may play on this connection")
+        case .fair: String(localized: "Casual · may lag", comment: "How online games may play: fine for casual play, may lag in competitive games")
+        case .good: String(localized: "Competitive", comment: "How online games may play on this connection: good enough for competitive play")
+        }
     }
     public var addedLatency: Double? {
         guard let baseline = baseline.average, baseline.isFinite, (self.baseline.lossPercent ?? 0) <= 10, self.baseline.samples.count >= 3 else { return nil }

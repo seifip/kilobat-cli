@@ -112,7 +112,7 @@ enum DiagnosticsCLI {
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
         try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
                                idleLatencyMs: result.baseline.average, jitterMs: result.baseline.jitter,
-                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, agents: result.agentReadiness,
+                               voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, gaming: result.gamingReadiness, agents: result.agentReadiness,
                                callWarnings: result.callCautionReasons, method: SpeedTest.method(streams: result.streams)))
     }
     static func setDNS(_ name: String) async throws -> (DNSProvider, String) {
@@ -162,6 +162,7 @@ enum DiagnosticsCLI {
         let voiceCalls: String
         let videoCalls: String
         let streaming: String
+        let gaming: String
         let agents: String
         let callWarnings: [String]
         let method: String

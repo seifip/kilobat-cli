@@ -61,15 +61,18 @@ public struct SupportReport: Codable, Sendable {
     public let outages: [Outage]
     public let speedTests: [Speed]
     public let planMbps: Double?
+    /// The last 30 days of tests on this network against its plan, when a plan is set.
+    public let planCheck: PlanSummary?
     public let check: Check?
     /// What was left out on purpose, said in the report so the reader knows it isn't missing by accident.
     public let leftOut: [String]
 
     public static let footer = String(localized: "Measured with Kilobat · kilobat.app", comment: "The last line of the report for an internet provider")
 
-    /// Builds the report for the network the latest check ran on.
+    /// Builds the report for the network the latest check ran on. `plans` are the plans set per network
+    /// (`PlanSpeeds`); `planMbps` stands in for a network without one.
     public static func make(samples: [DiagnosticSnapshot], events: [NetworkEvent], speedTests: [SavedSpeedTest],
-                            hours: Int, planMbps: Double? = nil, check: DoctorReport? = nil,
+                            hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil,
                             mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
@@ -85,14 +88,16 @@ public struct SupportReport: Codable, Sendable {
             .map { Speed(date: $0.result.date, downloadMbps: $0.result.downloadMbps, uploadMbps: $0.result.uploadMbps,
                          idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat) }
         let latency = window.isEmpty ? nil : Self.latency(window)
-        let plan = (planMbps ?? 0) > 0 ? planMbps : nil
+        let plan = key.flatMap { plans[$0] } ?? ((planMbps ?? 0) > 0 ? planMbps : nil)
+        // Fewer than three tests add nothing the speed tests below don't say.
+        let planCheck = PlanSummary.make(tests: speedTests, network: key, planMbps: plan, now: now).flatMap { $0.checks >= PlanSummary.enoughScheduled ? $0 : nil }
         let doctor = check.map { report in
             Check(host: report.host, ok: report.ok, verdict: redact(report.verdict),
                   steps: report.steps.map { Step(layer: $0.title, status: $0.status.rawValue, detail: redact($0.detail)) })
         }
         return SupportReport(created: now, hours: hours, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
-                             findings: findings(latency: latency, outages: outages, speeds: Array(speeds), plan: plan, check: doctor, hours: hours),
-                             latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, check: doctor,
+                             findings: findings(latency: latency, outages: outages, speeds: Array(speeds), plan: plan, planCheck: planCheck, check: doctor, hours: hours),
+                             latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, planCheck: planCheck, check: doctor,
                              leftOut: [String(localized: "the network’s name", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "every IP address on your network, including the router’s", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "device names and hardware addresses", comment: "Left out of the provider report; items are joined with semicolons"),
@@ -120,7 +125,7 @@ public struct SupportReport: Codable, Sendable {
     }
 
     /// Plain sentences, the most useful to a support agent first. Each says what was measured and where.
-    static func findings(latency: Latency?, outages: [Outage], speeds: [Speed], plan: Double?, check: Check?, hours: Int) -> [String] {
+    static func findings(latency: Latency?, outages: [Outage], speeds: [Speed], plan: Double?, planCheck: PlanSummary? = nil, check: Check?, hours: Int) -> [String] {
         var lines: [String] = []
         let period = hours == 24 ? String(localized: "the last 24 hours", comment: "The provider report’s period, mid-sentence")
             : hours % 24 == 0 ? String(localized: "the last \(hours / 24) days", comment: "The provider report’s period, mid-sentence")
@@ -145,6 +150,8 @@ public struct SupportReport: Codable, Sendable {
                 lines.append(String(localized: "\(String(format: "%.0f", latency.poorPercent + latency.degradedPercent))% of checks were slow or poor.", comment: "A percentage of health checks"))
             }
         }
+        // A month against the plan says more than a day's tests, so it comes first.
+        if let planCheck { lines.append(planCheck.sentence) }
         if !speeds.isEmpty {
             let down = median(speeds.map(\.downloadMbps)) ?? 0, up = median(speeds.map(\.uploadMbps)) ?? 0
             if let plan {

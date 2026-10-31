@@ -117,6 +117,8 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
               /bin/sleep 2
               current=$(/sbin/route -n get default 2>/dev/null | /usr/bin/awk '/gateway:|interface:/ {print $2}')
               [ "$current" = "$route" ] || break
+              # macOS brings AWDL back for AirDrop, Handoff or after sleep; keep it paused for as long as the hold lasts.
+              /sbin/ifconfig awdl0 2>/dev/null | /usr/bin/grep -q '<UP' && /sbin/ifconfig awdl0 down
               i=$((i+1))
             done
             """
@@ -127,10 +129,13 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
             guard await Self.isUp() == false else { throw DiagnosticError(String(localized: "AWDL did not pause. No low-latency mode is active.")) }
             active = true; self.hold = hold
             watcher = Task { [weak self] in
+                var up = 0
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(2)) } catch { return }
                     guard let self else { return }
-                    if await Self.isUp() == true { self.finish(); return }
+                    // The root loop pauses AWDL again within two seconds, so only a link that stays up means the pause ended.
+                    up = await Self.isUp() == true ? up + 1 : 0
+                    if up >= 3 { self.finish(); return }
                     if let hold = self.hold, hold.ending(now: Date(), appRunning: hold.appPID.map(LowLatencyHold.alive) ?? true) != nil { self.release() }
                 }
             }

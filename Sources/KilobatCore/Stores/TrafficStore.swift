@@ -229,6 +229,14 @@ public final class TrafficStore {
         let ruleKey = (profile ?? preferences.profile).rawValue + "|" + id
         preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60))
     }
+    /// The app's temporary rule in the current profile, while it lasts.
+    public func temporaryRule(_ id: String) -> TemporaryRule? {
+        preferences.temporaryRules?[preferences.profile.rawValue + "|" + id].flatMap { $0.expires > Date() ? $0 : nil }
+    }
+    /// Drops only a temporary rule, in every profile, leaving saved rules alone.
+    public func clearTemporary(_ id: String) {
+        for key in preferences.temporaryRules?.keys.filter({ $0.hasSuffix("|" + id) }) ?? [] { preferences.temporaryRules?.removeValue(forKey: key) }
+    }
     /// Drops saved and temporary rules so the app falls back to the profile default. Returns false if there was none.
     @discardableResult public func removeRule(_ id: String, in profile: NetworkProfile? = nil) -> Bool {
         let profile = (profile ?? preferences.profile).rawValue

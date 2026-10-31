@@ -320,7 +320,7 @@ import KilobatCore
         let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
         let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
         return SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
-                                  hours: hours, planMbps: plan, check: check)
+                                  hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check)
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {
@@ -381,6 +381,8 @@ import KilobatCore
         Setting(key: "plan-mbps", values: "0…10000", detail: "Your plan's download speed, to compare speed tests against (0 hides it)",
                 read: { _ in defaults.double(forKey: "speed.planMbps").formatted() },
                 write: { _, value in guard let mbps = Double(value), (0...10_000).contains(mbps) else { throw CLIError("Use 0 to 10000.") }; defaults.set(mbps, forKey: "speed.planMbps") }),
+        Setting(key: "plan-check", values: "on|off", detail: "Pro: light speed tests up to three times a day, while the Mac is quiet, on networks with a plan speed set in the app (see kilobat plan)",
+                read: { _ in defaults.bool(forKey: PlanCheck.enabledKey) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: PlanCheck.enabledKey) }),
         Setting(key: "menu-bar", values: "icon|speed|download,upload,latency,vpn", detail: "What the menu bar item shows; vpn shows On, Split or Off and, with public-ip on, the exit IP's registry country",
                 read: { _ in let shown = ["speed", "download", "upload", "latency", "vpn"].filter { defaults.bool(forKey: "menu." + $0) }; return shown.isEmpty ? "icon" : shown.joined(separator: ",") },
                 write: { _, value in

@@ -28,6 +28,8 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public let networkName: String
     public var networkChanged: Bool? = nil
     public let result: SpeedTestResult
+    /// Started by Kilobat on a schedule (a plan check or Scheduled speed tests), not by you. Nil for tests you ran.
+    public var scheduled: Bool? = nil
 }
 @MainActor @Observable public final class NetworkJournal {
     public var events: [NetworkEvent] = []
@@ -107,8 +109,8 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         events.append(NetworkEvent(start: date, end: date, network: network, kind: kind, detail: detail))
         events = Array(events.suffix(500)); save(events, "events.json")
     }
-    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false) {
-        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, result: test))
+    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false, scheduled: Bool = false) {
+        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, result: test, scheduled: scheduled ? true : nil))
         speedTests = Array(speedTests.suffix(200)); save(speedTests, "speed-tests.json")
     }
     /// The newest test that ran start to finish on this network, for the This place card.
