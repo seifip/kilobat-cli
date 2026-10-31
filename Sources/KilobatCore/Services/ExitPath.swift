@@ -93,15 +93,19 @@ public struct ExitPath: Codable, Sendable, Equatable {
     }
 
     /// The route and VPN list, read on this Mac; `lookup` adds the public address from Cloudflare.
-    public static func current(lookup: Bool = false) async -> ExitPath {
+    public static func current(lookup: Bool = false) async -> ExitPath { await read(lookup: lookup).path }
+
+    /// The path with `scutil --nc list` as it came, for the kill switch, which also wants the VPN apps configured.
+    /// `ports` names the hardware port, which costs a third command.
+    public static func read(lookup: Bool = false, ports: Bool = true) async -> (path: ExitPath, services: String) {
         async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3)
         async let services = CommandRunner.run("/usr/sbin/scutil", ["--nc", "list"], timeout: 3)
-        async let ports = CommandRunner.run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 3)
-        var path = ExitPath(interface: DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first,
-                            connected: connectedVPNs(await services.output))
-        if !path.tunnel, let interface = path.interface { path.port = hardwarePorts(await ports.output)[interface] }
+        async let hardware = ports ? CommandRunner.run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 3).output : ""
+        let list = await services.output
+        var path = ExitPath(interface: DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first, connected: connectedVPNs(list))
+        if ports, !path.tunnel, let interface = path.interface { path.port = hardwarePorts(await hardware)[interface] }
         if lookup, path.interface != nil { path.publicAddress = try? await publicAddress() }
-        return path
+        return (path, list)
     }
 
     /// Names of the services `scutil --nc list` reports as Connected, e.g. `* (Connected) 1F… VPN (io.tailscale.ipn.macsys) "Tailscale" [VPN:…]`.

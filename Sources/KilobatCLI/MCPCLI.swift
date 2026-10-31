@@ -21,7 +21,9 @@ import KilobatCore
     list_sessions shows earlier awake sessions and AI agent runs with the data they used. \
     When a router, ISP or carrier reports more or less data than Kilobat, compare_usage sets the two side by side for the same period with the hours Kilobat recorded and likely reasons; never call either figure wrong. \
     get_app_bandwidth shows one app's traffic over an hour, day, week or month; get_access_policy what an app says it connects to. \
-    set_profile, set_app_rule, set_new_app_mode, block_destination, decide_approval, set_dns, set_budget, set_app_quota, set_network_cost and set_updater_pause change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
+    check_vpn_leaks tests whether DNS, IPv6 or UDP goes around the VPN and names each fix; it contacts outside services, so run it when the user asks. \
+    check_vpn and get_conditions report Kilobat's VPN kill switch (`killSwitch`); while it blocks, requests fail until the VPN is back, so ask the user to reconnect the VPN rather than turning it off. \
+    set_profile, set_app_rule, set_new_app_mode, block_destination, decide_approval, set_dns, set_budget, set_app_quota, set_network_cost, set_updater_pause and set_kill_switch change the user's settings: describe the change and get the user's explicit confirmation before calling them. \
     Rules are saved locally; blocking requires the Kilobat app with its network filter enabled. get_status reports `filteringActive` when the app is running.
     """
 
@@ -293,7 +295,7 @@ import KilobatCore
             .json(try JSONSerialization.data(withJSONObject: await WiFiCLI.networkRows(TrafficStore(startMonitoring: false)), options: [.sortedKeys, .withoutEscapingSlashes]))
         },
         MCPTool(name: "get_conditions", title: "Conditions for a long run",
-                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (what Kilobat acts on), `osMetered` (what macOS says) and `meteredSource` (macOS, or you when the user set the network's data cost), `lowDataMode`, `vpn` (the default route goes through a tunnel), `vpnInterface`, `vpnName` and `vpnConnected` (VPNs macOS lists as connected, which may carry only some destinations; get_exit_path has the detail), `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake), `awakeOnPower` (`enabled`, `display`, `active`: the user's own Stay awake while plugged in setting, which no tool changes), `updaters` (`pauseOnMetered`, the setting, and `paused`, whether the filter pauses updaters on this network now; get_updaters has the detail) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
+                description: "Whether now suits a large download or upload or a long unattended run: `connected`, `network` (Wi-Fi, Ethernet, Cellular), `metered` (what Kilobat acts on), `osMetered` (what macOS says) and `meteredSource` (macOS, or you when the user set the network's data cost), `lowDataMode`, `vpn` (the default route goes through a tunnel), `vpnInterface`, `vpnName` and `vpnConnected` (VPNs macOS lists as connected, which may carry only some destinations; get_exit_path has the detail), `internetLatencyMs` and `internetLossPercent` from a quick ping, `power` (`batteryPercent`, `onAC`, `thermal`, `lowPowerMode`), whether Kilobat keeps the Mac awake (`keptAwake`, `awakeReasons`, `awakeUntil` for keep_awake), `awakeOnPower` (`enabled`, `display`, `active`: the user's own Stay awake while plugged in setting, which no tool changes), `updaters` (`pauseOnMetered`, the setting, and `paused`, whether the filter pauses updaters on this network now; get_updaters has the detail), `killSwitch` (as in check_vpn: while `state` is blocking, new connections fail until the VPN is back) and one line of `advice`. Takes about 2 seconds. Same JSON as `kilobat conditions --json`.",
                 annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
             .json(try object(await AwakeCLI.conditions(holdUntil: hold?.until)))
         },
@@ -359,9 +361,15 @@ import KilobatCore
             return .json(try DiagnosticsCLI.encode(results))
         },
         MCPTool(name: "check_vpn", title: "VPN leak and conflict check",
-                description: "Checks the VPN and proxies on this Mac from its routes and resolvers, read-only: `vpnState` (full, partial or off) and `vpn` (its name when macOS lists exactly one), `dnsServer` and `dnsInterface` (where name lookups go), `ipv6Interface` (where IPv6 leaves), and `findings`: DNS that skips the VPN (lookups go to the local network), IPv6 that skips it (sites over IPv6 see the real address), a proxy and a VPN both taking traffic, a dead system proxy. Each finding says what to try. It can't see inside the VPN app or prove privacy; say what was measured. Same as `kilobat vpn --json`.",
+                description: "Checks the VPN and proxies on this Mac from its routes and resolvers, read-only: `vpnState` (full, partial or off) and `vpn` (its name when macOS lists exactly one), `dnsServer` and `dnsInterface` (where name lookups go), `ipv6Interface` (where IPv6 leaves), and `findings`: DNS that skips the VPN (lookups go to the local network), IPv6 that skips it (sites over IPv6 see the real address), a proxy and a VPN both taking traffic, a dead system proxy. Each finding says what to try. `killSwitch` is Kilobat's VPN kill switch: `enabled` and `allowLAN` (the settings), `state` (off, needsPro, needsFilter, waiting: it arms the first time the VPN carries all traffic, protected, blocking: the VPN is down and new connections are refused, allowed: the user let traffic through for a few minutes until `allowedUntil`; null when the Kilobat app isn't running), `armed`, `vpnUp`, `filterActive` and a `summary`. It can't see inside the VPN app or prove privacy; say what was measured. Same as `kilobat vpn --json`.",
                 inputSchema: schema([:]), annotations: readOnly) { _, _ in
-            .json(try DiagnosticsCLI.encode(await TunnelCheck.run()))
+            let killSwitch = ProxyCLI.killSwitch(await WiFiCLI.connection())
+            return .json(try object(try ProxyCLI.vpnObject(await TunnelCheck.run(), killSwitch: killSwitch)))
+        },
+        MCPTool(name: "check_vpn_leaks", title: "VPN leak test",
+                description: "Tests whether DNS, IPv6 or UDP (what a browser's WebRTC uses) goes around the VPN, and names the setting that fixes each, read-only. Run it only when the user asks about leaks or privacy with their VPN on: it contacts outside services, which see the user's address: bash.ws (which resolvers answered made-up lookups, with their network), Cloudflare (the exit address), Google's or Cloudflare's STUN server over UDP, through the VPN and straight out of Wi-Fi or Ethernet, and api6.ipify.org when IPv6 skips the VPN. Returns `checks`, each with `id` (dns, ipv6, udp), `status` (pass, fail, warning, skipped), `title`, `detail` and `fix` (what to change, in the VPN app's own words where Kilobat knows them, or in System Settings or the browser), plus `passed`, `summary`, `vpnState`, `vpn`, `tunnel`, `exitAddress` and `services` (the hosts asked). Without a VPN carrying all traffic every check is skipped. A pass covers this Mac at this moment, not every app or browser; never call a VPN private because it passed. Takes about ten seconds. Same JSON as `kilobat vpn leaks --json`.",
+                inputSchema: schema([:]), annotations: MCPToolAnnotations(readOnly: true, openWorld: true)) { _, _ in
+            .json(try object(try ProxyCLI.leakObject(await LeakTest.run())))
         },
         MCPTool(name: "get_call_reports", title: "Call quality reports",
                 description: "The report cards the Kilobat app wrote after recent calls in Zoom, Teams, FaceTime, Slack, Webex, Discord, a browser and other calling apps, newest first, read-only. Each has `app`, `browser`, `start`, `end`, internet `median` ping and `jitter` in ms, `lossPercent`, and `freezes`: each with `at` (seconds into the call), `seconds`, `peak` ms (null when every ping was lost) and `cause` — `kind` app (with `app` and `uploading`), wifi (`weakSignal`), airDrop or beyondRouter. A freeze is two or more seconds of pings lost or 200 ms over the call's median. Kilobat never listens to calls; it notices the microphone and pings once a second. Empty when the app isn't running or no call was long enough. Same as `kilobat calls --json`.",
@@ -445,6 +453,21 @@ import KilobatCore
             do {
                 return .json(try object(try await UpdatersCLI.set(try string(arguments, "pause") == "on", store: TrafficStore(startMonitoring: false))))
             } catch let error as CLIError { throw MCPToolError(error.message) }
+        },
+        MCPTool(name: "set_kill_switch", title: "VPN kill switch",
+                description: "Turns Kilobat's VPN kill switch `on` or `off` (Kilobat Pro, with the app's network filter on). While on, it arms the first time the VPN carries all traffic, and from then until the Mac restarts the filter refuses new connections whenever the VPN is down, except the VPN app and its helpers, Apple's networking services, the captive-portal login, Kilobat and, unless the user turned it off, the local network. Turning it off lets every app connect without the VPN, which can expose the user's traffic on the network they are on: never turn it off to make your own requests work; ask the user to reconnect the VPN. `lan` sets whether the local network stays reachable while it blocks. Returns `enabled`, `allowLAN`, `state` and `summary` as in check_vpn." + confirm,
+                inputSchema: schema(["state": ["type": "string", "enum": ["on", "off"]],
+                                     "lan": ["type": "boolean", "description": "Keep the local network reachable while the kill switch blocks."]], required: ["state"]),
+                annotations: change) { arguments, _ in
+            let value = try string(arguments, "state")
+            guard ["on", "off"].contains(value) else { throw MCPToolError("state takes on or off.") }
+            let store = TrafficStore(startMonitoring: false), on = value == "on"
+            store.preferences.killSwitch = on ? true : nil
+            if !on { store.preferences.killSwitchAllowedUntil = nil }
+            if let lan = try boolean(arguments, "lan") { store.preferences.killSwitchLAN = lan ? nil : false }
+            // The app reads the setting within a second; its answer after that says whether it armed.
+            if AppRelay.appRunning { try? await Task.sleep(for: .milliseconds(1500)) }
+            return .json(try object(ProxyCLI.killSwitch(await WiFiCLI.connection())))
         },
         MCPTool(name: "set_app_quota", title: "Set an app's data quota",
                 description: "Limits how much data one app may use per budget cycle (daily with a session budget), counting `direction` total or upload only, on this `network` or on all of them. With the Kilobat app's filter on, its new connections stop once the quota is used up, as with the budget; a temporary allow rule still lets it through. `action` remove deletes the app's quotas. Identify the app by bundle ID (get_status `apps[].id`) or process:<name>. Usage is sampled, so it is approximate." + confirm,

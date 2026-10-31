@@ -180,7 +180,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.16.0"
+    static let version = "0.17.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -469,7 +469,7 @@ struct KilobatCLI {
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
-        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks"), ("calls", "Report cards after calls"),
+        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers or your current match"), ("starlink", "Starlink dish: status, obstructions, outages"),
         ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
@@ -483,9 +483,9 @@ struct KilobatCLI {
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["--json"], "calls": ["--limit", "--json"], "plan": ["--days", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "plan": ["--days", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
         "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
-        "settings": ["new-apps", "auto-travel", "pause-updaters", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
+        "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
         "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "mark", "mine", "unknown", "ignored", "--all", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],

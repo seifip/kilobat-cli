@@ -173,6 +173,12 @@ public struct SavedPreferences: Codable, Equatable {
     public var pauseUpdaters: Bool? = nil
     /// A Focus filter pauses updaters on every network while its Focus is on; nil otherwise. See `FocusFilterStore`.
     public var focusPausesUpdaters: Bool? = nil
+    /// The VPN kill switch (Pro): new connections wait while the VPN is down. Nil is off. See `KillSwitchState`.
+    public var killSwitch: Bool? = nil
+    /// While the kill switch blocks, the local network stays reachable; nil means it does.
+    public var killSwitchLAN: Bool? = nil
+    /// "Allow for 5 minutes": the kill switch lets traffic through until then, or until the VPN is back.
+    public var killSwitchAllowedUntil: Date? = nil
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]

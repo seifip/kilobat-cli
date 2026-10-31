@@ -362,6 +362,15 @@ import KilobatCore
                 read: { $0.preferences.autoHotspot ? "on" : "off" }, write: { store, value in store.preferences.autoHotspot = try toggle(value) }),
         Setting(key: "pause-updaters", values: "on|off", detail: "Block updater helpers such as Google Updater and macOS Software Update while the network is metered",
                 read: { UpdaterPause.enabled($0.preferences) ? "on" : "off" }, write: { store, value in store.preferences.pauseUpdaters = try toggle(value) ? nil : false }),
+        Setting(key: "kill-switch", values: "on|off", detail: "Pro: block new connections while the VPN is down; arms once the VPN has carried all traffic since boot (see kilobat vpn)",
+                read: { KillSwitchState.enabled($0.preferences) ? "on" : "off" },
+                write: { store, value in
+                    let on = try toggle(value)
+                    store.preferences.killSwitch = on ? true : nil
+                    if !on { store.preferences.killSwitchAllowedUntil = nil }
+                }),
+        Setting(key: "kill-switch-lan", values: "on|off", detail: "While the kill switch blocks, still reach printers, file shares and other devices on the local network",
+                read: { KillSwitchState.allowLAN($0.preferences) ? "on" : "off" }, write: { store, value in store.preferences.killSwitchLAN = try toggle(value) ? nil : false }),
         Setting(key: "scope", values: "external|wifi|wired", detail: "Which traffic counts toward per-app totals",
                 read: { $0.preferences.trafficScope ?? "external" },
                 write: { store, value in guard ["external", "wifi", "wired"].contains(value) else { throw CLIError("Use external, wifi or wired.") }; store.preferences.trafficScope = value }),

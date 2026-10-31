@@ -24,6 +24,15 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     private var removal: (request: OSSystemExtensionRequest, done: CheckedContinuation<Bool, Never>)?
     private var lastPolicy: Data?
     private var pendingPolicy: [String: Any]?
+    /// The last inputs `sync` saw, so a kill-switch change goes to the filter at once rather than on the next tick.
+    private var lastInputs: (preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String], metered: Bool)?
+    /// The VPN kill switch, set by the app's monitor as the VPN goes down and comes back; saved to the filter right away.
+    public var killSwitch = KillSwitchPolicy() {
+        didSet {
+            guard killSwitch != oldValue, let inputs = lastInputs else { return }
+            sync(preferences: inputs.preferences, budgetReached: inputs.budgetReached, quotaReached: inputs.quotaReached, metered: inputs.metered)
+        }
+    }
     private let manager = NEFilterManager.shared()
     public static let identifier = "co.seifi.kilobat.filter"
 
@@ -78,6 +87,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
 
     public func activate(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
         guard bundled else { message = String(localized: "This build has no signed network extension. Use a provisioned build to enable filtering."); return }
+        lastInputs = (preferences, budgetReached, quotaReached, metered)
         configuration = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
         busy = true
         message = String(localized: "Approve Kilobat in System Settings → General → Login Items & Extensions → Network Extensions.")
@@ -88,6 +98,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
 
     public func sync(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
+        lastInputs = (preferences, budgetReached, quotaReached, metered)
         guard bundled, active || busy else { return }
         let next = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
         let encoded = try? JSONSerialization.data(withJSONObject: next, options: .sortedKeys)
@@ -129,11 +140,12 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
 
     func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false) -> [String: Any] {
-        Self.policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
+        Self.policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered, killSwitch: killSwitch)
     }
     /// The configuration the filter enforces; `FilterPolicy` reads it back for the filter and the doctor alike.
     /// `metered` is the current network's effective cost, which decides whether updaters are paused.
-    public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false) -> [String: Any] {
+    public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false,
+                                          killSwitch: KillSwitchPolicy = KillSwitchPolicy()) -> [String: Any] {
         ["enabled": true, "unrestricted": preferences.profile == .unrestricted, "profile": preferences.profile.rawValue,
          "defaultAllow": preferences.defaultAllow,
          "rules": preferences.rules[preferences.profile.rawValue] ?? [:],
@@ -145,7 +157,8 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
              output[String(item.key.dropFirst(preferences.profile.rawValue.count + 1))] = ["allowed": item.value.allowed, "expires": item.value.expires.timeIntervalSince1970]
          },
          "blockedDomains": (preferences.blockedDomains ?? []) + (preferences.blockedHosts ?? []), "domainExceptions": preferences.domainExceptions ?? [:],
-         "askNewApps": preferences.askNewApps == true, "allowApple": preferences.allowApple == true]
+         "askNewApps": preferences.askNewApps == true, "allowApple": preferences.allowApple == true,
+         "killSwitch": killSwitch.configuration]
     }
     private func save(enabled: Bool) {
         busy = true

@@ -95,6 +95,7 @@ import KilobatCore
             let updaters = value["updaters"] as? [String: Any]
             print("  Updaters  " + ((updaters?["paused"] as? Bool) == true ? "Paused on this metered network · kilobat updaters"
                 : (updaters?["pauseOnMetered"] as? Bool) == true ? "Running here; paused on metered networks while the filter is on" : "Never paused"))
+            print("  Kill sw.  " + ProxyCLI.killSwitchLine(value["killSwitch"] as? [String: Any] ?? [:]))
             print("\n" + (value["advice"] as? String ?? ""))
         default: throw CLIError("Unknown command '\(args[0])'.")
         }
@@ -294,8 +295,11 @@ import KilobatCore
         // Unrestricted only tracks the budget; it never stops connections.
         let budgetReached = ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
         // The app reports the current network's effective cost, which decides whether updaters are paused.
+        // While the kill switch blocks, the doctor names it; the filter's own exemptions follow from the policy.
+        let killSwitch = app?["killSwitch"] as? [String: Any], blocking = killSwitch?["state"] as? String == "blocking"
         return ConnectionDoctor.Policy(preferences: preferences, filterActive: app?["filteringActive"] as? Bool ?? false, budgetReached: budgetReached,
-                                       metered: app?["metered"] as? Bool ?? false)
+                                       metered: app?["metered"] as? Bool ?? false,
+                                       killSwitch: KillSwitchPolicy(armed: blocking, vpnDown: blocking, allowLAN: killSwitch?["allowLAN"] as? Bool ?? true))
     }
     /// What was sent, over which path, and when, against when the app failed: "HEAD through LM Studio’s own proxy (127.0.0.1:7890) · checked 14:31 · app failed 14:02".
     static func doctorRequest(_ report: DoctorReport) -> String {
@@ -341,10 +345,12 @@ import KilobatCore
         let updatersPaused = UpdaterPause.active(store.preferences, metered: metered) && app?["filteringActive"] as? Bool == true
         let exitPath = await exit
         let vpn = exitPath.tunnel ? exitPath.interface : nil
+        let killSwitch = ProxyCLI.killSwitch(app)
         let reasons = Array(Set(DiagnosticProbe.matches(#"named: "(Kilobat[^"]*)""#, in: await assertions.output))).sorted()
 
         var advice: [String] = []
         if !link.connected { advice.append("Offline: network tasks will fail until the Mac reconnects.") }
+        if killSwitch["state"] as? String == "blocking" { advice.append("The VPN is down and Kilobat’s kill switch blocks new connections until it’s back: downloads and requests will fail. Ask the user to reconnect their VPN; don’t turn the kill switch off for them.") }
         if metered { advice.append("Metered connection\(cost == .metered ? " (marked by the user)" : ""): avoid large downloads and uploads, or ask the user first.") }
         if updatersPaused { advice.append("Kilobat pauses app and system updaters here; apps that update from inside themselves still can.") }
         if link.constrained { advice.append("Low Data Mode is on: keep transfers small.") }
@@ -370,6 +376,7 @@ import KilobatCore
                 // Only the app knows; it reports both when it runs.
                 "lidClosedAllowed": app?["lidClosedAllowed"] as? Bool ?? false, "lidHold": app?["lidHold"] ?? NSNull(),
                 "updaters": ["pauseOnMetered": UpdaterPause.enabled(store.preferences), "paused": updatersPaused] as [String: Any],
+                "killSwitch": killSwitch,
                 "advice": advice.joined(separator: " ")]) { $1 }
     }
 }

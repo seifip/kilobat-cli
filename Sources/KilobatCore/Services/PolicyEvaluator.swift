@@ -19,6 +19,8 @@ public struct FilterPolicy: Sendable {
     public var connectionRules: [ConnectionRule] = []
     public var blockedEntries: [String] = []
     public var domainExceptions: [String: [String]] = [:]
+    /// The VPN kill switch; it applies in every profile, Unrestricted included.
+    public var killSwitch = KillSwitchPolicy()
 
     public init() {}
 
@@ -44,6 +46,7 @@ public struct FilterPolicy: Sendable {
         }
         blockedEntries = configuration["blockedDomains"] as? [String] ?? []
         domainExceptions = configuration["domainExceptions"] as? [String: [String]] ?? [:]
+        killSwitch = KillSwitchPolicy(configuration["killSwitch"] as? [String: Any])
     }
 
     /// One connection, as the filter sees it.
@@ -67,6 +70,10 @@ public struct FilterPolicy: Sendable {
     /// Why a connection is allowed, blocked or held, in the order the filter checks.
     public enum Reason: Sendable, Equatable {
         case filterOff, unrestricted
+        /// The VPN is down and the kill switch holds new connections back.
+        case killSwitch
+        /// The kill switch blocks, but this connection is what the VPN needs to come back.
+        case killSwitchExempt(KillSwitchPolicy.Exemption)
         case connectionRule(ConnectionRule)
         case blocklist(String)
         case temporaryRule(TemporaryRule)
@@ -88,6 +95,8 @@ public struct FilterPolicy: Sendable {
             switch self {
             case .filterOff: "Filter off"
             case .unrestricted: "Unrestricted profile"
+            case .killSwitch: "VPN kill switch: the VPN is down"
+            case .killSwitchExempt: "Needed while the VPN reconnects"
             case .connectionRule(let rule): "Destination rule: \(rule.host)\(rule.port.isEmpty ? "" : ":" + rule.port) · \(rule.direction)"
             case .blocklist(let entry): "Blocklist: " + entry
             case .temporaryRule: "Temporary app rule"
@@ -106,8 +115,19 @@ public struct FilterPolicy: Sendable {
 
     /// The decision for a flow. `appleSigned` is asked only when it matters, because checking a signature
     /// costs a lookup; `recentDecision` is an answer given moments ago, before the saved rule arrives.
-    public func decide(_ flow: Flow, now: Date = Date(), appleSigned: () -> Bool = { false }, recentDecision: Bool? = nil) -> (verdict: Verdict, reason: Reason) {
+    /// `tunnelUp` lets the filter check the VPN's interface itself (see `KillSwitchPolicy.blocks`).
+    public func decide(_ flow: Flow, now: Date = Date(), appleSigned: () -> Bool = { false }, recentDecision: Bool? = nil,
+                       tunnelUp: (String) -> Bool = { _ in true }) -> (verdict: Verdict, reason: Reason) {
         guard enabled else { return (.allow, .filterOff) }
+        // Before every rule: an allow rule for an app mustn't leak it past a VPN that is down. What the VPN needs to
+        // reconnect goes through even where a profile would otherwise block it; local traffic still follows the rules.
+        if killSwitch.blocks(now: now, tunnelUp: tunnelUp) {
+            switch killSwitch.exemption(flow, appleSigned: appleSigned) {
+            case nil: return (.block, .killSwitch)
+            case .localNetwork?: break
+            case let exemption?: return (.allow, .killSwitchExempt(exemption))
+            }
+        }
         if unrestricted { return (.allow, .unrestricted) }
         if let app = flow.app, let rule = connectionRules.reversed().first(where: {
             $0.matches(app: app, process: flow.process, host: flow.host, address: flow.address, port: flow.port, direction: flow.direction)

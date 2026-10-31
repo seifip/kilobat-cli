@@ -3,7 +3,7 @@ import KilobatCore
 
 /// `kilobat proxy` and `kilobat vpn`: what proxy apps and VPNs do with this Mac's traffic. Read-only.
 enum ProxyCLI {
-    static let usage = "Use proxy [routes [--app <name>] | test] [--controller host:port] [--secret <secret>] [--json], or vpn [--json]."
+    static let usage = "Use proxy [routes [--app <name>] | test] [--controller host:port] [--secret <secret>] [--json], or vpn [leaks] [--json]."
     /// An API Kilobat didn't find on its own, such as a core started by hand.
     nonisolated(unsafe) static var manual: ClashAPI?
 
@@ -18,7 +18,14 @@ enum ProxyCLI {
             args.removeSubrange(controllerIndex...(controllerIndex + 1))
         }
         let json = args.contains("--json"), rest = args.filter { $0 != "--json" }
-        if rest.first == "vpn" { try await vpn(json: json); return }
+        if rest.first == "vpn" {
+            switch rest.dropFirst().first {
+            case nil: try await vpn(json: json)
+            case "leaks": try await leaks(json: json)
+            default: throw CLIError(usage)
+            }
+            return
+        }
         switch rest.dropFirst().first {
         case nil: try await status(json: json)
         case "routes":
@@ -131,13 +138,56 @@ enum ProxyCLI {
 
     // MARK: VPN
 
-    static func vpn(json: Bool) async throws {
+    @MainActor static func vpn(json: Bool) async throws {
+        let killSwitch = killSwitch(await WiFiCLI.connection())
         let check = await TunnelCheck.run()
-        if json { print(String(decoding: try DiagnosticsCLI.encode(check), as: UTF8.self)); return }
+        if json { try WiFiCLI.printObject(try vpnObject(check, killSwitch: killSwitch)); return }
         print("VPN: \(check.vpnState)" + (check.vpn.map { " · \($0)" } ?? ""))
         print("DNS: \(check.dnsServer ?? "unknown")" + (check.dnsInterface.map { " on \($0)" } ?? ""))
         print("IPv6: " + (check.ipv6Interface.map { "leaves through \($0)" } ?? "no IPv6 route"))
+        print("Kill switch: " + killSwitchLine(killSwitch))
         print("")
         for finding in check.findings { print("\(mark(finding.level)) \(finding.title). \(finding.detail)") }
     }
+
+    /// `kilobat vpn leaks`: DNS, IPv6 and UDP checked against the VPN, with what to change. Exits 1 when something leaks.
+    @MainActor static func leaks(json: Bool) async throws {
+        if !json { print(Terminal.dim("Checking DNS, IPv6 and UDP against the VPN… (about ten seconds)")) }
+        let result = await LeakTest.run()
+        if json { try WiFiCLI.printObject(try leakObject(result)) }
+        else {
+            print("Kilobat · VPN leak test · " + (result.vpn.map { "\(result.vpnState) · \($0)" } ?? result.vpnState))
+            for check in result.checks {
+                let mark = switch check.status { case .pass: Terminal.green("✓"); case .fail: Terminal.rose("✗"); case .warning: Terminal.violet("!"); case .skipped: Terminal.dim("–") }
+                print("  \(mark) \(KilobatCLI.pad(check.title, 16))\(check.detail)")
+                if let fix = check.fix, check.status != .pass { print("    → " + fix) }
+            }
+            print("\n" + Terminal.bold(result.summary))
+            if !result.services.isEmpty { print(Terminal.dim("Asked: " + result.services.joined(separator: ", ") + ". " + LeakTest.servicesNote)) }
+        }
+        if !result.passed { fflush(stdout); exit(1) }
+    }
+
+    /// The leak test's JSON, with `passed` and `summary`, for the CLI and MCP `check_vpn_leaks`.
+    static func leakObject(_ result: LeakTest) throws -> [String: Any] {
+        var value = try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(result)) as? [String: Any] ?? [:]
+        value["passed"] = result.passed; value["summary"] = result.summary
+        for key in ["vpn", "tunnel", "exitAddress"] where value[key] == nil { value[key] = NSNull() }
+        return value
+    }
+
+    /// `kilobat vpn --json` and MCP `check_vpn`: the leak check with the kill switch beside it.
+    static func vpnObject(_ check: TunnelCheck, killSwitch: [String: Any]) throws -> [String: Any] {
+        var value = try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(check)) as? [String: Any] ?? [:]
+        value["killSwitch"] = killSwitch
+        return value
+    }
+
+    /// The kill switch as the running app sees it; without the app, only the saved setting.
+    @MainActor static func killSwitch(_ app: [String: Any]?) -> [String: Any] {
+        if let state = app?["killSwitch"] as? [String: Any] { return state }
+        return KillSwitchState.json(nil, preferences: TrafficStore(startMonitoring: false).preferences)
+    }
+
+    static func killSwitchLine(_ value: [String: Any]) -> String { KillSwitchState.line(value) }
 }

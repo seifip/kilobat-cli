@@ -106,8 +106,10 @@ public enum ConnectionDoctor {
         public let budgetReached: Bool
         /// The current network's effective cost, which decides whether updaters are paused.
         public let metered: Bool
-        public init(preferences: SavedPreferences, filterActive: Bool, budgetReached: Bool, metered: Bool = false) {
-            self.preferences = preferences; self.filterActive = filterActive; self.budgetReached = budgetReached; self.metered = metered
+        /// The VPN kill switch as the app last gave it to the filter.
+        public let killSwitch: KillSwitchPolicy
+        public init(preferences: SavedPreferences, filterActive: Bool, budgetReached: Bool, metered: Bool = false, killSwitch: KillSwitchPolicy = KillSwitchPolicy()) {
+            self.preferences = preferences; self.filterActive = filterActive; self.budgetReached = budgetReached; self.metered = metered; self.killSwitch = killSwitch
         }
     }
 
@@ -816,7 +818,7 @@ public enum ConnectionDoctor {
     static func rules(host: String, port: String, app: String?, policy: Policy) -> DoctorStep {
         let preferences = policy.preferences, profile = preferences.profile.title
         let enforced = policy.filterActive ? "" : " " + String(localized: "The network filter is off, so it isn’t enforced right now.")
-        let rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached, metered: policy.metered))
+        let rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached, metered: policy.metered, killSwitch: policy.killSwitch))
         // An address typed as the target is matched as the remote address, as the filter would see it.
         let address = AddressRange.parse(host) != nil ? host : nil
         let decision = rules.decide(.init(app: app, process: app?.replacingOccurrences(of: "process:", with: "") ?? "", host: host, address: address, port: port),
@@ -827,6 +829,8 @@ public enum ConnectionDoctor {
         }
         switch decision.reason {
         case .filterOff, .unrestricted: return step(.ok, String(localized: "The Unrestricted profile allows everything."))
+        case .killSwitch: return step(blocked, String(localized: "Your VPN is down, and Kilobat’s VPN kill switch blocks new connections until it’s back. Reconnect the VPN, or allow traffic for 5 minutes from Kilobat’s menu."))
+        case .killSwitchExempt: return step(.ok, String(localized: "Your VPN is down and the kill switch blocks other apps, but this one is let through so the VPN can reconnect."))
         case .connectionRule(let rule): return rule.allowed ? step(.ok, String(localized: "A connection rule allows this.")) : step(blocked, String(localized: "A connection rule in \(profile) blocks this."))
         case .blocklist(let entry): return step(blocked, String(localized: "\(host) matches \(entry) on your blocklist."))
         case .temporaryRule(let rule):
