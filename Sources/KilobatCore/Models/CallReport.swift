@@ -113,6 +113,8 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     public var held: [String]? = nil
     /// The internet ping, at most 240 points, each the worst of its stretch; nil where every ping was lost.
     public let line: [Double?]
+    /// What the calling app's status page said when a call that froze beyond the router ended. Nil when it wasn't asked.
+    public var service: ServiceStatus? = nil
 
     public var seconds: Double { end.timeIntervalSince(start) }
     public var clean: Bool { freezes.isEmpty && strain.isEmpty }
@@ -147,6 +149,10 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     /// What to try first: for the most frequent freeze cause, or for the Mac when the line was clean.
     public var advice: String? {
         guard let first = causes.first?.cause else { return strain.first?.advice }
+        // The calling service's own page owned up to it: there's nothing to fix on this side.
+        if first.kind == .beyondRouter, let service, service.outage {
+            return String(localized: "That was \(service.service)’s own trouble, not your line, so there’s nothing to change here.", comment: "Call report advice when the calling service's status page reported an outage; the argument is a service such as Zoom")
+        }
         if first.kind == .beyondRouter, household != true {
             return String(localized: "If others share this network, a TV or console may be the cause; Kilobat sees other devices only when your router shares its traffic counters (UPnP).", comment: "Call report advice")
         }

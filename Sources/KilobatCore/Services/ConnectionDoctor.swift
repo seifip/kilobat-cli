@@ -43,6 +43,7 @@ public struct DoctorStep: Codable, Identifiable, Sendable {
         case "Transfer": String(localized: "Transfer", comment: "Connection check layer")
         case "Context": String(localized: "Context", comment: "Connection check layer")
         case "Provider": String(localized: "Provider", comment: "Connection check layer")
+        case "Status page": String(localized: "Status page", comment: "Connection check layer: the service's public status page")
         case "Wi-Fi sign-in": String(localized: "Wi-Fi sign-in", comment: "Connection check layer: a hotel or café Wi-Fi's sign-in page")
         default: layer
         }
@@ -83,7 +84,7 @@ public struct DoctorReport: Codable, Sendable {
     public let target: String
     public let host: String
     public let app: String?
-    public let verdict: String
+    public var verdict: String
     public var next: String
     public var steps: [DoctorStep]
     public var hops: [DoctorHop] = []
@@ -93,6 +94,8 @@ public struct DoctorReport: Codable, Sendable {
     public var method: String? = nil
     public var path: DoctorPath? = nil
     public var failedAt: Date? = nil
+    /// What the status pages of the host's or app's services said, when they map to one Kilobat knows.
+    public var services: [ServiceStatus]? = nil
     public var ok: Bool { !steps.contains { $0.status == .failed } }
 }
 
@@ -220,7 +223,7 @@ public enum ConnectionDoctor {
     public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
         let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt)
         guard !report.steps.isEmpty else { return report }
-        return await withPortal(await withProxyApp(report))
+        return await withServiceStatus(await withPortal(await withProxyApp(report)))
     }
 
     /// A failed check behind the Wi-Fi's sign-in page: that page is the cause, not DNS, the secure connection or the server.
@@ -235,6 +238,35 @@ public enum ConnectionDoctor {
                             next: String(localized: "Sign in on the network’s page (kilobat portal open), then try again."),
                             steps: [DoctorStep(layer: "Wi-Fi sign-in", status: .failed, detail: page)] + report.steps,
                             hops: report.hops, date: report.date, client: report.client, method: report.method, path: report.path, failedAt: report.failedAt)
+    }
+
+    /// When the host or the app belongs to a service with a public status page, what that page says, as one more layer.
+    /// An outage there leads the verdict unless what failed is this Mac's own; a green page is said as such, never guessed past.
+    static func withServiceStatus(_ report: DoctorReport, checker: ServiceStatusChecker = .shared) async -> DoctorReport {
+        let services = ServiceTriggers.services(for: report)
+        guard !services.isEmpty else { return report }
+        return withServiceStatus(report, statuses: await checker.check(services))
+    }
+
+    static func withServiceStatus(_ report: DoctorReport, statuses: [ServiceStatus]) -> DoctorReport {
+        guard !statuses.isEmpty else { return report }
+        var report = report
+        report.services = statuses
+        let beyond = ServiceTriggers.pointsBeyondThisMac(report)
+        for status in statuses {
+            let state: DoctorStep.Status = status.state == .unknown ? .skipped : status.problem ? .warning : .ok
+            report.steps.append(DoctorStep(layer: "Status page", status: state, detail: status.sentence(notYou: false)))
+        }
+        guard let worst = statuses.filter(\.problem).max(by: { $0.state < $1.state }) else { return report }
+        // Maintenance on a request that works is a note, not the answer.
+        if beyond, worst.state != .maintenance || !report.ok {
+            let follow = String(localized: "It’s on \(worst.service)’s side, so there’s nothing to fix on this Mac. Follow the status page for updates: \(worst.page.absoluteString)", comment: "Connection check; the arguments are a service such as Slack and its status page")
+            report.next = follow + " " + String(localized: "This Mac’s own check: \(report.verdict)", comment: "Connection check; the argument is the check's verdict, such as “The server is having problems.”")
+            report.verdict = worst.sentence(notYou: true)
+        } else {
+            report.next += " " + String(localized: "Separately: \(worst.sentence(notYou: false))", comment: "Connection check: a status page's word after this Mac's own problem; the argument is like “Slack reports problems on its side — Messaging delays”")
+        }
+        return report
     }
 
     /// When a proxy app with a readable API runs, its mode and how its current nodes answer, as one more layer.

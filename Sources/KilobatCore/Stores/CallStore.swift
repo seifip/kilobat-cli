@@ -224,6 +224,12 @@ import Observation
         }
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
+        // Freezes past the router may be the calling service's own; its status page says whether it knew of trouble.
+        // An incident that began after the call ended says nothing about it either way, so the card leaves it out.
+        if ServiceTriggers.callNeedsCheck(card), let status = await ServiceWatch.shared.check(ServiceCatalog.services(forCallApp: card.app)).first,
+           status.state != .unknown, ServiceTriggers.relevant(status, toCallEnding: end) {
+            card.service = status
+        }
         reports.append(card); reports = Array(reports.suffix(200))
         try? JSONEncoder().encode(reports).write(to: file, options: .atomic)
         onReport?(card)

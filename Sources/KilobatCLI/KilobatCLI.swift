@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "games", "starlink"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "games", "starlink", "down"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -43,6 +43,7 @@ struct KilobatCLI {
         case "games": try await GamesCLI.run(args)
         case "proxy", "vpn": try await ProxyCLI.run(args)
         case "calls": try CallsCLI.run(args)
+        case "down": try await DownCLI.run(args)
         case "portal": try await PortalCLI.run(args)
         case "plan": try PlanCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "support-report", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
@@ -182,7 +183,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.19.0"
+    static let version = "0.20.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -471,7 +472,7 @@ struct KilobatCLI {
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
-        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
+        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("down", "Is it them or me? Service status pages"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers or your current match"), ("starlink", "Starlink dish: status, obstructions, outages"),
         ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
@@ -485,7 +486,7 @@ struct KilobatCLI {
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
         "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "down": ["--all", "--list", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
         "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
         "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
@@ -676,6 +677,9 @@ struct KilobatCLI {
         [--proxy <url>]     Test through the proxy address the app uses by its own setting
         [--failed-at <time>]  When the app failed (14:05 or ISO 8601), kept beside the check's own time
         [--context container|vm|remote|provider]  Where the failing code runs; provider: a hosted service's own servers
+      down [service|host…] [--json]  Is it them or me? Public status pages of Slack, Zoom, GitHub and more
+        [--all]             Every page Kilobat knows; with no service, those of the apps running now
+        [--list]            The services, their pages and endpoints, without asking any
       conditions [--json]   Metered, Low Data Mode, VPN, latency, battery and heat, with advice
 
     Control

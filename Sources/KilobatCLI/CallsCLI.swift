@@ -22,6 +22,7 @@ enum CallsCLI {
             let ping = [report.median.map { String(format: "ping %.0f ms", $0) }, report.jitter.map { String(format: "jitter %.0f ms", $0) }, String(format: "loss %.1f%%", report.lossPercent)].compactMap { $0 }.joined(separator: " · ")
             print("\(report.start.formatted(date: .abbreviated, time: .shortened))  \(report.title), \(minutes) min  \(ping)")
             print("  \(report.clean ? "✓" : "✗") \(report.verdict)")
+            if let service = report.service { print("  \(service.reported)" + (service.problem ? " \(service.page.absoluteString)" : "")) }
             for freeze in report.freezes {
                 print("    \(Int(freeze.at / 60)):\(String(format: "%02d", Int(freeze.at) % 60))  \(Int(freeze.seconds)) s, " + (freeze.peak.map { String(format: "worst %.0f ms", $0) } ?? "no replies") + ", \(freeze.cause.phrase)")
             }
