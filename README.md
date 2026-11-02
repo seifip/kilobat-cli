@@ -8,7 +8,7 @@ Kilobat is a macOS command-line tool and MCP server for network monitoring and d
 
 - **Claude Code:** `claude mcp add kilobat -- kilobat mcp`
 - **Codex CLI:** `codex mcp add kilobat -- kilobat mcp`
-- **Claude Desktop:** install the CLI, then configure a local stdio server with the full executable path returned by `command -v kilobat` and argument `mcp`. See the [local-server setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
+- **Claude Desktop:** install the CLI, then configure a local stdio server with the full executable path returned by `/usr/bin/which kilobat` and argument `mcp`. See the [local-server setup guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
 - **Cursor, Windsurf, Zed, Gemini CLI, Cline and others:** add a stdio server with command `kilobat` and argument `mcp`.
 
 Step-by-step setup for each agent, with example prompts: https://kilobat.app/agents/. Agent skills that teach agents when and how to use Kilobat: `npx skills add seifip/kilobat-skills`.
