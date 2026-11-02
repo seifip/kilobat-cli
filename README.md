@@ -39,7 +39,7 @@ macOS shows Wi-Fi network names only to apps with Location permission. When the 
 
 ## Tools
 
-This table lists the tool names and titles advertised by [Kilobat CLI v0.30.0](https://github.com/seifip/kilobat-cli/releases/tag/v0.30.0). Use MCP `tools/list` for the installed server’s full descriptions, input schemas and annotations. Clients should follow each tool’s confirmation requirements; availability and returned data can depend on the companion app, permissions and configuration.
+This table lists the tool names and titles advertised by [Kilobat CLI v0.30.0](https://github.com/seifip/kilobat-cli/releases/tag/v0.30.0). Use MCP `tools/list` for the installed server’s full descriptions, input schemas and annotations. Clients should follow each tool’s confirmation requirements; availability and returned data can depend on the companion app, its license tier, permissions and configuration.
 
 | Tool | Purpose |
 | --- | --- |
