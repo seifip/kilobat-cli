@@ -85,7 +85,9 @@ import Testing
         let session = try JSONDecoder().decode([String: NetworkSession].self, from: Data(#"{"home":{"name":"Home","received":1,"sent":2}}"#.utf8))
         #expect(session["home"]?.local == nil)
         // Merging old and new entries keeps what was recorded and leaves what wasn't missing.
-        let date = Date().addingTimeInterval(-3 * 86_400)
+        // Five minutes into an hour three days ago, so both entries land in the same hourly bucket whatever the clock says.
+        let hour = Calendar.current.dateInterval(of: .hour, for: Date().addingTimeInterval(-3 * 86_400))!.start
+        let date = hour.addingTimeInterval(300)
         var new = UsageEntry(date: date.addingTimeInterval(60), received: 1, sent: 1, apps: ["Safari": 2], networkKey: "home")
         new.localBytes = 7; new.appsLocal = ["Safari": 7]
         let merged = TrafficStore.compact([UsageEntry(date: date, received: 1, sent: 1, apps: ["Safari": 2], networkKey: "home"), new])

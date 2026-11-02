@@ -21,6 +21,8 @@ public struct FilterPolicy: Sendable {
     public var domainExceptions: [String: [String]] = [:]
     /// The VPN kill switch; it applies in every profile, Unrestricted included.
     public var killSwitch = KillSwitchPolicy()
+    /// Threat and tracker blocking and the agent guard; like the kill switch, threats apply in every profile.
+    public var protection = ProtectionSettings()
 
     public init() {}
 
@@ -47,6 +49,7 @@ public struct FilterPolicy: Sendable {
         blockedEntries = configuration["blockedDomains"] as? [String] ?? []
         domainExceptions = configuration["domainExceptions"] as? [String: [String]] ?? [:]
         killSwitch = KillSwitchPolicy(configuration["killSwitch"] as? [String: Any])
+        protection = ProtectionSettings(configuration["protection"] as? [String: Any])
     }
 
     /// One connection, as the filter sees it.
@@ -75,6 +78,8 @@ public struct FilterPolicy: Sendable {
         /// The kill switch blocks, but this connection is what the VPN needs to come back.
         case killSwitchExempt(KillSwitchPolicy.Exemption)
         case connectionRule(ConnectionRule)
+        /// Protection: a known threat, a tracker, or the agent guard.
+        case protection(ProtectionDetail)
         case blocklist(String)
         case temporaryRule(TemporaryRule)
         case budget
@@ -98,6 +103,7 @@ public struct FilterPolicy: Sendable {
             case .killSwitch: "VPN kill switch: the VPN is down"
             case .killSwitchExempt: "Needed while the VPN reconnects"
             case .connectionRule(let rule): "Destination rule: \(rule.host)\(rule.port.isEmpty ? "" : ":" + rule.port) · \(rule.direction)"
+            case .protection(let detail): detail.summary
             case .blocklist(let entry): "Blocklist: " + entry
             case .temporaryRule: "Temporary app rule"
             case .budget: "Network budget reached"
@@ -115,9 +121,11 @@ public struct FilterPolicy: Sendable {
 
     /// The decision for a flow. `appleSigned` is asked only when it matters, because checking a signature
     /// costs a lookup; `recentDecision` is an answer given moments ago, before the saved rule arrives.
-    /// `tunnelUp` lets the filter check the VPN's interface itself (see `KillSwitchPolicy.blocks`).
+    /// `tunnelUp` lets the filter check the VPN's interface itself (see `KillSwitchPolicy.blocks`). `index` holds the
+    /// Protection lists and `agent` says which AI agent's process tree the flow came from; it is asked only when needed.
     public func decide(_ flow: Flow, now: Date = Date(), appleSigned: () -> Bool = { false }, recentDecision: Bool? = nil,
-                       tunnelUp: (String) -> Bool = { _ in true }) -> (verdict: Verdict, reason: Reason) {
+                       tunnelUp: (String) -> Bool = { _ in true }, index: ProtectionIndex? = nil,
+                       agent: () -> AgentOwner? = { nil }) -> (verdict: Verdict, reason: Reason) {
         guard enabled else { return (.allow, .filterOff) }
         // Before every rule: an allow rule for an app mustn't leak it past a VPN that is down. What the VPN needs to
         // reconnect goes through even where a profile would otherwise block it; local traffic still follows the rules.
@@ -128,6 +136,9 @@ public struct FilterPolicy: Sendable {
             case let exemption?: return (.allow, .killSwitchExempt(exemption))
             }
         }
+        // Known threats win over every allow rule: only the local network, Apple's and Kilobat's own domains and the
+        // person's "Allow this site" stay out of reach (Kilobat itself and DNS are exempt in the filter before this).
+        if let detail = ProtectionCheck.threat(flow, settings: protection, index: index, agent: agent) { return (.block, .protection(detail)) }
         if unrestricted { return (.allow, .unrestricted) }
         if let app = flow.app, let rule = connectionRules.reversed().first(where: {
             $0.matches(app: app, process: flow.process, host: flow.host, address: flow.address, port: flow.port, direction: flow.direction)
@@ -135,6 +146,8 @@ public struct FilterPolicy: Sendable {
         if let entry = DomainPolicy.blocked(flow.host, address: flow.address, app: flow.app ?? "", domains: blockedEntries, exceptions: domainExceptions) {
             return (.block, .blocklist(entry))
         }
+        // Trackers lose to the allow rules above: Unrestricted, a destination rule and "Allow this site".
+        if let detail = ProtectionCheck.tracker(flow, settings: protection, index: index) { return (.block, .protection(detail)) }
         guard let app = flow.app else { return budgetReached ? (.block, .budget) : (.allow, .noAppRule) }
         let keys = [app] + ProcessRuleKey.keys("process:" + flow.process)
         // Explicit rules win over the budget, quotas and paused updaters, so "allow for N minutes" still works.

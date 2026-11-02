@@ -11,7 +11,8 @@ public struct ProcessSelection: Identifiable, Sendable {
 public enum ProcessControl {
     public static func inspect(pid: Int32) async throws -> ProcessSelection {
         guard pid > 1, pid != getpid() else { throw DiagnosticError(String(localized: "This process cannot be stopped from Kilobat.")) }
-        let result = await CommandRunner.run("/bin/ps", ["-p", String(pid), "-o", "uid=", "-o", "lstart=", "-o", "comm="], timeout: 3)
+        // A busy Mac can take seconds to answer ps; a timeout must not read as "the process exited".
+        let result = await CommandRunner.run("/bin/ps", ["-p", String(pid), "-o", "uid=", "-o", "lstart=", "-o", "comm="], timeout: 10)
         let fields = result.output.split(whereSeparator: \.isWhitespace)
         guard result.status == 0, fields.count >= 7, UInt32(fields[0]) == getuid() else { throw DiagnosticError(String(localized: "Process has exited or belongs to another user.")) }
         return ProcessSelection(pid: pid, name: fields.dropFirst(6).joined(separator: " "), started: fields[1...5].joined(separator: " "))

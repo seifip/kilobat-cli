@@ -11,9 +11,43 @@ public struct FilterEvent: Codable, Identifiable, Sendable {
     public let reason: String
     /// The system service that made the connection for `app`, such as com.apple.nsurlsessiond. Nil when the app made it.
     public let via: String?
-    public init(id: UUID = UUID(), date: Date = Date(), app: String, endpoint: String, direction: String, reason: String, via: String? = nil) {
+    /// Set when Protection blocked it: what kind of destination, which list, and the agent behind it.
+    public let protection: ProtectionDetail?
+    public init(id: UUID = UUID(), date: Date = Date(), app: String, endpoint: String, direction: String, reason: String, via: String? = nil,
+                protection: ProtectionDetail? = nil) {
         self.id = id; self.date = date; self.app = app; self.endpoint = endpoint; self.direction = direction; self.reason = reason; self.via = via
+        self.protection = protection
     }
+}
+
+/// Why Protection blocked a connection. Compiled into the filter, so Foundation only.
+public struct ProtectionDetail: Codable, Sendable, Equatable {
+    public enum Kind: String, Codable, Sendable, CaseIterable {
+        /// A known malware, phishing or scam destination; `threat` when the list doesn't say which.
+        case malware, phishing, scam, threat
+        /// A tracker or ad host, with the optional tracker lists.
+        case tracker
+        /// The stricter agent guard: a paste site, file share, tunnel or request catcher, a raw IP address, or a large upload to a new host.
+        case agentGuard
+        public var isThreat: Bool { self == .malware || self == .phishing || self == .scam || self == .threat }
+    }
+    public var kind: Kind
+    /// The list that has it (HaGeZi Threat Intelligence Feeds) or, for the agent guard, the rule (paste site, raw IP address).
+    public var list: String
+    /// The host name or address that matched.
+    public var host: String
+    /// The agent whose process tree made the connection: Claude Code, Codex, Cursor.
+    public var agent: String?
+    /// The agent's own process id, to find its session in the agent network log.
+    public var agentPID: Int32?
+    /// The process that connected: npm, curl, node.
+    public var process: String?
+    public init(kind: Kind, list: String, host: String, agent: String? = nil, agentPID: Int32? = nil, process: String? = nil) {
+        self.kind = kind; self.list = list; self.host = host; self.agent = agent; self.agentPID = agentPID; self.process = process
+    }
+
+    /// For the blocked-connection journal and the CLI: "Protection: malware · URLhaus · malware.example".
+    public var summary: String { "Protection: \(kind == .agentGuard ? "agent guard" : kind.rawValue) · \(list) · \(host)" }
 }
 
 /// Connections one process made for another app, as the filter saw them: com.apple.nsurlsessiond for com.apple.Music.
@@ -71,6 +105,10 @@ public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
     func hostnames(reply: @escaping (Data) -> Void)
     /// Connections system services made for other apps, as encoded `[DelegatedFlows]`.
     func delegatedFlows(reply: @escaping (Data) -> Void)
+    /// The digest of the Protection index the filter uses, empty when it has none.
+    func protectionDigest(reply: @escaping (String) -> Void)
+    /// Hands the filter a new Protection index (`ProtectionIndex`); it checks the file, keeps it on its own disk and maps it.
+    func installProtection(_ index: Data, reply: @escaping (Bool) -> Void)
 }
 
 public enum FilterSigning {

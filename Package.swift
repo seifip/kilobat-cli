@@ -5,7 +5,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "kilobat", targets: ["KilobatCLI"])],
     targets: [
-        .target(name: "KilobatCore"),
+        .target(name: "KilobatCore", resources: [.process("Resources")]),
         .executableTarget(name: "KilobatCLI", dependencies: ["KilobatCore"]),
         .testTarget(name: "KilobatTests", dependencies: ["KilobatCore"])
     ]

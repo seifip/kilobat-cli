@@ -21,6 +21,16 @@ public struct NetworkEvent: Codable, Identifiable, Sendable {
     public let network: String
     public let kind: String
     public var detail: String
+    /// For an outage: Kilobat's checks while it lasted and how many of them the router answered, which says whether
+    /// it broke beyond the router. Nil on outages recorded before Kilobat kept them.
+    public var routerChecks: Int? = nil
+    public var routerAnswered: Int? = nil
+}
+public extension NetworkEvent {
+    init(start: Date, end: Date?, network: String, kind: String, detail: String, routerChecks: Int?, routerAnswered: Int?) {
+        self.start = start; self.end = end; self.network = network; self.kind = kind; self.detail = detail
+        self.routerChecks = routerChecks; self.routerAnswered = routerAnswered
+    }
 }
 public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public var id = UUID()
@@ -42,6 +52,9 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     private var degraded = 0
     private var successes = 0
     private var failureStart: Date?
+    /// Checks since the first failure, and how many the router answered, until an outage opens and takes them over.
+    private var pendingChecks = 0
+    private var pendingAnswered = 0
     private var lastDate: Date?
     private var lastBSSID: String?
     private var lastNetwork: String?
@@ -93,13 +106,19 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
             if successes >= 2 { finish(at: date, reason: String(localized: "Recovered after two successful checks")) }
         } else {
             successes = 0; failures += 1
-            if failureStart == nil { failureStart = date }
+            if failureStart == nil { failureStart = date; pendingChecks = 0; pendingAnswered = 0 }
+            let answered = sample.router?.average != nil
+            if let open = events.lastIndex(where: { $0.end == nil && $0.kind == "Unreachable" }) {
+                events[open].routerChecks = (events[open].routerChecks ?? 0) + 1
+                events[open].routerAnswered = (events[open].routerAnswered ?? 0) + (answered ? 1 : 0)
+            } else { pendingChecks += 1; pendingAnswered += answered ? 1 : 0 }
             if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.captivePortal == true {
                 // The Wi-Fi's sign-in page, not an outage: logged, not counted against the provider, no alert (PortalWatch has its own).
                 events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Wi-Fi sign-in",
                                            detail: sample.portalLoggedOut == true ? String(localized: "The Wi-Fi’s sign-in page logged this Mac out.") : String(localized: "The Wi-Fi’s sign-in page is waiting for you to sign in.")))
             } else if failures == 3 && !events.contains(where: { $0.end == nil }) {
-                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: String(localized: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure.")))
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: String(localized: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure."),
+                                           routerChecks: pendingChecks, routerAnswered: pendingAnswered))
                 notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }
         }

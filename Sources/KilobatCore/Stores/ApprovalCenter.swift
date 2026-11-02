@@ -42,6 +42,16 @@ import Observation
 
     public func clear() { pending = [] }
 
+    /// The digest of the Protection index the filter has mapped; nil when the filter didn't answer.
+    public func protectionDigest() async -> String? {
+        await call({ service, reply in service.protectionDigest { @Sendable digest in reply(Data(digest.utf8)) } }).map { String(decoding: $0, as: UTF8.self) }
+    }
+
+    /// Sends the filter a new Protection index. True when it checked out and the filter now uses it.
+    public func installProtection(_ index: Data) async -> Bool {
+        await call({ service, reply in service.installProtection(index) { @Sendable installed in reply(Data([installed ? 1 : 0])) } }) == Data([1])
+    }
+
     /// XPC calls its reply and error blocks on its own queue, so they must not be main-actor closures:
     /// Swift would stop the app the moment one ran off the main thread.
     private func call(_ body: (FilterEventService, @escaping @Sendable (Data) -> Void) -> Void) async -> Data? {

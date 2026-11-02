@@ -53,6 +53,23 @@ public actor WiFiConnection {
         try interface.associate(to: network, password: credential)
         guard interface.ssid() == network.ssid else { throw WiFiError.notConnected }
     }
+    /// Joins `name` on `band`, the strongest access point there, with the password macOS saved: for moving a Mac
+    /// from 2.4 GHz to the same router's 5 GHz, under the same name or another. macOS may roam back if 5 GHz is weak.
+    public func join(name: String, band: String) throws {
+        guard let interface = CWWiFiClient.shared().interface() else { throw WiFiError.unavailable }
+        let found = try interface.scanForNetworks(withSSID: nil).filter { $0.ssid == name && Self.band($0.wlanChannel?.channelBand) == band }
+        guard let network = found.max(by: { $0.rssiValue < $1.rssiValue }) else { throw WiFiError.rescan }
+        var credential: String?
+        if let ssid = network.ssidData {
+            var saved: NSString?
+            if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
+        }
+        try interface.associate(to: network, password: credential)
+        guard interface.ssid() == name else { throw WiFiError.notConnected }
+    }
+    static func band(_ band: CWChannelBand?) -> String {
+        switch band { case .band2GHz: "2.4 GHz"; case .band5GHz: "5 GHz"; case .band6GHz: "6 GHz"; default: "Unknown" }
+    }
     public func disconnect() throws {
         guard let interface = CWWiFiClient.shared().interface() else { throw WiFiError.unavailable }
         interface.disassociate()

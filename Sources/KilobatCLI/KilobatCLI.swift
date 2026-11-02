@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "games", "starlink", "down"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "agent-log", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "router", "service-speed", "week", "games", "starlink", "credit", "household", "down", "protect"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -39,13 +39,21 @@ struct KilobatCLI {
         case "updaters": try await UpdatersCLI.run(args)
         case "uploads": try await UploadsCLI.run(args)
         case "agent-event": await AgentCLI.run(args)
+        case "agent-log": try await AgentLogCLI.run(args)
+        case "protect": try await ProtectCLI.run(args)
         case "overlay": try await OverlayCLI.run(args)
         case "games": try await GamesCLI.run(args)
         case "proxy", "vpn": try await ProxyCLI.run(args)
         case "calls": try CallsCLI.run(args)
+        case "remote": try RemoteCLI.run(args)
+        case "household": try await HouseholdCLI.run(args)
         case "down": try await DownCLI.run(args)
         case "portal": try await PortalCLI.run(args)
         case "plan": try PlanCLI.run(args)
+        case "router": try RouterCLI.run(args)
+        case "service-speed": try await ServiceSpeedCLI.run(args)
+        case "week": try WeekCLI.run(args)
+        case "credit": try CreditCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "support-report", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
         case "stutter", "airdrop", "bluetooth": try await NearbyCLI.run(args)
         case "starlink": try await StarlinkCLI.run(args)
@@ -183,7 +191,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.20.0"
+    static let version = "0.30.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -457,9 +465,9 @@ struct KilobatCLI {
         ("report", "Usage history, or compare it with a router or provider"), ("open", "Open the Mac app"), ("doctor", "Check your setup"),
         ("mcp", "MCP server for AI agents (stdio)"),
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
-        ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS"),
+        ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS, and the fastest one here"),
         ("awake", "Keep the Mac awake, network-aware"), ("sessions", "Awake sessions and AI agent runs"),
-        ("agent-event", "Report an agent's state from its hooks"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"), ("ip", "Where traffic leaves: interface, VPN, public IP"),
+        ("agent-event", "Report an agent's state from its hooks"), ("agent-log", "Hosts an AI agent and its commands contacted"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"), ("ip", "Where traffic leaves: interface, VPN, public IP"),
         ("completion", "Shell completion script"), ("update", "Update the CLI"), ("help", "Show help"),
         ("blocked-history", "Blocked-flow metadata"), ("connection-rules", "List destination rules"),
         ("connection-rule", "Save a destination rule"), ("remove-connection-rule", "Remove a destination rule"),
@@ -472,27 +480,28 @@ struct KilobatCLI {
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
-        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("down", "Is it them or me? Service status pages"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
+        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("router", "Router check-up: slower than its normal?"), ("service-speed", "Real speed to GitHub, iCloud, Steam and more"), ("week", "Last week: outages, calls, data and blocks"), ("credit", "Outages your provider may credit, and a drafted claim"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("remote", "Reports after SSH, Mosh and remote desktop sessions"), ("household", "Paired Macs and what each is doing"), ("down", "Is it them or me? Service status pages"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers or your current match"), ("starlink", "Starlink dish: status, obstructions, outages"),
-        ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices sharing the Wi-Fi band"), ("quit", "Quit a process"),
+        ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices, and what makes headphones crackle"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
         ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
         ("block-host", "Block a domain or IP"), ("unblock-host", "Unblock a domain or IP"),
+        ("protect", "Block known threats, trackers in apps, the agent guard"),
     ]
     static let commandValues: [String: [String]] = [
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
         "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "uploads": ["hold", "resume", "--until", "unmetered", "fast", "manual", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
-        "sessions": ["--days", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
+        "sessions": ["--days", "--json"], "agent-log": ["--all", "--since", "--agent", "--flagged", "--watch", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
-        "dns": ["automatic", "cloudflare", "google", "quad9", "flush"], "completion": ["zsh", "bash", "fish"],
+        "dns": ["automatic", "cloudflare", "google", "quad9", "flush", "fastest", "auto", "exclude", "include", "on", "off", "--network", "--all", "--json"], "completion": ["zsh", "bash", "fish"],
         "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "down": ["--all", "--list", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
-        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["--json"], "quit": ["--force"],
-        "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "remote": ["--limit", "--kind", "ssh", "mosh", "desktop", "--json"], "router": ["--all", "--json"], "service-speed": ["--all", "--test", "--budget-mb", "--list", "--json"], "week": ["--weeks-ago", "--json"], "household": ["--json"], "down": ["--all", "--list", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "credit": ["providers", "--provider", "--country", "--price", "--month", "this", "last", "--draft", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["audio", "--json"], "quit": ["--force"],
+        "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "router-alerts", "digest", "bluetooth-audio-alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
         "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "mark", "mine", "unknown", "ignored", "--all", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
-        "blocklist": ["status", "import", "clear"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
+        "blocklist": ["status", "import", "clear"], "protect": ["status", "on", "off", "update", "check", "allow", "unallow", "--threats", "--trackers", "--agents", "--list", "--json"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
     ]
 
     static func completionScript(_ shell: String) throws -> String {
@@ -593,9 +602,22 @@ struct KilobatCLI {
       vpn [--json]          The VPN, and whether DNS or IPv6 skip it
       vpn leaks [--json]    Check whether DNS, IPv6 or UDP go around the VPN, and what to change
       calls [--limit 1…200] [--json]  After each call: whether it froze and what caused it (written by the app)
+      remote [--limit 1…200] [--kind ssh|mosh|desktop] [--json]  After each SSH, Mosh or remote desktop
+                            session: why typing lagged or the screen froze, and when Mosh would help
+      household [--json]    Macs paired in the app and what each moves now (live usage needs Pro); pair in the app
       support-report [--hours 1…168] [--host <host>]  A report for your ISP or IT desk, without
         [--markdown|--html] [--output <file>]  your network's name or local addresses; text by default
       plan [--days 7…90] [--json]  Speed tests against the plan you pay for: median, evenings, under half
+      router [--all] [--json]  Router check-up: the router against its own normal, and whether restarts helped
+      service-speed [--all] [--json]  Your downloads from GitHub, iCloud, Steam, npm and more against the line
+      service-speed --test <service> [--budget-mb 5…25]  Download up to 25 MB from one now; --list shows which
+      week [--weeks-ago 0…12] [--json]  Last week's digest: outages, frozen calls, blocks and data, against the week before
+      credit [--json]       This month's outages beyond your router against your provider's credit rule
+        [--provider <id>] [--price <monthly>]  For this run only; the app's History › Outage credit sets them
+        [--country <code>]  A provider Kilobat doesn't know: the country's law, where one covers everyone
+        [--month this|last|YYYY-MM]  Another month (this month by default)
+        [--draft]           The claim to send your provider, with your outages and the rule; never sent
+      credit providers [--country <code>] [--json]  The providers and outage-credit rules Kilobat knows
       networks [--json]    Networks seen, with remembered profile, budget and data cost
       networks cost <metered|unmetered|automatic> [name]  Set a network's data cost (this one by default)
       networks forget <name>  Drop a network's remembered profile, budget and data cost
@@ -627,6 +649,11 @@ struct KilobatCLI {
         [--all]             Every game in turn (about 5 s each)
         [--match]           The server of the match you're playing: any game, found from its connections
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
+      dns fastest [--all] [--json]  The fastest DNS on this network (every network with --all):
+                            its own against Cloudflare, Quad9 and Google, timed quietly by the app
+      dns auto on|off [--network <name>]  Pro: use the fastest DNS on each network, or one, from joining;
+                            back to the network's own for a VPN, a sign-in page, failing lookups or quit
+      dns exclude|include <cloudflare|quad9|google|IP>  Never time or pick a resolver, or add your own
 
     Wi-Fi
       wifi [status] [--json]  Current network, signal, channel and link rate
@@ -644,6 +671,7 @@ struct KilobatCLI {
       airdrop [status] [--json]  AirDrop visibility, the AirDrop link and what uses it
       airdrop everyone|contacts|off  Open AirDrop settings to change visibility (only macOS can)
       bluetooth [--json]    Bluetooth devices and whether they share 2.4 GHz with Wi-Fi
+      bluetooth audio [--json]  While AirPods or other Bluetooth headphones play: what can make them crackle, and what to change
 
     Awake & agents
       awake                 Keep the Mac awake until Ctrl-C; closing the lid sleeps it unless --lid-closed
@@ -663,6 +691,12 @@ struct KilobatCLI {
       settings awake-on-power on|off  The app stays awake while plugged in and lets go when unplugged
         [--display]         Keep the screen on too; Turn Off in the app holds until the next plug-in
       sessions [--days 1…365] [--json]  Awake sessions and AI agent runs the app recorded
+      agent-log [--json]    Every host an AI agent and the commands it started (npm, pip, curl) contacted, with bytes; the latest session, or this agent's own
+        [--all]             Every session in the log (kept 30 days; the app records it with Pro)
+        [--since 2h|3d|2026-10-30]  Sessions since then
+        [--agent claude]    One agent: claude, codex, cursor, gemini, aider…
+        [--flagged]         Only first-time hosts, plain HTTP, uploads over 10 MB, bare addresses, paste, file-share and tunnel sites
+        [--watch]           Record live in this terminal instead, without the app; nothing is saved
       agent-event <kind>    For an agent's hooks: start, working, waiting, done or failed
         [--agent name]      claude, codex, gemini…; found from the hook's process if left out
         [--session id]      Tells runs in one folder apart
@@ -709,6 +743,15 @@ struct KilobatCLI {
         [--minutes 1…1440]  Decide for a while instead
       block-host|unblock-host <domain|IP|CIDR>  Block for every app, *.example.com style
         [--app <id>]        Only for one app, as a connection rule
+      protect [status] [--json]  Protection: known threats, trackers in apps and the agent guard, with list status
+      protect on|off        Turn threat blocking on or off (Pro; on by default with Pro)
+        [--threats]         Malware, phishing and scam destinations, in every app
+        [--trackers]        Tracker and ad hosts in apps (off by default)
+        [--agents]          The agent guard: agents and what they start also skip paste sites, tunnels, raw IPs, big uploads to new hosts
+        [--list <id>]       The tracker list: hagezi-light (default), hagezi-normal, oisd-small or stevenblack
+      protect update [--json]  Download the lists now, keeping the last good copy of any that fails
+      protect check <host> [--json]  Whether a host is listed, by which list and why; exits 1 if Kilobat blocks it
+      protect allow|unallow <host>  Allow a site and its subdomains past every Protection list, or undo it
       quit <PID> [--force]  Quit a process, e.g. one using the network
 
     Setup

@@ -34,19 +34,11 @@ import Observation
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
-    @ObservationIgnored private var routerControl: String?
-    @ObservationIgnored private var routerLast: RouterReading?
-    @ObservationIgnored private var lastRouterRead = Date.distantPast
     private let file: URL
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var candidate: (call: CallDetector.Call, since: Date)?
     @ObservationIgnored private var silentSince: Date?
-    @ObservationIgnored private var samples = CallSamples()
-    @ObservationIgnored private var internet: PingStream?
-    @ObservationIgnored private var router: PingStream?
-    @ObservationIgnored private var lastAirDropCheck = Date.distantPast
-    @ObservationIgnored private var ticks: MacLoad.Ticks?
-    @ObservationIgnored private var lastLoad = Date.distantPast
+    @ObservationIgnored private var sampler: LineSampler?
     /// A call this short isn't worth a card; mic tests and voice messages are.
     static let shortest: TimeInterval = 60
 
@@ -70,7 +62,8 @@ import Observation
 
     /// The dish while one answers, for freezes it explains; set by the app.
     @ObservationIgnored public var starlink: StarlinkStore?
-    @ObservationIgnored private var lastDish: Date?
+    /// Paired Macs' fresh summaries, from Household Macs; set by the app when it has Kilobat Pro.
+    @ObservationIgnored public var peers: () -> [HouseholdLive] = { [] }
 
     public func start(traffic: TrafficStore, diagnostics: DiagnosticStore) {
         guard loop == nil else { return }
@@ -98,14 +91,10 @@ import Observation
         guard let call else { candidate = nil; return }
         if candidate?.call != call { candidate = (call, now); return }
         guard let since = candidate?.since, now.timeIntervalSince(since) >= 10 else { return }
-        live = (call, since); candidate = nil; samples = CallSamples(); silentSince = nil; ticks = nil; lastLoad = .distantPast
-        internet = PingStream(target: "internet", start: since); router = PingStream(target: "router", start: since)
-        await internet?.start(); await router?.start()
-        released = []; routerControl = nil; routerLast = nil
-        if let snapshot = diagnostics.snapshot, let gateway = snapshot.gateway {
-            let key = snapshot.networkKey
-            Task { if let control = await Self.routerCounters(network: key, gateway: gateway) { self.routerControl = control; self.samples.household = [] } }
-        }
+        live = (call, since); candidate = nil; silentSince = nil; released = []
+        let sampler = LineSampler(start: since, starlink: starlink, peers: peers)
+        self.sampler = sampler
+        await sampler.begin(diagnostics: diagnostics)
         await hold(traffic: traffic, now: now, start: since)
         if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active {
             await diagnostics.lowLatency.enable(seconds: CallMode.limit)
@@ -171,63 +160,30 @@ import Observation
     }
 
     private func record(traffic: TrafficStore, diagnostics: DiagnosticStore, call: CallDetector.Call, now: Date) {
-        guard let start = live?.start else { return }
-        let at = now.timeIntervalSince(start)
-        let others = traffic.apps.filter { app in !app.carrier && !call.own.contains { app.id.hasPrefix($0) || app.name == $0 } }
-        if let top = others.max(by: { $0.rate < $1.rate }), top.rate > 0 {
-            samples.traffic.append(.init(at: at, app: top.name, upload: top.uploadRate, download: top.downloadRate))
-        }
-        if diagnostics.snapshot?.radio.health == .poor { samples.weakSignal.append(at) }
-        if samples.loggedOut == nil, case .loggedOut(let since) = diagnostics.portal.status { samples.loggedOut = max(0, since.timeIntervalSince(start)) }
-        if let starlink, let status = starlink.status, status.date != lastDish, starlink.present {
-            starlink.watching = true; lastDish = status.date
-            if let sample = CallSamples.Dish(status: status, start: start) { samples.dish.append(sample) }
-        }
-        if now.timeIntervalSince(lastLoad) >= 5 {
-            lastLoad = now
-            if let previous = ticks { Task { if let (load, next) = await MacLoad.sample(since: previous) { self.ticks = next; self.samples.load.append(.init(at: at, load: load)) } } }
-            else { ticks = MacLoad.ticks() }
-        }
-        if let control = routerControl, now.timeIntervalSince(lastRouterRead) >= 5 {
-            lastRouterRead = now
-            let mac = traffic.apps.filter { !$0.carrier }.reduce((up: 0.0, down: 0.0)) { ($0.up + $1.uploadRate, $0.down + $1.downloadRate) }
-            Task {
-                guard let reading = try? await RouterCounters.read(controlURL: control) else { return }
-                defer { self.routerLast = reading }
-                guard let last = self.routerLast, reading.date > last.date, reading.received >= last.received, reading.sent >= last.sent else { return }
-                let seconds = reading.date.timeIntervalSince(last.date)
-                let down = Double(reading.received - last.received) / seconds, up = Double(reading.sent - last.sent) / seconds
-                self.samples.household?.append(.init(at: at, upload: max(0, up - mac.up), download: max(0, down - mac.down)))
-            }
-        }
-        if now.timeIntervalSince(lastAirDropCheck) >= 30 {
-            lastAirDropCheck = now
-            Task { if await NearbyRadios.awdlStatus().active { self.samples.airDrop = true } }
-        }
+        sampler?.record(traffic: traffic, diagnostics: diagnostics, own: { app in call.own.contains { app.id.hasPrefix($0) || app.name == $0 } }, now: now)
     }
 
     private func stop(report: Bool, end: Date = Date(), diagnostics: DiagnosticStore? = nil) async {
-        guard let live else { return }
-        samples.internet = await internet?.stop() ?? []; samples.router = await router?.stop() ?? []
-        internet = nil; router = nil; self.live = nil; silentSince = nil; starlink?.watching = false; lastDish = nil
+        guard let live, let sampler else { return }
+        self.live = nil; self.sampler = nil; silentSince = nil
         let held = holding
         release()
-        // The dish's own log has each outage to the second, with its cause.
-        if report, starlink?.present == true, let history = await Starlink.history() { samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: live.start) } }
-        guard report, end.timeIntervalSince(live.start) >= Self.shortest, !samples.internet.isEmpty else { return }
+        let worth = report && end.timeIntervalSince(live.start) >= Self.shortest
+        var samples = await sampler.finish(report: worth, end: end, diagnostics: diagnostics)
+        guard worth, !samples.internet.isEmpty else { return }
         let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
-        // Devices that joined around the call, so a freeze the router blames on another device can name it.
-        if let key = network?.0, let devices = diagnostics?.knownDevices {
-            devices.reload()
-            samples.arrivals = devices.book.arrivals(network: key, from: live.start.addingTimeInterval(-CallAnalysis.joinWindow), to: end)
-                .map { .init(at: $0.arrived.timeIntervalSince(live.start), name: $0.callName) }
-        }
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
         // Freezes past the router may be the calling service's own; its status page says whether it knew of trouble.
         // An incident that began after the call ended says nothing about it either way, so the card leaves it out.
         if ServiceTriggers.callNeedsCheck(card), let status = await ServiceWatch.shared.check(ServiceCatalog.services(forCallApp: card.app)).first,
            status.state != .unknown, ServiceTriggers.relevant(status, toCallEnding: end) {
+            // The service owning up to an outage beats a paired Mac that only its own report blamed.
+            if status.outage, card.causes.contains(where: { $0.cause.unconfirmed == true }) {
+                samples.peersWithoutRouter = false
+                card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
+                card.held = held.isEmpty ? nil : held
+            }
             card.service = status
         }
         reports.append(card); reports = Array(reports.suffix(200))

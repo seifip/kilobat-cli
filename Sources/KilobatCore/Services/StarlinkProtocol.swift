@@ -3,7 +3,7 @@ import Network
 
 /// Just enough Protocol Buffers for the dish: a reader that keeps every field it sees, by number, and a writer for the
 /// one-field requests Kilobat sends. Field numbers come from the published, reflection-dumped `SpaceX.API.Device`
-/// protos (see RESEARCH-DECISIONS.md). Unknown fields are skipped, and a missing field is nil, never a guess: when a
+/// protos. Unknown fields are skipped, and a missing field is nil, never a guess: when a
 /// firmware renames or drops something, that line of the Starlink panel just doesn't show.
 struct ProtoMessage: Sendable {
     enum Value: Sendable {

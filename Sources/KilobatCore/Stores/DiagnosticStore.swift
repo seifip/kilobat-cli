@@ -39,6 +39,16 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let journal = NetworkJournal()
     /// The network's sign-in page, when it has one, and how long a sign-in lasts there.
     public let portal = PortalWatch()
+    /// Router check-up: whether the router has been getting slower over days, from the checks below.
+    public let router = RouterWatch()
+    /// Off in Lite, which has no router check-up: then no check is kept for it.
+    public var watchesRouter = true
+    /// Fastest DNS: quiet resolver runs per network and, when the person turns it on (Pro), the switch on joining.
+    public let fastestDNS = FastestDNSWatch()
+    /// Off in Lite, which has neither the panel nor Kilobat's helper.
+    public var watchesDNS = true
+    /// This Mac's network ports' byte total at the previous check, for telling quiet checks from busy ones.
+    private var lastPortBytes: (bytes: UInt64, date: Date)?
     public var snapshot: DiagnosticSnapshot?
     public let survey = SurveyJournal()
     /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
@@ -91,6 +101,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let games = GameServerStore()
     public let nearby = NearbyStore()
     public let bluetooth = BluetoothState()
+    /// Bluetooth headphones playing, and what on the Wi-Fi side can make them crackle.
+    public let bluetoothAudio = BluetoothAudioWatch()
     private let probe = DiagnosticProbe()
     private let location = CLLocationManager()
     private var radioTask: Task<Void, Never>?
@@ -102,6 +114,13 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         super.init()
         stutter.starlink = { [weak self] in self?.starlink.present ?? false }
         stutter.portal = { [weak self] in self?.portal.intercepting == true }
+        // Every switch lands in History beside VPN and outage events.
+        fastestDNS.onSwitch = { [weak self] change in
+            let to = DNSResolverChoice.from(id: change.to)?.name ?? change.to, why = FastestDNS.describe(change.reason)
+            let detail = change.reason == .fastest ? String(localized: "Kilobat switched DNS to \(to) (\(why)).", comment: "History: fastest DNS switch; resolver and reason")
+                                                   : String(localized: "Kilobat put the network’s own DNS back (\(why)).", comment: "History: fastest DNS switched back; the reason")
+            self?.journal.record(kind: "DNS", detail: detail, network: change.networkName, date: change.date)
+        }
         lastSpeed = journal.speedTests.last?.result
         nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil
         scheduleNetwork.start { [weak self] connected, metered, _ in
@@ -205,7 +224,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         guard !diagnosing, !sleeping else { return }
         diagnosing = true
         async let secondary = DiagnosticProbe.ping("8.8.8.8", count: 2)
+        let before = Self.portBytes(), started = Date()
         var sample = await probe.snapshot(checkPortal: false)
+        let after = Self.portBytes(), finished = Date()
         let other = await secondary
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
         await checkPortal(&sample, internetFailed: fallback == false)
@@ -213,6 +234,12 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         await refreshExit()
         if !sleeping {
             journal.ingest(sample, secondary: other, httpReachable: fallback, interval: Double(max(60, checkInterval)))
+            let since = lastPortBytes.flatMap { last in after.map { ($0 >= last.bytes ? $0 - last.bytes : 0, finished.timeIntervalSince(last.date)) } }
+            let busy = speedRunning || RouterWatch.busy(checkBytes: before.flatMap { b in after.map { $0 >= b ? $0 - b : 0 } } ?? 0, checkSeconds: finished.timeIntervalSince(started),
+                                                        sinceBytes: since?.0, sinceSeconds: since?.1)
+            lastPortBytes = after.map { ($0, finished) }
+            if watchesRouter { await router.observe(sample, busy: busy, interval: Double(max(60, checkInterval))) }
+            if watchesDNS { await fastestDNS.observe(dnsContext(sample, secondary: other, busy: busy)) }
             if automaticTrace, let incident = journal.events.last(where: { $0.kind == "Unreachable" && $0.end == nil }), tracedIncident != incident.id {
                 tracedIncident = incident.id
                 Task { [weak self] in
@@ -231,6 +258,21 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         portal.tick()
         sample.captivePortal = portal.intercepting
         if portal.loggedOut, sample.captivePortal == true { sample.portalLoggedOut = true }
+    }
+    /// What Fastest DNS needs from a check: the network, whether lookups and the network work, and the guards' inputs.
+    /// Any VPN counts, split ones too: they bring their own DNS for their domains.
+    private func dnsContext(_ sample: DiagnosticSnapshot, secondary: PingResult, busy: Bool) -> FastestDNSWatch.Context {
+        let network = sample.networkIdentified ? sample.networkKey : nil
+        let vpn = exitPath.map { $0.vpn != .off } ?? false
+        let moment = FastestDNS.Moment(network: network, identified: sample.networkIdentified, connected: sample.gateway != nil, metered: metered?() ?? true,
+                                       vpn: vpn, portal: portal.intercepting == true, busy: busy || speedRunning, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+        return FastestDNSWatch.Context(network: network, name: sample.networkName, service: sample.networkService, interface: sample.wiredInterface ?? sample.radio.interface,
+                                       gateway: sample.gateway, resolvers: sample.dnsServers, lookupWorked: sample.dnsMilliseconds != nil,
+                                       networkUp: sample.router?.average != nil || sample.internet.average != nil || secondary.average != nil, moment: moment)
+    }
+    /// Bytes this Mac's Wi-Fi and Ethernet ports have carried, both ways.
+    private static func portBytes() -> UInt64? {
+        InterfaceCounters.read().map { counters in counters.filter { $0.key.hasPrefix("en") }.values.reduce(0) { $0 &+ $1.total } }
     }
     /// Reads the route and VPN list (local), asks Cloudflare for the public address when that's on and due,
     /// and logs a VPN going on or off and a changed public address.

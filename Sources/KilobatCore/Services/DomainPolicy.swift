@@ -107,3 +107,8 @@ struct AddressRange: CustomStringConvertible {
         return nil
     }
 }
+
+extension AddressRange {
+    /// One whole address.
+    init(bytes: [UInt8]) { self.bytes = bytes; prefix = bytes.count * 8 }
+}

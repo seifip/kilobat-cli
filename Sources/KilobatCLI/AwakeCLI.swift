@@ -299,7 +299,8 @@ import KilobatCore
         let killSwitch = app?["killSwitch"] as? [String: Any], blocking = killSwitch?["state"] as? String == "blocking"
         return ConnectionDoctor.Policy(preferences: preferences, filterActive: app?["filteringActive"] as? Bool ?? false, budgetReached: budgetReached,
                                        metered: app?["metered"] as? Bool ?? false,
-                                       killSwitch: KillSwitchPolicy(armed: blocking, vpnDown: blocking, allowLAN: killSwitch?["allowLAN"] as? Bool ?? true))
+                                       killSwitch: KillSwitchPolicy(armed: blocking, vpnDown: blocking, allowLAN: killSwitch?["allowLAN"] as? Bool ?? true),
+                                       protection: ProtectionPreferences.settings(preferences, pro: app?["pro"] as? Bool ?? false), index: ProtectionUpdater().loadIndex())
     }
     /// What was sent, over which path, and when, against when the app failed: "HEAD through LM Studio’s own proxy (127.0.0.1:7890) · checked 14:31 · app failed 14:02".
     static func doctorRequest(_ report: DoctorReport) -> String {

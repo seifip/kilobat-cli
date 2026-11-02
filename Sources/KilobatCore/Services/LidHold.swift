@@ -37,11 +37,13 @@ public struct LidHoldStatus: Codable, Equatable, Sendable {
     func request(_ lease: LidLease?)
 }
 
-/// The helper's one XPC service. Leases and statuses travel as JSON.
+/// The helper's one XPC service. Leases, statuses and DNS requests travel as JSON.
 @objc(KilobatLidService) public protocol LidService {
     func hold(_ lease: Data, reply: @escaping (Data) -> Void)
     func release(_ reason: String, reply: @escaping (Data) -> Void)
     func status(reply: @escaping (Data) -> Void)
+    /// Fastest DNS: a `DNSHelperRequest` for one network service; answers a `DNSHelperReply`.
+    func setDNS(_ request: Data, reply: @escaping (Data) -> Void)
 }
 
 /// The rules every lid hold follows, in the helper and the app alike.

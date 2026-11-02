@@ -22,7 +22,7 @@ public final class GeoIP: @unchecked Sendable {
 
     /// The bundled database, or the installed app's when the CLI runs on its own.
     static var resources: [URL] {
-        [Bundle.main.resourceURL, URL(fileURLWithPath: "/Applications/Kilobat.app/Contents/Resources")].compactMap { $0 }
+        [Bundle.module.resourceURL, Bundle.main.resourceURL, URL(fileURLWithPath: "/Applications/Kilobat.app/Contents/Resources")].compactMap { $0 }
     }
     static let centroids: [String: [Double]] = {
         for folder in resources {

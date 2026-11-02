@@ -88,7 +88,10 @@ enum DiagnosticsCLI {
                 print("How it measures: " + SpeedTest.method(streams: result.streams))
             }
         case "dns":
-            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|flush]. Changes require administrator approval.") }
+            do {
+                if let command = try FastestDNSCommand.parse(Array(args.dropFirst())) { try await DNSCLI.run(command); return }
+            } catch let error as FastestDNSCommand.CommandError { throw CLIError(error.message) }
+            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|flush]. Changes require administrator approval. " + FastestDNSCommand.usage) }
             if args.count == 2 && args[1] == "flush" {
                 try await NetworkTools.flushDNS(); print("✓ DNS cache flushed."); return
             }

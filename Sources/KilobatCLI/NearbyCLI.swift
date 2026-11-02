@@ -9,8 +9,12 @@ import KilobatCore
         case "stutter": try await stutter(rest, json: json)
         case "airdrop": try await airdrop(rest, json: json)
         case "bluetooth":
-            guard rest.isEmpty else { throw CLIError("Use bluetooth [--json].") }
-            try await bluetooth(json: json)
+            let command: BluetoothCommand
+            do { command = try BluetoothCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
+            switch command {
+            case .devices(let json): try await bluetooth(json: json)
+            case .audio(let json): try await audio(json: json)
+            }
         default: throw CLIError("Unknown command.")
         }
     }
@@ -113,7 +117,108 @@ import KilobatCore
             return
         }
         if devices.isEmpty { print("No paired Bluetooth devices found."); return }
+        if json == false, let output = BluetoothAudioProbe.output(), output.playing {
+            print("\(output.name) is playing. For what may make it crackle: kilobat bluetooth audio\n")
+        }
         for device in devices { print("\(device.connected ? "●" : "○") \(KilobatCLI.pad(device.name, 30)) \(device.kind.rawValue)\(NearbyRadios.sharesBand(device, wifiBand: band) ? " · shares 2.4 GHz with Wi-Fi" : "")") }
         print("\n" + (advice ?? "Wi-Fi \(band.map { "is on \($0)" } ?? "band unknown"); no band sharing to worry about."))
+    }
+
+    // MARK: Bluetooth audio
+
+    /// What `bluetooth audio --json` and the MCP tool return.
+    struct AudioSummary: Encodable {
+        struct Step: Encodable {
+            let text: String; let risk: String?; let action: String?
+            private enum CodingKeys: String, CodingKey { case text, risk, action }
+            func encode(to encoder: any Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                try container.encode(text, forKey: .text); try container.encode(risk, forKey: .risk); try container.encode(action, forKey: .action)
+            }
+        }
+        let source: String
+        let output: BluetoothAudioOutput?
+        let playing: Bool
+        let risks: [BluetoothAudioRisk]
+        let score: Int
+        let level: BluetoothAudioCheck.Level?
+        let notifyWorthy: Bool
+        let headline: String?
+        let detail: String?
+        let advice: [Step]
+        let conditions: BluetoothAudioConditions?
+        let reported: Bool
+        let basis: String
+        let crackleReports: [BluetoothAudioReport]
+        private enum CodingKeys: String, CodingKey { case source, output, playing, risks, score, level, notifyWorthy, headline, detail, advice, conditions, reported, basis, crackleReports }
+        /// Missing values are written as null, so a script sees every key whether or not anything plays.
+        func encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(source, forKey: .source); try container.encode(output, forKey: .output); try container.encode(playing, forKey: .playing)
+            try container.encode(risks, forKey: .risks); try container.encode(score, forKey: .score); try container.encode(level, forKey: .level)
+            try container.encode(notifyWorthy, forKey: .notifyWorthy); try container.encode(headline, forKey: .headline); try container.encode(detail, forKey: .detail)
+            try container.encode(advice, forKey: .advice); try container.encode(conditions, forKey: .conditions); try container.encode(reported, forKey: .reported)
+            try container.encode(basis, forKey: .basis); try container.encode(crackleReports, forKey: .crackleReports)
+        }
+    }
+    /// The app's latest check while it runs, which has the Bluetooth signal, the busiest app and its scans; otherwise
+    /// measured here over two seconds, without the busiest app or a signal unless system_profiler gives one.
+    static func audioCheck() async -> (check: BluetoothAudioCheck?, source: String) {
+        if let data = await AppRelay.ask("bluetooth-audio", timeout: .seconds(3)) {
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            if let relay = try? decoder.decode(BluetoothAudioRelay.self, from: data) { return (relay.check, "app") }
+        }
+        guard let output = BluetoothAudioProbe.output() else { return (nil, "cli") }
+        let radio = await DiagnosticProbe().radio()
+        var conditions = BluetoothAudioConditions()
+        conditions.wifiBand = radio.band; conditions.wifiChannel = radio.channel; conditions.wifiName = radio.ssid
+        let before = BluetoothAudioProbe.wifiBytes(interface: radio.interface), started = Date()
+        async let awdl = NearbyRadios.awdlStatus()
+        async let devices = bluetoothDevices()
+        try? await Task.sleep(for: .seconds(2))
+        if let before, let after = BluetoothAudioProbe.wifiBytes(interface: radio.interface), after >= before {
+            conditions.wifiBytesPerSecond = Double(after - before) / max(1, Date().timeIntervalSince(started))
+        }
+        let link = await awdl
+        conditions.airDropActive = link.up && link.active; conditions.airDropUsers = link.users
+        BluetoothAudioWatch.fill(&conditions, output: output.name, devices: await devices)
+        let networks = BluetoothAudioProbe.recentScan(SurveyJournal().scans)
+        if let crowd = BluetoothAudioCheck.crowding(channel: radio.channel, band: radio.band, ownName: radio.ssid, networks: networks) {
+            conditions.channelCrowding = crowd.crowding; conditions.quieterChannel = crowd.quieter
+        }
+        conditions.fasterBand = BluetoothAudioCheck.fasterBand(current: radio.ssid, band: radio.band, networks: networks, known: BluetoothAudioProbe.knownNetworks())
+        return (BluetoothAudioCheck(output: output, conditions: conditions), "cli")
+    }
+    static func audioSummary() async -> AudioSummary {
+        let (check, source) = await audioCheck()
+        return AudioSummary(source: source, output: check?.output, playing: check?.output.playing ?? false, risks: check?.risks ?? [], score: check?.score ?? 0,
+                            level: check?.level, notifyWorthy: check?.lineUp ?? false, headline: check?.headline, detail: check?.detail,
+                            advice: (check?.advice ?? []).map { .init(text: $0.text, risk: $0.risk?.rawValue, action: $0.action?.rawValue) },
+                            conditions: check?.conditions, reported: check?.reported ?? false, basis: BluetoothAudioCheck.basis,
+                            crackleReports: Array(BluetoothAudioWatch.load().suffix(5).reversed()))
+    }
+    static func audio(json: Bool) async throws {
+        if !json { FileHandle.standardError.write(Data("Checking the sound output, Wi-Fi and AirDrop…\n".utf8)) }
+        let summary = await audioSummary()
+        if json { print(String(decoding: try DiagnosticsCLI.encode(summary), as: UTF8.self)); return }
+        guard let output = summary.output else {
+            print("The sound output isn't Bluetooth. With AirPods or other Bluetooth headphones playing, this says what on the Wi-Fi side can make them crackle.")
+            return
+        }
+        guard summary.playing else { print("\(output.name) is the sound output, but nothing is playing. Run this while it plays."); return }
+        print("\(output.name) · \(output.microphone ? "on a call (hands-free mode)" : "playing") · \(output.transport == .le ? "Bluetooth LE" : "Bluetooth")")
+        if let conditions = summary.conditions {
+            var facts = [conditions.wifiBand.map { "Wi-Fi \($0)" + (conditions.wifiChannel.map { " ch \($0)" } ?? "") } ?? "Wi-Fi off"]
+            if let active = conditions.airDropActive { facts.append(active ? "AirDrop link busy" + (conditions.airDropUsers.isEmpty ? "" : " (\(conditions.airDropUsers.joined(separator: ", ")))") : "AirDrop link quiet") }
+            if let rate = conditions.wifiBytesPerSecond { facts.append(String(format: "Wi-Fi traffic %.1f Mbit/s", rate * 8 / 1_000_000)) }
+            if let rssi = conditions.bluetoothRSSI { facts.append("Bluetooth \(rssi) dBm") }
+            if let others = conditions.otherBluetoothDevices { facts.append("\(others) other Bluetooth device\(others == 1 ? "" : "s")") }
+            print(facts.joined(separator: " · "))
+        }
+        print("\n" + (summary.risks.isEmpty ? Terminal.dim(summary.headline ?? "") : Terminal.rose(summary.headline ?? "")))
+        if let detail = summary.detail { print(detail) }
+        for (index, step) in summary.advice.enumerated() { print("  \(index + 1). \(step.text)") }
+        if summary.advice.contains(where: { $0.action == "pauseAirDrop" }) { print("\nPause AirDrop: kilobat low-latency on --for 1h") }
+        print("\n" + Terminal.dim(summary.basis))
     }
 }

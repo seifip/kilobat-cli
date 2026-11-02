@@ -103,13 +103,13 @@ import KilobatCore
 
     /// The saved password from the keychain. macOS asks the user to allow access.
     static func savedPassword(_ name: String) throws -> String {
-        let ssid = Data(name.utf8)
-        var password: NSString?
-        var status = CWKeychainFindWiFiPassword(.system, ssid, &password)
-        if status == errSecItemNotFound { status = CWKeychainFindWiFiPassword(.user, ssid, &password) }
-        if status == errSecItemNotFound { throw CLIError("No saved password for “\(name)”. Check the name, or look it up in Apple’s Passwords app.") }
-        guard status == errSecSuccess, let password else { throw CLIError(status == errSecUserCanceled || status == errSecAuthFailed ? "Password access was cancelled." : "The saved password is unavailable (\(status)).") }
-        return password as String
+        let result = WiFiPasswordLookup.live.find(ssid: Data(name.utf8))
+        if let password = result.password { return password }
+        switch result.failure ?? .notFound {
+        case .notFound: throw CLIError("No saved password Kilobat can read for “\(name)” (\(result.codes)). Check the name, or look it up in Apple’s Passwords app.")
+        case .cancelled: throw CLIError("Password access was cancelled.")
+        case let failure: throw CLIError("\(failure.message) (\(result.codes))")
+        }
     }
 
     /// A QR code drawn with half blocks, black on white so it scans on dark and light terminals.
@@ -200,6 +200,7 @@ import KilobatCore
             guard args.count == 2 else { throw CLIError("Use networks forget <key or name>.") }
             let key = try network(args[1], store: store)
             store.preferences.networkProfiles?.removeValue(forKey: key); store.preferences.networkLimits?.removeValue(forKey: key); store.preferences.setCost(.automatic, for: key)
+            store.preferences.networkFastestDNS?.removeValue(forKey: key)
             print("✓ Forgot the profile, budget and data cost for \(name(key)).")
         case "cost":
             guard (2...3).contains(args.count), let cost = NetworkCost(rawValue: args[1].lowercased()) else { throw CLIError("Use networks cost <metered|unmetered|automatic> [key or name].") }
@@ -323,9 +324,11 @@ import KilobatCore
         var dish = StarlinkJournal.load()
         let status = dish.network == journal.samples.last?.networkKey ? await Starlink.status() : nil
         if status != nil, let history = await Starlink.history() { dish.merge(history.outages); dish.lastSeen = Date() }
+        // A slow route to one service, from what the app measured on this network.
+        let services = journal.samples.last.map { ServiceSpeedReport(log: ServiceSpeedWatch.load(), network: $0.networkKey, speedTests: journal.speedTests) }
         return SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
                                   hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
-                                  starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours))
+                                  starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours), serviceSpeed: services)
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {
@@ -376,6 +379,12 @@ import KilobatCore
                 write: { store, value in guard ["external", "wifi", "wired"].contains(value) else { throw CLIError("Use external, wifi or wired.") }; store.preferences.trafficScope = value }),
         Setting(key: "alerts", values: "on|off", detail: "Notify when the connection drops or degrades",
                 read: { _ in defaults.bool(forKey: "networkAlerts") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "networkAlerts") }, appRestart: true),
+        Setting(key: "router-alerts", values: "on|off", detail: "Pro: one notification when the router has been slower than its normal for days (on by default)",
+                read: { _ in RouterWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: RouterWatch.alertsKey) }),
+        Setting(key: "bluetooth-audio-alerts", values: "on|off", detail: "One notification per listening session when Wi-Fi may make Bluetooth audio crackle (on by default)",
+                read: { _ in BluetoothAudioWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: BluetoothAudioWatch.alertsKey) }),
+        Setting(key: "digest", values: "on|off", detail: "One notification with last week's outages, calls and data, Monday at 9 by default (on by default; day and time in the app)",
+                read: { _ in DigestSchedule.load(defaults).enabled ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: DigestSchedule.enabledKey) }, appRestart: true),
         Setting(key: "outage-trace", values: "on|off", detail: "Run a route trace automatically during outages",
                 read: { _ in defaults.bool(forKey: "automaticOutageTrace") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "automaticOutageTrace") }, appRestart: true),
         Setting(key: "public-ip", values: "on|off", detail: "Have the app ask Cloudflare for your public IP on network changes and every 30 minutes (off by default)",

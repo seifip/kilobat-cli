@@ -40,6 +40,13 @@ public extension SupportReport {
             ? String(localized: "Against the plan: \(planCheck.checks) scheduled checks over \(planCheck.days) days", comment: "A heading in the provider report: a count of automatic speed tests and the days they cover")
             : String(localized: "Against the plan: \(planCheck.checks) speed tests over \(planCheck.days) days", comment: "A heading in the provider report: a count of speed tests and the days they cover")
     }
+    /// Label and value pairs for a slow route to one service, in the order every format shows them.
+    private static func routeRows(_ route: ServiceRoute) -> [(String, String)] {
+        [(String(localized: "Downloads from it", comment: "Provider report: the speed of downloads from the slow service"), "\(ServiceSpeedReport.mbps(route.slowMbps)) (\(route.transfers)×, since \(route.since.formatted(.dateTime.weekday(.abbreviated).hour().minute())))"),
+         (String(localized: "Other sites, same hour", comment: "Provider report: the speed of other downloads within the hour"), ServiceSpeedReport.mbps(route.elsewhereMbps))]
+        + [route.pattern.map { (String(localized: "When", comment: "Provider report: the hours the service is slow"), $0) },
+           route.trace.map { (String(localized: "Route", comment: "Provider report: what a route trace to the service showed"), $0) }].compactMap { $0 }
+    }
     private static func grade(_ bufferbloat: String) -> String { Bundle.main.localizedString(forKey: bufferbloat, value: bufferbloat, table: nil) }
 
     /// For pasting into a support chat or an email.
@@ -69,6 +76,10 @@ public extension SupportReport {
         }
         if let planCheck {
             lines += ["", planHeading + ":", "  " + Self.planRows(planCheck).map { "\($0.0) \($0.1)" }.joined(separator: " · ")]
+        }
+        if let route = serviceRoute {
+            lines += ["", String(localized: "Slow route to \(route.service):", comment: "A heading in the provider report: one service much slower than the rest")]
+            lines += Self.routeRows(route).map { "  \($0.0): \($0.1)" }
         }
         if let check {
             lines += ["", String(localized: "Check of \(check.host):", comment: "A heading in the provider report: a site that was checked layer by layer")]
@@ -100,6 +111,10 @@ public extension SupportReport {
         if let planCheck {
             let rows = Self.planRows(planCheck)
             lines += ["", "## " + planHeading, "", "| " + rows.map(\.0).joined(separator: " | ") + " |", "|" + String(repeating: "---|", count: rows.count), "| " + rows.map(\.1).joined(separator: " | ") + " |"]
+        }
+        if let route = serviceRoute {
+            lines += ["", "## " + String(localized: "Slow route to \(route.service)", comment: "A heading in the provider report: one service much slower than the rest"), ""]
+            lines += Self.routeRows(route).map { "- **\($0.0):** \($0.1)" }
         }
         if let check {
             lines += ["", "## Check of \(check.host)", "", "| Layer | Result | Detail |", "|---|---|---|"]
@@ -150,6 +165,11 @@ public extension SupportReport {
         if let planCheck {
             body += "<section><h2>\(esc(planHeading))</h2><div class=\"stats\">" + Self.planRows(planCheck).map { "<div><span>\(esc($0.0))</span><b>\(esc($0.1))</b></div>" }.joined()
             body += "</div><p class=\"note\">\(esc(String(localized: "Evenings are 7 to 11 pm, when home connections are busiest. Under half: tests below half the plan’s speed.", comment: "The provider report’s plan check note")))</p></section>"
+        }
+        if let route = serviceRoute {
+            body += "<section><h2>\(esc(String(localized: "Slow route to \(route.service)", comment: "A heading in the provider report: one service much slower than the rest")))</h2><table>"
+            body += Self.routeRows(route).map { "<tr><th>\(esc($0.0))</th><td>\(esc($0.1))</td></tr>" }.joined()
+            body += "</table><p class=\"note\">\(esc(String(localized: "Measured from this Mac’s own downloads of 5 MB or more, against other downloads and speed tests within the same hour.", comment: "The provider report’s note under a slow route to one service")))</p></section>"
         }
         if let check {
             body += "<section><h2>\(esc(String(localized: "Check of \(check.host)", comment: "A heading in the provider report: a site that was checked layer by layer")))</h2><p class=\"\(check.ok ? "ok" : "bad")\">\(esc(check.verdict))</p><table>"

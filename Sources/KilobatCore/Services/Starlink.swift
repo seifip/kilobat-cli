@@ -5,7 +5,7 @@ import Foundation
 /// All of it comes from the dish at 192.168.100.1 and stays on this Mac. Kilobat only reads: it never stows,
 /// reboots or reconfigures the dish.
 public enum Starlink {
-    // Request and response field numbers in SpaceX.API.Device (see RESEARCH-DECISIONS.md › Starlink).
+    // Request and response field numbers in SpaceX.API.Device.
     static let getStatus = 1004, getHistory = 1007, getObstructionMap = 2008
     static let dishStatus = 2004, dishHistory = 2006, dishObstructionMap = 2008
 
@@ -31,22 +31,23 @@ public enum Starlink {
         return message
     }
 
-    /// Starlink reassigns each dish's satellite every 15 seconds, at :12, :27, :42 and :57 past the minute; a short
-    /// spike in latency often lands on those seconds. True when a moment falls within the second before such a
-    /// handover or the 1.5 seconds after it.
+    /// A heuristic window around the 15-second Starlink reconfiguration phase observed in prior measurements
+    /// (:12, :27, :42, :57): one second before through 1.5 seconds after. It is not a satellite-change detector.
+    /// Mohan et al., WWW 2024 §6.2: https://arxiv.org/html/2310.09242v2#S6.SS2
+    /// The legacy function name is retained for API compatibility; current network behavior may differ.
     public static func nearHandover(_ date: Date) -> Bool {
         let seconds = date.timeIntervalSince1970.truncatingRemainder(dividingBy: 60)
         let offset = (seconds - 12).truncatingRemainder(dividingBy: 15)
         let phase = offset < 0 ? offset + 15 : offset
         return phase <= 1.5 || phase >= 14
     }
-    /// Whether spikes at these moments line up with the handovers more than chance would: spikes at two or more
-    /// different handovers (a 20-second test spans two), and at least 60% of all spikes near one. A random moment
-    /// lands near a handover about 17% of the time, so two by chance happen in about 3% of tests.
+    /// Spikes near at least two distinct reported schedule windows, with at least 60% near a window.
+    /// This is a timing heuristic, not a statistical significance test or evidence of a particular cause.
+    /// It cannot distinguish reconfiguration from coincident Wi-Fi/AWDL or other path delays.
     public static func alignedWithHandovers(_ moments: [Date]) -> Bool {
         let near = moments.filter { nearHandover($0) }
-        let handovers = Set(near.map { (($0.timeIntervalSince1970 - 12) / 15).rounded() })
-        return handovers.count >= 2 && Double(near.count) >= 0.6 * Double(moments.count)
+        let windows = Set(near.map { (($0.timeIntervalSince1970 - 12) / 15).rounded() })
+        return windows.count >= 2 && Double(near.count) >= 0.6 * Double(moments.count)
     }
 }
 
@@ -484,7 +485,7 @@ public struct StarlinkSkyMap: Codable, Sendable, Equatable {
 // MARK: Plans
 
 /// Starlink's capped plans, for a data budget that matches the plan. Caps as starlink.com and Starlink's support
-/// articles described them in October 2026 (see RESEARCH-DECISIONS.md); after the cap Starlink slows the dish to
+/// articles described them in October 2026; after the cap Starlink slows the dish to
 /// about 1 Mbps rather than cutting it off. Kilobat counts this Mac only, so the budget is a share of the plan.
 public enum StarlinkPlan: String, CaseIterable, Identifiable, Sendable {
     case roam100, roam300, unlimited

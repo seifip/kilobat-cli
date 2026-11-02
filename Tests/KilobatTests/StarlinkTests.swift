@@ -97,20 +97,20 @@ struct StarlinkTests {
         #expect(StarlinkOutage.Cause(code: 99) == .unknown)
     }
 
-    @Test func spikesOnTheFifteenSecondScheduleAreHandovers() {
+    @Test func spikesCanAlignWithTheReportedFifteenSecondSchedule() {
         let minute = Date(timeIntervalSince1970: 1_790_000_040) // :00 past a minute
         #expect(Starlink.nearHandover(minute.addingTimeInterval(12.4)))
         #expect(Starlink.nearHandover(minute.addingTimeInterval(56.2)))
         #expect(!Starlink.nearHandover(minute.addingTimeInterval(20)))
         #expect(Starlink.alignedWithHandovers([12.3, 27.6, 42.1, 57.9].map { minute.addingTimeInterval($0) }))
         #expect(!Starlink.alignedWithHandovers([5, 20, 35, 50].map { minute.addingTimeInterval($0) }))
-        // One handover twice over (its start and its end) isn't a pattern yet.
+        // Two spikes in one timing window do not establish a repeating pattern.
         #expect(!Starlink.alignedWithHandovers([12.3, 12.9].map { minute.addingTimeInterval($0) }))
         #expect(Starlink.alignedWithHandovers([12.3, 27.6].map { minute.addingTimeInterval($0) }))
     }
 
-    @Test func theStutterVerdictNamesStarlinkHandovers() {
-        // A 20-second test from :10 spans the handovers at :12 and :27.
+    @Test func theStutterVerdictTreatsStarlinkTimingAsCorrelationNotCause() {
+        // Synthetic spikes in a 20-second test from :10 align with the reported :12 and :27 phase.
         let start = Date(timeIntervalSince1970: 1_790_000_050)
         var samples = [Double?](repeating: 40, count: 400)
         func spike(_ second: Double) { for offset in 0..<4 { samples[Int(second / 0.05) + offset] = 210 } }
@@ -118,6 +118,14 @@ struct StarlinkTests {
         let more = StutterTest.analyze(samples, target: "internet", host: "1.1.1.1", started: start, starlink: true)
         #expect(more.spikes.count == 3 && more.handoverAligned)
         #expect(more.verdict.contains("Starlink"))
+        // The same timestamps could come from local interference or another path delay: no satellite
+        // telemetry or simultaneous router comparison was measured in this timing-only fixture.
+        #expect(more.verdict.contains("reconfiguration pattern"))
+        #expect(more.verdict.contains("Timing alone cannot confirm the cause or a satellite change"))
+        #expect(more.verdict.contains("or rule out Wi-Fi or AirDrop"))
+        #expect(more.verdict.contains("Test your router too"))
+        #expect(!more.verdict.contains("not your Wi-Fi or AirDrop"))
+        #expect(!more.verdict.contains("switches satellites"))
         spike(5)
         #expect(!StutterTest.analyze(samples, target: "internet", host: "1.1.1.1", started: start, starlink: true).handoverAligned) // two of four
         samples[Int(5 / 0.05)..<Int(5 / 0.05) + 4] = [40, 40, 40, 40]

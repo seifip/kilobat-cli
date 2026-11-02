@@ -61,7 +61,9 @@ public struct BluetoothDevice: Codable, Sendable, Identifiable, Equatable {
     public let name: String
     public var kind: Kind
     public var connected: Bool
-    public init(id: String, name: String, kind: Kind, connected: Bool) { self.id = id; self.name = name; self.kind = kind; self.connected = connected }
+    /// The link's signal in dBm while connected, when macOS gives it (IOBluetooth with permission, or system_profiler).
+    public var rssi: Int? = nil
+    public init(id: String, name: String, kind: Kind, connected: Bool, rssi: Int? = nil) { self.id = id; self.name = name; self.kind = kind; self.connected = connected; self.rssi = rssi }
     public var audio: Bool { kind == .headphones || kind == .speaker }
     public var input: Bool { kind == .keyboard || kind == .mouse || kind == .trackpad }
     public var symbol: String {
@@ -182,11 +184,17 @@ public enum NearbyRadios {
                 for (name, value) in entry {
                     let info = value as? [String: Any] ?? [:]
                     devices.append(BluetoothDevice(id: info["device_address"] as? String ?? name, name: name,
-                                                   kind: BluetoothDevice.kind(type: info["device_minorType"] as? String, name: name), connected: connected))
+                                                   kind: BluetoothDevice.kind(type: info["device_minorType"] as? String, name: name), connected: connected,
+                                                   rssi: connected ? rssi(info["device_rssi"]) : nil))
                 }
             }
         }
         return sorted(devices)
+    }
+    /// system_profiler writes a connected device's signal as "-54" or a number; 0 and 127 mean unknown.
+    static func rssi(_ value: Any?) -> Int? {
+        let number = (value as? Int) ?? (value as? String).flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+        return number.flatMap { $0 < 0 && $0 > -127 ? $0 : nil }
     }
     public static func sorted(_ devices: [BluetoothDevice]) -> [BluetoothDevice] {
         devices.sorted { $0.connected != $1.connected ? $0.connected : $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

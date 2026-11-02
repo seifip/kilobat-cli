@@ -112,8 +112,13 @@ public enum ConnectionDoctor {
         public let metered: Bool
         /// The VPN kill switch as the app last gave it to the filter.
         public let killSwitch: KillSwitchPolicy
-        public init(preferences: SavedPreferences, filterActive: Bool, budgetReached: Bool, metered: Bool = false, killSwitch: KillSwitchPolicy = KillSwitchPolicy()) {
+        /// Protection's switches and lists, as the filter has them.
+        public let protection: ProtectionSettings
+        public let index: ProtectionIndex?
+        public init(preferences: SavedPreferences, filterActive: Bool, budgetReached: Bool, metered: Bool = false, killSwitch: KillSwitchPolicy = KillSwitchPolicy(),
+                    protection: ProtectionSettings = ProtectionSettings(), index: ProtectionIndex? = nil) {
             self.preferences = preferences; self.filterActive = filterActive; self.budgetReached = budgetReached; self.metered = metered; self.killSwitch = killSwitch
+            self.protection = protection; self.index = index
         }
     }
 
@@ -865,11 +870,12 @@ public enum ConnectionDoctor {
     static func rules(host: String, port: String, app: String?, policy: Policy) -> DoctorStep {
         let preferences = policy.preferences, profile = preferences.profile.title
         let enforced = policy.filterActive ? "" : " " + String(localized: "The network filter is off, so it isn’t enforced right now.")
-        let rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached, metered: policy.metered, killSwitch: policy.killSwitch))
+        var rules = FilterPolicy(FilterController.policy(preferences, budgetReached: policy.budgetReached, metered: policy.metered, killSwitch: policy.killSwitch))
+        rules.protection = policy.protection
         // An address typed as the target is matched as the remote address, as the filter would see it.
         let address = AddressRange.parse(host) != nil ? host : nil
         let decision = rules.decide(.init(app: app, process: app?.replacingOccurrences(of: "process:", with: "") ?? "", host: host, address: address, port: port),
-                                    appleSigned: { app?.hasPrefix("com.apple.") == true })
+                                    appleSigned: { app?.hasPrefix("com.apple.") == true }, index: policy.index)
         let blocked: DoctorStep.Status = policy.filterActive ? .failed : .warning
         func step(_ status: DoctorStep.Status, _ detail: String) -> DoctorStep {
             DoctorStep(layer: "Kilobat rules", status: status, detail: detail + (status == .ok ? "" : enforced))
@@ -880,6 +886,7 @@ public enum ConnectionDoctor {
         case .killSwitchExempt: return step(.ok, String(localized: "Your VPN is down and the kill switch blocks other apps, but this one is let through so the VPN can reconnect."))
         case .connectionRule(let rule): return rule.allowed ? step(.ok, String(localized: "A connection rule allows this.")) : step(blocked, String(localized: "A connection rule in \(profile) blocks this."))
         case .blocklist(let entry): return step(blocked, String(localized: "\(host) matches \(entry) on your blocklist."))
+        case .protection(let detail): return step(blocked, ProtectionText.doctor(detail))
         case .temporaryRule(let rule):
             let until = rule.expires.formatted(date: .omitted, time: .shortened)
             return rule.allowed ? step(.ok, String(localized: "A temporary rule allows this app until \(until).")) : step(blocked, String(localized: "A temporary rule blocks this app until \(until)."))

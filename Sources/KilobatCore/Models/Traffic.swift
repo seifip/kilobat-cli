@@ -94,6 +94,8 @@ public struct UsageEntry: Codable, Identifiable {
     public var appsLocal: [String: UInt64]? = nil
     /// Bytes the network interfaces carried that no process accounts for, packet headers included; already part of `received` and `sent`.
     public var unattributed: UInt64? = nil
+    /// The network was metered while these bytes moved, by macOS or by hand; nil when it wasn't or before 1.22.
+    public var metered: Bool? = nil
     public var total: UInt64 { received + sent }
 }
 
@@ -179,6 +181,26 @@ public struct SavedPreferences: Codable, Equatable {
     public var killSwitchLAN: Bool? = nil
     /// "Allow for 5 minutes": the kill switch lets traffic through until then, or until the VPN is back.
     public var killSwitchAllowedUntil: Date? = nil
+    /// Protection: known malware, phishing and scam destinations (Pro). Nil is on.
+    public var protectThreats: Bool? = nil
+    /// Protection: tracker and ad hosts in apps. Nil is off.
+    public var protectTrackers: Bool? = nil
+    /// Which tracker list (`ProtectionLists.trackers`); nil is HaGeZi Multi Light.
+    public var trackerList: String? = nil
+    /// The stricter agent guard (Pro). Nil is off.
+    public var agentGuard: Bool? = nil
+    /// The agent guard's large-upload limit in MB; nil is 10.
+    public var agentGuardUploadMB: Int? = nil
+    /// Sites allowed with "Allow this site": no Protection list or rule applies to them.
+    public var allowedSites: [String]? = nil
+    /// Switch to the fastest DNS on every network (Pro). Nil is off. See `FastestDNS`.
+    public var fastestDNS: Bool? = nil
+    /// The same per network key, overriding `fastestDNS`.
+    public var networkFastestDNS: [String: Bool]? = nil
+    /// Resolvers never timed or picked: "cloudflare", "quad9", "google".
+    public var dnsExcluded: [String]? = nil
+    /// Resolvers the person added by IP address, timed alongside the presets.
+    public var dnsExtra: [String]? = nil
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]

@@ -33,6 +33,13 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
             sync(preferences: inputs.preferences, budgetReached: inputs.budgetReached, quotaReached: inputs.quotaReached, metered: inputs.metered)
         }
     }
+    /// Protection's switches, allowed sites and index digest, set by the app (which applies Pro); saved to the filter right away.
+    public var protection = ProtectionSettings() {
+        didSet {
+            guard protection != oldValue, let inputs = lastInputs else { return }
+            sync(preferences: inputs.preferences, budgetReached: inputs.budgetReached, quotaReached: inputs.quotaReached, metered: inputs.metered)
+        }
+    }
     private let manager = NEFilterManager.shared()
     public static let identifier = "co.seifi.kilobat.filter"
 
@@ -140,12 +147,12 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
 
     func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false) -> [String: Any] {
-        Self.policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered, killSwitch: killSwitch)
+        Self.policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered, killSwitch: killSwitch, protection: protection)
     }
     /// The configuration the filter enforces; `FilterPolicy` reads it back for the filter and the doctor alike.
     /// `metered` is the current network's effective cost, which decides whether updaters are paused.
     public nonisolated static func policy(_ preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool = false,
-                                          killSwitch: KillSwitchPolicy = KillSwitchPolicy()) -> [String: Any] {
+                                          killSwitch: KillSwitchPolicy = KillSwitchPolicy(), protection: ProtectionSettings = ProtectionSettings()) -> [String: Any] {
         ["enabled": true, "unrestricted": preferences.profile == .unrestricted, "profile": preferences.profile.rawValue,
          "defaultAllow": preferences.defaultAllow,
          "rules": preferences.rules[preferences.profile.rawValue] ?? [:],
@@ -158,7 +165,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
          },
          "blockedDomains": (preferences.blockedDomains ?? []) + (preferences.blockedHosts ?? []), "domainExceptions": preferences.domainExceptions ?? [:],
          "askNewApps": preferences.askNewApps == true, "allowApple": preferences.allowApple == true,
-         "killSwitch": killSwitch.configuration]
+         "killSwitch": killSwitch.configuration, "protection": protection.configuration]
     }
     private func save(enabled: Bool) {
         busy = true

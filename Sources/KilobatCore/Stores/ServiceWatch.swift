@@ -39,7 +39,7 @@ public enum ServiceTriggers {
 
     /// A call is worth a status check when it froze beyond the router, which is where the calling service's own servers are.
     public static func callNeedsCheck(_ report: CallReport) -> Bool {
-        !report.browser && report.causes.contains { $0.cause.kind == .beyondRouter } && !ServiceCatalog.services(forCallApp: report.app).isEmpty
+        !report.browser && report.causes.contains { $0.cause.kind == .beyondRouter || $0.cause.unconfirmed == true } && !ServiceCatalog.services(forCallApp: report.app).isEmpty
     }
 
     /// What the watch follows, by key, with the connections each has stuck opening: every app or agent with a known service

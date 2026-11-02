@@ -7,6 +7,7 @@ public final class NettopMonitor: @unchecked Sendable {
     private let lock = NSLock()
     private var generation = UUID()
     private func current(_ id: UUID) -> Bool { lock.lock(); defer { lock.unlock() }; return generation == id }
+    public init() {}
 
     public static func parseRow(_ line: String) -> ProcessTraffic? {
         let columns = line.split(separator: ",", omittingEmptySubsequences: false)

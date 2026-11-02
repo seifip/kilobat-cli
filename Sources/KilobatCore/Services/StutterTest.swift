@@ -48,7 +48,9 @@ public struct StutterResult: Codable, Sendable {
         return runs.filter { $0 <= 2 }.reduce(0, +) * 10 >= lost * 9
     }
 
-    /// On Starlink, spikes beyond the router that land on its 15-second satellite handovers (:12, :27, :42, :57).
+    /// On Starlink, spikes beyond the router align with a reported 15-second reconfiguration schedule.
+    /// Timing correlation only: this does not establish a satellite change or rule out local Wi-Fi/AWDL.
+    /// The legacy property name is retained for API compatibility.
     public var handoverAligned: Bool {
         guard starlink == true, !local, let started else { return false }
         return Starlink.alignedWithHandovers(spikes.map { started.addingTimeInterval($0.at) })
@@ -64,7 +66,7 @@ public struct StutterResult: Codable, Sendable {
             return String(localized: "The Wi-Fi’s sign-in page is holding the connection, so pings past the router go unanswered. Sign in again, then run the test.", comment: "Stutter test verdict while a hotel or café Wi-Fi's sign-in page is in the way")
         }
         if handoverAligned, pattern != .noReplies {
-            return String(localized: "Spikes up to \(peak) land on Starlink’s satellite handovers, every 15 seconds at :12, :27, :42 and :57 past the minute. That’s how Starlink switches satellites, not your Wi-Fi or AirDrop, and nothing at home changes it.", comment: "Stutter test verdict on Starlink; the argument is a latency such as 180 ms") + loss
+            return String(localized: "Spikes up to \(peak) line up with a reported 15-second Starlink reconfiguration pattern. Timing alone cannot confirm the cause or a satellite change, or rule out Wi-Fi or AirDrop. Test your router too.", comment: "Stutter test timing correlation on Starlink, not a confirmed cause; the argument is a latency such as 180 ms") + loss
         }
         switch pattern {
         case .noReplies:
@@ -187,11 +189,11 @@ public enum StutterTest {
     }
     /// /sbin/ping sends every 50 ms without root on current macOS (only intervals under 2 ms need it).
     /// If an older ping refuses, it falls back to 100 ms over the same time.
-    /// `starlink` says whether the Mac is on a Starlink dish's network, for the handover check; nil looks for a dish.
+    /// `starlink` says whether the Mac is on a Starlink dish's network, for the timing-pattern check; nil looks for a dish.
     public static func run(target: String, seconds: Int = 20, starlink: Bool? = nil) async throws -> StutterResult {
         let host = try await host(for: target), seconds = Swift.min(Swift.max(seconds, Self.seconds.lowerBound), Self.seconds.upperBound)
         async let before = NearbyRadios.awdlStatus()
-        // Only a test beyond the router can show Starlink's handovers.
+        // Only compare the reported Starlink timing pattern for a target beyond the local router.
         var onStarlink = starlink
         if onStarlink == nil, target != "router" { onStarlink = await Starlink.detect() }
         var interval = Self.interval

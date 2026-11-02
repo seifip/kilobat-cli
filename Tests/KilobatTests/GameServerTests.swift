@@ -41,18 +41,6 @@ struct GameServerTests {
         }
     }
 
-    @Test func everyIconIsBundledWithItsSource() throws {
-        let table = GameServerTable.bundled
-        let sources = try JSONSerialization.jsonObject(with: Data(contentsOf: Self.repository.appendingPathComponent("Assets/Games/sources.json"))) as? [String: Any]
-        let icons = sources?["icons"] as? [String: [String: String]] ?? [:]
-        let named = table.games.compactMap(\.icon) + table.notMeasured.compactMap(\.icon)
-        #expect(named.count >= 40)
-        for icon in named {
-            #expect(FileManager.default.fileExists(atPath: Self.repository.appendingPathComponent("Assets/Games/game-\(icon).png").path), "app icon \(icon)")
-            #expect(FileManager.default.fileExists(atPath: Self.repository.appendingPathComponent("site/public/assets/games/\(icon).webp").path), "site icon \(icon)")
-            #expect(icons[icon]?["url"]?.hasPrefix("https://") == true, "source for \(icon)")
-        }
-    }
 
     @Test func lookupFindsGamesByIdAliasAndName() {
         let table = GameServerTable.bundled

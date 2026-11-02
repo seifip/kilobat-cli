@@ -68,6 +68,22 @@ public struct SupportReport: Codable, Sendable {
     public let leftOut: [String]
     /// The Starlink dish's own outage log, when the report's network is a dish's.
     public var starlink: StarlinkEvidence? = nil
+    /// One service much slower than the rest of the internet on this network: the route to it, for the provider.
+    public var serviceRoute: ServiceRoute? = nil
+
+    public struct ServiceRoute: Codable, Sendable {
+        public let service: String
+        public let slowMbps: Double
+        public let elsewhereMbps: Double
+        public let transfers: Int
+        public let since: Date
+        /// The hours it's slow in, when there's a pattern.
+        public let pattern: String?
+        /// Where a route trace saw the delay rise.
+        public let trace: String?
+        /// The server traced, a public address.
+        public let address: String?
+    }
 
     public static let footer = String(localized: "Measured with Kilobat · kilobat.app", comment: "The last line of the report for an internet provider")
 
@@ -75,7 +91,7 @@ public struct SupportReport: Codable, Sendable {
     /// (`PlanSpeeds`); `planMbps` stands in for a network without one.
     public static func make(samples: [DiagnosticSnapshot], events: [NetworkEvent], speedTests: [SavedSpeedTest],
                             hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil, starlink: StarlinkEvidence? = nil,
-                            mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
+                            serviceSpeed: ServiceSpeedReport? = nil, mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
         let key = latest?.networkKey, name = latest?.networkName
@@ -102,6 +118,15 @@ public struct SupportReport: Codable, Sendable {
         if let line = starlink?.finding {
             if latency == nil, outages.isEmpty, speeds.isEmpty, planCheck == nil, doctor == nil { lines = [line] } else { lines.insert(line, at: outages.isEmpty ? 0 : 1) }
         }
+        // A slow route to one service, on this report's network only.
+        let route = serviceSpeed.flatMap { report -> ServiceRoute? in
+            guard report.network == key, let finding = report.finding, finding.kind == "route", finding.latest >= since else { return nil }
+            return ServiceRoute(service: finding.service, slowMbps: finding.slowMbps, elsewhereMbps: finding.elsewhereMbps, transfers: finding.slowTransfers,
+                                since: finding.since, pattern: finding.pattern?.sentence, trace: finding.trace.map(ServiceSpeedReport.traceSentence), address: finding.trace?.address)
+        }
+        if route != nil, let line = serviceSpeed?.providerLine {
+            if latency == nil, outages.isEmpty, speeds.isEmpty, planCheck == nil, doctor == nil, starlink?.finding == nil { lines = [line] } else { lines.append(line) }
+        }
         return SupportReport(created: now, hours: hours, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
                              findings: lines,
                              latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, planCheck: planCheck, check: doctor,
@@ -110,7 +135,7 @@ public struct SupportReport: Codable, Sendable {
                                        String(localized: "device names and hardware addresses", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "which apps used the network", comment: "Left out of the provider report; items are joined with semicolons")]
                                      + (starlink == nil ? [] : [String(localized: "the dish’s serial number and location", comment: "Left out of the provider report; items are joined with semicolons")]),
-                             starlink: starlink?.outages.isEmpty == false ? starlink : nil)
+                             starlink: starlink?.outages.isEmpty == false ? starlink : nil, serviceRoute: route)
     }
 
     // MARK: Measurements

@@ -344,21 +344,27 @@ public final class TrafficStore {
         let name = URL(fileURLWithPath: path).lastPathComponent
         return name.isEmpty ? nil : name
     }
+    /// Every nettop sample as it arrives, with its per-connection rows: the agent network log and service speed read these.
+    @ObservationIgnored private var snapshotObservers: [(TrafficSnapshot) -> Void] = []
+    public func observeSnapshots(_ observer: @escaping (TrafficSnapshot) -> Void) { snapshotObservers.append(observer) }
     public func consume(_ snapshot: TrafficSnapshot) {
         let generation = sampleGeneration
         reloadPreferences()
         guard generation == sampleGeneration else { return }
+        for observer in snapshotObservers { observer(snapshot) }
         let counters = readCounters?()
         let scope = preferences.trafficScope ?? "external", wifi = wifiNames
         let physical: (String) -> Bool = { InterfaceCounters.physical($0, scope: scope, wifi: wifi) }
         let starts = Dictionary(snapshot.processes.map { ($0.pid, startTime($0.pid)) }) { first, _ in first }
+        // The first sample is only a baseline: apps and rates exist from the second on, so that's when the store is ready.
+        let hadBaseline = lastSample != nil
         defer {
             // A process missing from a sample keeps its place for half a minute, so it isn't counted again from scratch.
             var seen = previous.filter { snapshot.timestamp.timeIntervalSince($0.value.at) < 30 }
             for process in snapshot.processes { seen[process.pid] = SeenProcess(traffic: process, started: starts[process.pid] ?? nil, at: snapshot.timestamp) }
             previous = seen
             lastSample = snapshot.timestamp
-            ready = true
+            if hadBaseline { ready = true }
         }
         guard let lastSample else {
             if let counters { _ = interfaces.advance(counters, elapsed: 1, include: physical) }
@@ -460,7 +466,8 @@ public final class TrafficStore {
         let gap = pendingUnattributed
         unattributed += gap
         usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent,
-                                localBytes: pendingLocal, appsLocal: pendingAppsLocal.isEmpty ? nil : pendingAppsLocal, unattributed: countsInterfaces ? gap : nil))
+                                localBytes: pendingLocal, appsLocal: pendingAppsLocal.isEmpty ? nil : pendingAppsLocal, unattributed: countsInterfaces ? gap : nil,
+                                metered: metered ? true : nil))
         let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
         usage = Self.compact(usage.filter { $0.date >= cutoff })
         persist(usage, as: "usage.json")
@@ -504,7 +511,7 @@ public final class TrafficStore {
                               apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey,
                               appsSent: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.estimatedSent, uniquingKeysWith: +) },
                               localBytes: sum(entries.map(\.localBytes)), appsLocal: entries.contains { $0.appsLocal != nil } ? entries.reduce(into: [:]) { apps, entry in apps.merge(entry.appsLocal ?? [:], uniquingKeysWith: +) } : nil,
-                              unattributed: sum(entries.map(\.unattributed)))
+                              unattributed: sum(entries.map(\.unattributed)), metered: entries.contains { $0.metered == true } ? true : nil)
         }
         return (merged + kept).sorted { $0.date < $1.date }
     }
