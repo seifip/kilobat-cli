@@ -181,7 +181,7 @@ public struct StreamReport: Codable, Identifiable, Sendable, Equatable {
 
     /// "2.1%", "0.4%", "<0.1%".
     public static func format(_ percent: Double) -> String {
-        percent > 0 && percent < 0.1 ? "<0.1%" : (percent / 100).formatted(.percent.precision(.fractionLength(percent >= 10 ? 0 : 1)))
+        percent > 0 && percent < 0.1 ? "<" + 0.001.formatted(.percent.precision(.fractionLength(1))) : (percent / 100).formatted(.percent.precision(.fractionLength(percent >= 10 ? 0 : 1)))
     }
 
     /// The drops' causes, most frames first.

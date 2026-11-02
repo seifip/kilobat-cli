@@ -158,7 +158,7 @@ public enum SiriAnswers {
                 let run = input.history.filter { $0.date >= start && $0.networkKey == snapshot.networkKey }.compactMap { $0.internet.lossPercent }
                 return run.isEmpty ? loss : run.reduce(0, +) / Double(run.count)
             } ?? loss
-            let percent = "\(Int(max(1, runLoss.rounded())))%", latency = ms(internet ?? 0)
+            let percent = "\(Int(max(1, runLoss.rounded())).formatted())%", latency = ms(internet ?? 0)
             let when = start.map { moment($0, now: input.now, calendar: calendar) }
             let sentence: String = switch (lossy, wifi, when) {
             case (true, true, let when?): String(localized: "Your Wi-Fi is fine; your provider’s line is losing \(percent) of packets since \(when). It’s in your provider report.", comment: "Siri; the arguments are a share such as 4% and a time such as 9:00 PM")
@@ -195,7 +195,7 @@ public enum SiriAnswers {
                               tone: .problem, facts: facts, upsell: String(localized: "Kilobat Pro tells you where it breaks.", comment: "Siri without Kilobat Pro"))
         }
         guard snapshot.internet.average != nil else { return fine(snapshot, input: input, facts: facts) }
-        let latency = ms(snapshot.internet.average ?? 0), loss = "\(Int((snapshot.internet.lossPercent ?? 0).rounded()))%"
+        let latency = ms(snapshot.internet.average ?? 0), loss = "\(Int((snapshot.internet.lossPercent ?? 0).rounded()).formatted())%"
         switch snapshot.health {
         case .good, .unknown: return fine(snapshot, input: input, facts: facts)
         case .degraded:
@@ -229,9 +229,9 @@ public enum SiriAnswers {
         var facts: [SiriAnswer.Fact] = []
         let loss = snapshot.internet.lossPercent
         facts.append(.init(String(localized: "Internet"), snapshot.internet.average.map(ms) ?? "—", warning: (snapshot.internet.average ?? 0) > 120))
-        if let loss { facts.append(.init(String(localized: "Packet loss"), "\(Int(loss.rounded()))%", warning: loss >= 3)) }
+        if let loss { facts.append(.init(String(localized: "Packet loss"), "\(Int(loss.rounded()).formatted())%", warning: loss >= 3)) }
         if let router = snapshot.router?.average { facts.append(.init(String(localized: "Router"), ms(router), warning: router > 20)) }
-        if let rssi = snapshot.radio.rssi, snapshot.wiredInterface == nil { facts.append(.init(String(localized: "Wi-Fi signal"), "\(rssi) dBm", warning: snapshot.radio.health != .good)) }
+        if let rssi = snapshot.radio.rssi, snapshot.wiredInterface == nil { facts.append(.init(String(localized: "Wi-Fi signal"), "\(rssi.formatted()) dBm", warning: snapshot.radio.health != .good)) }
         if let dns = snapshot.dnsMilliseconds { facts.append(.init(String(localized: "DNS"), ms(dns), warning: dns > 150)) }
         return facts
     }
@@ -272,9 +272,9 @@ public enum SiriAnswers {
         let head: String = report.browser ? String(localized: "Your call in \(report.app) \(when)", comment: "Siri: the start of a call report sentence; the arguments are a browser such as Safari and a time such as “at 2:15 PM”")
                                           : String(localized: "Your \(report.app) call \(when)", comment: "Siri: the start of a call report sentence; the arguments are an app such as Zoom and a time such as “at 2:15 PM”")
         var facts = [SiriAnswer.Fact(String(localized: "Length"), Duration.seconds(max(60, report.seconds)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))),
-                     SiriAnswer.Fact(String(localized: "Freezes"), "\(report.freezes.count)", warning: !report.freezes.isEmpty)]
+                     SiriAnswer.Fact(String(localized: "Freezes"), report.freezes.count.formatted(), warning: !report.freezes.isEmpty)]
         if let median = report.median { facts.append(.init(String(localized: "Ping"), ms(median))) }
-        facts.append(.init(String(localized: "Packet loss"), String(format: "%.1f%%", report.lossPercent), warning: report.lossPercent >= 2))
+        facts.append(.init(String(localized: "Packet loss"), String(format: "%.1f%%", locale: Locale.current, report.lossPercent), warning: report.lossPercent >= 2))
         // The calling service's own outage is free to know, as in the notification.
         let service = report.service.flatMap { $0.problem ? $0.reported : nil }
         if report.clean {
@@ -459,8 +459,8 @@ public enum SiriAnswers {
 
     // MARK: Words
 
-    static func ms(_ value: Double) -> String { "\(Int(value.rounded())) ms" }
-    static func mbps(_ value: Double) -> String { value >= 10 ? "\(Int(value.rounded()))" : value.formatted(.number.precision(.fractionLength(0...1))) }
+    static func ms(_ value: Double) -> String { "\(Int(value.rounded()).formatted()) ms" }
+    static func mbps(_ value: Double) -> String { value >= 10 ? Int(value.rounded()).formatted() : value.formatted(.number.precision(.fractionLength(0...1))) }
 
     static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return 0 }
