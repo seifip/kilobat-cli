@@ -30,7 +30,7 @@ public final class TrafficStore {
                 preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: networkKey)
             }
             if !reloading { savePreferences() }
-            if preferences.networkCost != oldValue.networkCost, lastMetered != nil { costChanged() }
+            if preferences.networkCost != oldValue.networkCost || preferences.dataPacks != oldValue.dataPacks, lastMetered != nil { costChanged() }
         }
     }
     public var usage: [UsageEntry] = []
@@ -118,7 +118,8 @@ public final class TrafficStore {
         persist(sleeps, as: "sleeps.json")
     }
     public var cost: NetworkCost { preferences.cost(of: networkKey) }
-    public var metered: Bool { cost.metered(os: osExpensive) }
+    /// A network on a running data pack is metered unless it was marked unmetered by hand.
+    public var metered: Bool { cost == .automatic && currentPack != nil ? true : cost.metered(os: osExpensive) }
     func pathChanged(connected: Bool, expensive: Bool, kind: String) {
         self.connected = connected; osExpensive = expensive; networkKind = kind
         costChanged()
@@ -461,6 +462,8 @@ public final class TrafficStore {
     }
     /// This network's unattributed bytes so far, including those not yet saved.
     public var unattributedBytes: UInt64 { unattributed + pendingUnattributed }
+    /// Internet bytes on this network not saved to history yet.
+    var pendingBytes: UInt64 { pendingReceived + pendingSent }
     public func flush() {
         guard recordHistory, pendingReceived + pendingSent + pendingLocal > 0 else { return }
         let gap = pendingUnattributed

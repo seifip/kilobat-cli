@@ -23,7 +23,7 @@ struct KilobatCLI {
             print(try commandHelp(args.first == "help" ? args[1] : command)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "agent-log", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "router", "service-speed", "week", "games", "starlink", "credit", "household", "down", "protect"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "settings", "sessions", "agent-log", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "router", "service-speed", "week", "games", "starlink", "credit", "household", "down", "protect", "stream", "pack", "hotspot", "verdict", "local", "explain", "cloud-gaming", "smarthome"].contains(command), !args.contains("--json") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
@@ -36,26 +36,35 @@ struct KilobatCLI {
         case "diagnose", "scan", "radar", "speedtest", "dns": try await DiagnosticsCLI.run(args)
         case "awake", "sessions", "why", "conditions": try await AwakeCLI.run(args)
         case "limit", "quota": try await QuotaCLI.run(args)
+        case "pack": try await PackCLI.run(args)
         case "updaters": try await UpdatersCLI.run(args)
         case "uploads": try await UploadsCLI.run(args)
         case "agent-event": await AgentCLI.run(args)
         case "agent-log": try await AgentLogCLI.run(args)
+        case "history": try await HistoryCLI.run(Array(args.dropFirst()))
         case "protect": try await ProtectCLI.run(args)
+        case "verdict": try await VerdictCLI.run(args)
         case "overlay": try await OverlayCLI.run(args)
         case "games": try await GamesCLI.run(args)
         case "proxy", "vpn": try await ProxyCLI.run(args)
         case "calls": try CallsCLI.run(args)
         case "remote": try RemoteCLI.run(args)
+        case "stream": try await StreamCLI.run(args)
+        case "cloud-gaming": try await CloudGamingCLI.run(args)
         case "household": try await HouseholdCLI.run(args)
+        case "smarthome": try await SmartHomeCLI.run(args)
         case "down": try await DownCLI.run(args)
+        case "explain": try await ExplainCLI.run(args)
         case "portal": try await PortalCLI.run(args)
         case "plan": try PlanCLI.run(args)
-        case "router": try RouterCLI.run(args)
+        case "router": try await RouterCLI.run(args)
         case "service-speed": try await ServiceSpeedCLI.run(args)
+        case "hotspot": try await HotspotCLI.run(args)
         case "week": try WeekCLI.run(args)
         case "credit": try CreditCLI.run(args)
         case "wifi", "channels", "networks", "health-history", "support-report", "settings", "low-latency", "quit": try await WiFiCLI.run(args)
         case "stutter", "airdrop", "bluetooth": try await NearbyCLI.run(args)
+        case "local": try await LocalCLI.run(args)
         case "starlink": try await StarlinkCLI.run(args)
         case "--help", "-h", "help": print(help)
         case "completion":
@@ -171,6 +180,9 @@ struct KilobatCLI {
             guard let app = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else { throw CLIError("App bundle not found. Run script/build_and_run.sh first.") }
             let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/open"); process.arguments = [app.path]; try process.run(); process.waitUntilExit()
             if process.terminationStatus != 0 { throw CLIError("Could not open the app.") }
+        case "doctor" where args.count > 1:
+            // kilobat doctor <host>: the connection check, the same as kilobat why <host>.
+            try await AwakeCLI.run(["why"] + args.dropFirst())
         case "doctor":
             try allow(args, [])
             print("✓ macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
@@ -191,7 +203,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.30.0"
+    static let version = "0.45.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -461,13 +473,13 @@ struct KilobatCLI {
 
     static let commands: [(name: String, detail: String)] = [
         ("status", "Live per-app traffic"), ("profile", "List or select a profile"), ("allow", "Save an allow rule"),
-        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the data budget and its cycle"), ("quota", "Per-app data quotas"), ("updaters", "Pause updaters on metered networks"), ("uploads", "Big uploads, held for a better network"),
+        ("block", "Save a block rule"), ("rules", "Review saved rules"), ("limit", "Read or set the data budget and its cycle"), ("quota", "Per-app data quotas"), ("pack", "Data packs such as a travel eSIM, and when each runs out"), ("updaters", "Pause updaters on metered networks"), ("uploads", "Big uploads, held for a better network"),
         ("report", "Usage history, or compare it with a router or provider"), ("open", "Open the Mac app"), ("doctor", "Check your setup"),
         ("mcp", "MCP server for AI agents (stdio)"),
         ("diagnose", "Wi-Fi, router, internet and DNS checks"), ("radar", "Signal score and best-spot finder"),
         ("scan", "Nearby networks"), ("speedtest", "Speed and loaded-latency test"), ("dns", "Read or set DNS, and the fastest one here"),
         ("awake", "Keep the Mac awake, network-aware"), ("sessions", "Awake sessions and AI agent runs"),
-        ("agent-event", "Report an agent's state from its hooks"), ("agent-log", "Hosts an AI agent and its commands contacted"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"), ("ip", "Where traffic leaves: interface, VPN, public IP"),
+        ("agent-event", "Report an agent's state from its hooks"), ("history", "Clear or forget sites in host histories"), ("agent-log", "Hosts an AI agent and its commands contacted"), ("why", "Find what stops a connection"), ("conditions", "Metered, VPN, battery: fit for a long run?"), ("ip", "Where traffic leaves: interface, VPN, public IP"),
         ("completion", "Shell completion script"), ("update", "Update the CLI"), ("help", "Show help"),
         ("blocked-history", "Blocked-flow metadata"), ("connection-rules", "List destination rules"),
         ("connection-rule", "Save a destination rule"), ("remove-connection-rule", "Remove a destination rule"),
@@ -480,28 +492,31 @@ struct KilobatCLI {
         ("capture", "Bounded packet capture"), ("wake", "Wake-on-LAN"), ("spots", "Saved Wi-Fi spots"),
         ("scan-history", "Saved scans"), ("route-history", "Saved routes, hop by hop over time"), ("outages", "Outage records"),
         ("speed-history", "Speed test records"), ("speed-compare", "What differed between two speed tests"), ("reset", "Remove an app rule"), ("wifi", "Wi-Fi status and control"),
-        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("router", "Router check-up: slower than its normal?"), ("service-speed", "Real speed to GitHub, iCloud, Steam and more"), ("week", "Last week: outages, calls, data and blocks"), ("credit", "Outages your provider may credit, and a drafted claim"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("remote", "Reports after SSH, Mosh and remote desktop sessions"), ("household", "Paired Macs and what each is doing"), ("down", "Is it them or me? Service status pages"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
+        ("channels", "Least crowded channel"), ("networks", "Networks and remembered settings"), ("health-history", "Connection checks over time"), ("support-report", "Report for your ISP or IT desk"), ("plan", "Speed tests against the plan you pay for"), ("router", "Router check-up, and device traffic from your router"), ("service-speed", "Real speed to GitHub, iCloud, Steam and more"), ("hotspot", "Is the carrier capping your phone hotspot?"), ("week", "Last week: outages, calls, data and blocks"), ("credit", "Outages your provider may credit, and a drafted claim"), ("overlay", "Live ping overlay for streaming"), ("proxy", "Proxy apps and routes"), ("vpn", "VPN leak checks, leak test and the kill switch"), ("calls", "Report cards after calls"), ("remote", "Reports after SSH, Mosh and remote desktop sessions"), ("stream", "OBS stream reports and the Go live check"), ("cloud-gaming", "GeForce NOW, Xbox Cloud Gaming and others: live and after"), ("smarthome", "Matter, Thread and HomeKit: networks, devices, readiness"), ("household", "Paired Macs and what each is doing"), ("down", "Is it them or me? Service status pages"), ("portal", "Hotel and café Wi-Fi sign-in pages"),
         ("settings", "Read or change settings"), ("low-latency", "Pause AWDL for calls and games"), ("stutter", "Find periodic latency spikes"), ("games", "Ping game data centers or your current match"), ("starlink", "Starlink dish: status, obstructions, outages"),
-        ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices, and what makes headphones crackle"), ("quit", "Quit a process"),
+        ("airdrop", "AirDrop link, its users and visibility"), ("bluetooth", "Bluetooth devices, and what makes headphones crackle"), ("local", "Can I cast or print here? TVs, AirPlay, printers"), ("quit", "Quit a process"),
         ("bandwidth", "One app's sent and received over time"), ("access-policy", "Connections an app declares"),
         ("approvals", "Apps waiting for approval"), ("approve", "Allow a waiting app"), ("deny", "Block a waiting app"),
         ("block-host", "Block a domain or IP"), ("unblock-host", "Unblock a domain or IP"),
         ("protect", "Block known threats, trackers in apps, the agent guard"),
+        ("verdict", "Every rule that matches a connection, and the one that decides"),
+        ("explain", "What a process or host is, and what breaks if you block it"),
     ]
     static let commandValues: [String: [String]] = [
         "status": ["--watch", "--json"], "profile": ["travel", "work", "unrestricted"], "report": ["compare", "--csv", "--json", "--summary", "--days", "--total", "--unit", "--direction", "--from", "--to", "--period", "--network"],
-        "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "updaters": ["on", "off", "--json"], "uploads": ["hold", "resume", "--until", "unmetered", "fast", "manual", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
-        "sessions": ["--days", "--json"], "agent-log": ["--all", "--since", "--agent", "--flagged", "--watch", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
+        "rules": ["--json", "--profile"], "limit": ["--cycle", "--reset-day", "--alert"], "quota": ["--list", "--json", "--upload", "--all-networks", "--remove"], "pack": ["status", "add", "correct", "end", "--network", "--name", "--start", "--pack", "--json"],"updaters": ["on", "off", "--json"], "uploads": ["hold", "resume", "--until", "unmetered", "fast", "manual", "--json"], "awake": ["--for", "--until-quiet", "--app", "--quiet", "--display", "--lid-closed", "--while-frontmost", "--json"],
+        "sessions": ["--days", "--json"], "agent-log": ["--all", "--since", "--agent", "--flagged", "--watch", "--json"], "history": ["forget", "clear", "--subdomains", "--hour", "--today", "--all", "--json"], "agent-event": ["start", "working", "waiting", "done", "failed", "--agent", "--session", "--cwd", "--message", "--stdin-json", "--json-arg", "--verbose"], "why": ["--app", "--proxy", "--context", "--failed-at", "--json"], "conditions": ["--json"], "allow": ["--minutes", "--profile"], "block": ["--minutes", "--profile"], "reset": ["--profile"],
         "diagnose": ["--json"], "radar": ["--watch", "--json"], "scan": ["--json"], "channels": ["--json"], "speedtest": ["--json", "--budget-mb", "--parallel", "--progress"], "ip": ["--public", "--json"], "speed-compare": ["--json"], "trace": ["--rounds", "--json"], "route-history": ["--host", "--json"],
-        "dns": ["automatic", "cloudflare", "google", "quad9", "flush", "fastest", "auto", "exclude", "include", "on", "off", "--network", "--all", "--json"], "completion": ["zsh", "bash", "fish"],
-        "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "--json", "--password-stdin"],
-        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "remote": ["--limit", "--kind", "ssh", "mosh", "desktop", "--json"], "router": ["--all", "--json"], "service-speed": ["--all", "--test", "--budget-mb", "--list", "--json"], "week": ["--weeks-ago", "--json"], "household": ["--json"], "down": ["--all", "--list", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "credit": ["providers", "--provider", "--country", "--price", "--month", "this", "last", "--draft", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
-        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["audio", "--json"], "quit": ["--force"],
-        "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "router-alerts", "digest", "bluetooth-audio-alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
+        "dns": ["automatic", "cloudflare", "google", "quad9", "flush", "fastest", "auto", "exclude", "include", "fallback", "on", "off", "--network", "--all", "--json"], "completion": ["zsh", "bash", "fish"],
+        "wifi": ["status", "on", "off", "restart", "disconnect", "join", "known", "password", "share", "nodes", "name", "reconnect", "--json", "--password-stdin"],
+        "networks": ["cost", "forget", "metered", "unmetered", "automatic", "--json"], "health-history": ["--hours", "--json"], "support-report": ["--hours", "--host", "--include-sites", "--markdown", "--html", "--output", "--json"], "overlay": ["--port", "--target"], "proxy": ["routes", "test", "--app", "--json"], "vpn": ["leaks", "--json"], "calls": ["--limit", "--json"], "remote": ["--limit", "--kind", "ssh", "mosh", "desktop", "--json"], "stream": ["status", "check", "reports", "--bitrate", "--measure", "--no-measure", "--limit", "--port", "--password-stdin", "--json"], "cloud-gaming": ["status", "reports", "--limit", "--json"], "router": ["--all", "connect", "devices", "disconnect", "fritzbox", "unifi", "mikrotik", "openwrt", "--json"], "service-speed": ["--all", "--test", "--budget-mb", "--list", "--json"], "hotspot": ["carriers", "--all", "--carrier", "--detect", "--json"], "week": ["--weeks-ago", "--json"], "household": ["--json"], "smarthome": ["--json"], "down": ["--all", "--list", "--json"], "explain": ["--process", "--host", "--json"], "portal": ["open", "--json"], "plan": ["--days", "--json"], "credit": ["providers", "--provider", "--country", "--price", "--month", "this", "last", "--draft", "--json"], "games": ["--game", "--all", "--match", "--json"], "low-latency": ["on", "off", "--for", "--until-quit"],
+        "stutter": ["--seconds", "--target", "router", "internet", "--json"], "starlink": ["--hours", "--json"], "airdrop": ["status", "everyone", "contacts", "off", "--json"], "bluetooth": ["audio", "--json"], "local": ["check", "--quick", "--json"], "quit": ["--force"],
+        "settings": ["new-apps", "auto-travel", "pause-updaters", "kill-switch", "kill-switch-lan", "scope", "alerts", "router-alerts", "node-alerts", "digest", "bluetooth-audio-alerts", "outage-trace", "public-ip", "speed-streams", "check-interval", "speed-schedule", "plan-mbps", "plan-check", "menu-bar", "units", "group-helpers", "awake-on-power", "keep-screen-on", "on", "off"],
         "destinations": ["--pid", "--json"], "bandwidth": ["hour", "day", "week", "month", "--back", "--json"], "access-policy": ["--json"],
-        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "mark", "mine", "unknown", "ignored", "--all", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
+        "approvals": ["--json"], "approve": ["--minutes"], "deny": ["--minutes"], "block-host": ["--app"], "unblock-host": ["--app"], "devices": ["name", "mark", "type", "mine", "unknown", "ignored", "auto", "--all", "--bonjour", "--json"], "interfaces": ["--json"], "lan-test": ["--reverse", "--json"],
         "spots": ["save", "remove"], "outages": ["--days"], "speed-history": ["--days"], "http-check": ["--json"],
         "blocklist": ["status", "import", "clear"], "protect": ["status", "on", "off", "update", "check", "allow", "unallow", "--threats", "--trackers", "--agents", "--list", "--json"], "scope": ["external", "wifi", "wired"], "connection-rule": ["allow", "block"],
+        "verdict": ["--app", "--port", "--incoming", "--blocked", "--json"],
     ]
 
     static func completionScript(_ shell: String) throws -> String {
@@ -604,13 +619,29 @@ struct KilobatCLI {
       calls [--limit 1…200] [--json]  After each call: whether it froze and what caused it (written by the app)
       remote [--limit 1…200] [--kind ssh|mosh|desktop] [--json]  After each SSH, Mosh or remote desktop
                             session: why typing lagged or the screen froze, and when Mosh would help
+      stream [status] [--json]  OBS as the app sees it: connected, streaming, frames dropped so far
+      stream check [--bitrate <kbps>] [--measure|--no-measure] [--json]  Can your upload carry OBS's bitrate +30%?
+                            An 8-second upload test (≤16 MB); on metered networks the last speed test, unless --measure
+      stream reports [--limit 1…200] [--json]  After each OBS stream: dropped frames, network vs encoder vs GPU
+                            (written by the app)
+      cloud-gaming [status] [--json]  The cloud gaming session now: ping, jitter, loss, bitrate, data, what's in the way
+      cloud-gaming reports [--limit 1…200] [--json]  After each GeForce NOW, Xbox Cloud Gaming, Boosteroid, Luna or
+                            Shadow session: when it stuttered and why (written by the app)
       household [--json]    Macs paired in the app and what each moves now (live usage needs Pro); pair in the app
+      smarthome [--json]    Thread networks and border routers, Matter and HomeKit devices, and Matter readiness
       support-report [--hours 1…168] [--host <host>]  A report for your ISP or IT desk, without
         [--markdown|--html] [--output <file>]  your network's name or local addresses; text by default
+        [--include-sites]   Keep the checked site's and a slow service's names (left out by default)
       plan [--days 7…90] [--json]  Speed tests against the plan you pay for: median, evenings, under half
       router [--all] [--json]  Router check-up: the router against its own normal, and whether restarts helped
+      router connect [fritzbox|unifi|mikrotik|openwrt]  How to connect your router in the app; never takes a password
+      router devices [--json]  Device traffic now and today, from your connected router (through the app, Pro)
+      router disconnect     Forget the connected router and its Keychain password
       service-speed [--all] [--json]  Your downloads from GitHub, iCloud, Steam, npm and more against the line
       service-speed --test <service> [--budget-mb 5…25]  Download up to 25 MB from one now; --list shows which
+      hotspot [--all] [--json]  On a phone hotspot: does the carrier cap it? The evidence and its hotspot rules
+        [--carrier <id>]    Name the carrier for this run (`hotspot carriers` lists them)
+        [--detect]          Ask Cloudflare and RIPE NCC whose network the public address is in
       week [--weeks-ago 0…12] [--json]  Last week's digest: outages, frozen calls, blocks and data, against the week before
       credit [--json]       This month's outages beyond your router against your provider's credit rule
         [--provider <id>] [--price <monthly>]  For this run only; the app's History › Outage credit sets them
@@ -650,10 +681,13 @@ struct KilobatCLI {
         [--match]           The server of the match you're playing: any game, found from its connections
       dns [provider]        Read DNS, set automatic/cloudflare/google/quad9, or flush
       dns fastest [--all] [--json]  The fastest DNS on this network (every network with --all):
-                            its own against Cloudflare, Quad9 and Google, timed quietly by the app
+                            its own against Cloudflare, Quad9 and Google, timed quietly by the app;
+                            who runs each and where, and each one's answered lookups over 14 days
       dns auto on|off [--network <name>]  Pro: use the fastest DNS on each network, or one, from joining;
                             back to the network's own for a VPN, a sign-in page, failing lookups or quit
       dns exclude|include <cloudflare|quad9|google|IP>  Never time or pick a resolver, or add your own
+      dns fallback <cloudflare|quad9|google|IP|off>  When lookups fail through the fastest, use this one
+                            if it answers, before the network's own
 
     Wi-Fi
       wifi [status] [--json]  Current network, signal, channel and link rate
@@ -664,6 +698,9 @@ struct KilobatCLI {
       wifi known [--json]   Saved networks in order of preference
       wifi password <name>  Show a saved password (macOS asks first)
       wifi share <name>     Password and a QR code to scan with a phone
+      wifi nodes [--json]   Mesh nodes or access points of this network, and whether a closer one is in range
+      wifi nodes name <node> <name>  Name a node, such as Office (an empty name clears it)
+      wifi reconnect [--json]  Move to the closer node: join it, or turn Wi-Fi off and on
       low-latency on        Pause AirDrop/AWDL for calls and games while this runs (15 min default)
         [--for 15m|1h|2h]   Pause for longer, up to 4h
         [--until-quit <app>]  Restore when that app quits
@@ -672,6 +709,8 @@ struct KilobatCLI {
       airdrop everyone|contacts|off  Open AirDrop settings to change visibility (only macOS can)
       bluetooth [--json]    Bluetooth devices and whether they share 2.4 GHz with Wi-Fi
       bluetooth audio [--json]  While AirPods or other Bluetooth headphones play: what can make them crackle, and what to change
+      local [check] [--json]  Can I cast or print here? Chromecast, AirPlay and printers on this network, whether it keeps devices apart, a device's own Wi-Fi, and what makes a cast stutter
+        [--quick]             Bonjour and the neighbour cache only, without the sweep or pings
 
     Awake & agents
       awake                 Keep the Mac awake until Ctrl-C; closing the lid sleeps it unless --lid-closed
@@ -697,6 +736,9 @@ struct KilobatCLI {
         [--agent claude]    One agent: claude, codex, cursor, gemini, aider…
         [--flagged]         Only first-time hosts, plain HTTP, uploads over 10 MB, bare addresses, paste, file-share and tunnel sites
         [--watch]           Record live in this terminal instead, without the app; nothing is saved
+      history forget <host> [--subdomains] [--json]  Remove a site from every history that names hosts: blocked
+        [--subdomains]      attempts, the agent network log, agent runs and Protection's notices; also www. and the rest
+      history clear --hour|--today|--all [--json]  Clear those histories for the last hour, today or everything
       agent-event <kind>    For an agent's hooks: start, working, waiting, done or failed
         [--agent name]      claude, codex, gemini…; found from the hook's process if left out
         [--session id]      Tells runs in one folder apart
@@ -711,9 +753,15 @@ struct KilobatCLI {
         [--proxy <url>]     Test through the proxy address the app uses by its own setting
         [--failed-at <time>]  When the app failed (14:05 or ISO 8601), kept beside the check's own time
         [--context container|vm|remote|provider]  Where the failing code runs; provider: a hosted service's own servers
-      down [service|host…] [--json]  Is it them or me? Public status pages of Slack, Zoom, GitHub and more
+        [--error <text>]    The error the app got, to recognise a service's own "not available in your region"
+                            A failure is also checked for a block on this network: one DNS-over-HTTPS question to
+                            Cloudflare (or Quad9, settings block-check-resolver), only while it's diagnosed
+      down [service|host…] [--json]  Is it them or me? Public status pages of Slack, Zoom, GitHub and more,
+                            and whether each connects from here: blocked on this network, or not offered in your region
         [--all]             Every page Kilobat knows; with no service, those of the apps running now
         [--list]            The services, their pages and endpoints, without asking any
+      explain <process|host…> [--json]  What a process or host is, how much is normal, what breaks if you block it
+        [--process <name> --host <name>]  Ask about one connection: its process and its host together
       conditions [--json]   Metered, Low Data Mode, VPN, latency, battery and heat, with advice
 
     Control
@@ -732,6 +780,13 @@ struct KilobatCLI {
         [--all-networks]    Count every network, not just this one
       quota <bundle-id> --remove  Remove an app's quota
       quota --list [--json]  Quotas with use in the current cycle
+      pack [status] [--json]  Data packs such as a travel eSIM: what's left and when it runs out at the last 3 days' pace
+      pack add <GB> <days|YYYY-MM-DD>  Add a pack that starts now, on this network unless --network says otherwise
+        [--network <name>]  A network Kilobat has seen, or text the names contain, such as iPhone; repeat for more
+        [--name <label>]    What to call it, such as "Japan eSIM"
+        [--start YYYY-MM-DD]  When it started, if not now
+      pack correct <GB-left>  Set what your carrier's app says is left; Kilobat counts this Mac only [--pack <name>]
+      pack end [--pack <name>]  End the pack now; it stays in the history
       updaters [--json]     Updaters paused on metered networks, update bytes that got through, apps that update inside
       updaters on|off       Pause updater helpers while the network is metered (on by default); the apps keep working
       uploads [--json]      Apps uploading a lot now: rate, sent so far, time left when the total is known; and held ones
@@ -743,6 +798,11 @@ struct KilobatCLI {
         [--minutes 1…1440]  Decide for a while instead
       block-host|unblock-host <domain|IP|CIDR>  Block for every app, *.example.com style
         [--app <id>]        Only for one app, as a connection rule
+      verdict <host> [--json]  Every rule that matches, in the filter's order, the one that decides, and how to change each
+        [--app <id>]        For this app (alone: the app's own rules)
+        [--port N]          The destination port
+        [--incoming]        An incoming connection
+      verdict --blocked [1…50]  The rules behind the latest blocked attempts, as the filter recorded them
       protect [status] [--json]  Protection: known threats, trackers in apps and the agent guard, with list status
       protect on|off        Turn threat blocking on or off (Pro; on by default with Pro)
         [--threats]         Malware, phishing and scam destinations, in every app
@@ -757,6 +817,7 @@ struct KilobatCLI {
     Setup
       open                  Open the native Mac app
       doctor                Check the app, filter and monitoring
+      doctor <url|host>     The same connection check as why
       completion [shell]    Print a zsh, bash or fish completion script
       mcp                   MCP server for AI agents over stdio
       update                Update a Homebrew install
@@ -772,6 +833,7 @@ struct KilobatCLI {
       devices [--all] [--bonjour] [--json]  Local neighbor cache: new, known or unknown on this network
       devices name <MAC> <name>           Name a device; an empty name removes it
       devices mark <MAC> mine|unknown|ignored  Answer for a new device, as the app's alert does
+      devices type <MAC> <type>|auto      Set a device's type (camera, tv, speaker, printer, …); auto goes back to Kilobat's reading
       interfaces [--json]                 Separate physical / VPN counters
       trace <host>                        Bounded 12-hop route probe
         [--rounds 2…10]                   Trace several times, 3 probes a hop, and show each hop's loss and delay

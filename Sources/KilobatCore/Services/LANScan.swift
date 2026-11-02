@@ -4,8 +4,9 @@ import Darwin
 /// A light look at who is on the local network. macOS's neighbour cache only holds devices this Mac talked to, so a
 /// sweep first sends one empty UDP datagram to the discard port of each address in the Mac's own subnet (254 at
 /// most, a few milliseconds apart): the Mac's ARP request for each address is what fills the cache, and nothing is
-/// expected back. Names come from the router's DNS and Bonjour, asked only about devices not seen before. Nothing
-/// leaves the local network.
+/// expected back. Names come from the router's DNS and Bonjour, asked only about devices not seen before. What each
+/// device is comes from the Bonjour services it announces and its UPnP description (`signals`). Nothing leaves the
+/// local network.
 public enum LANScan {
     public struct Result: Sendable {
         public let rows: [LANDevice]
@@ -15,8 +16,9 @@ public enum LANScan {
     }
 
     /// Sweeps when asked, reads the neighbour cache on the router's interface (`interface` when the cache doesn't have
-    /// the router yet), and names the devices `known` doesn't contain.
-    public static func run(gateway: String?, interface fallback: String?, sweep: Bool, known: Set<String>) async -> Result {
+    /// the router yet), and names the devices `known` doesn't contain. With `described`, it also browses Bonjour and
+    /// asks UPnP who is there, fetching the UPnP descriptions of devices not in `described` (eight at most).
+    public static func run(gateway: String?, interface fallback: String?, sweep: Bool, known: Set<String>, described: Set<String>? = nil) async -> Result {
         var rows = await ExpertTools.devices()
         guard let interface = gateway.flatMap({ gateway in rows.first { $0.address == gateway }?.interface }) ?? fallback else { return Result(rows: rows, sightings: [], router: nil) }
         if sweep, let subnet = subnet(interface: interface) {
@@ -27,6 +29,8 @@ public enum LANScan {
         var sightings = sightings(rows, interface: interface, own: ownMACs())
         let router = gateway.flatMap { gateway in rows.first { $0.address == gateway }.flatMap { MACAddress.normalized($0.mac) } }
         let unnamed = sightings.indices.filter { !known.contains(sightings[$0].mac) }.prefix(12)
+        async let announced: [BonjourService] = described == nil ? [] : BonjourBrowse.run()
+        async let replies: [SSDPDiscovery.Reply] = described == nil ? [] : SSDPDiscovery.search()
         await withTaskGroup(of: (Int, String?).self) { group in
             for (offset, index) in unnamed.enumerated() {
                 let address = sightings[index].address
@@ -38,7 +42,32 @@ public enum LANScan {
             }
             for await (index, name) in group { sightings[index].hostname = name }
         }
+        if let described {
+            let services = BonjourBrowse.byAddress(await announced), ssdp = await replies
+            let descriptions = await describe(ssdp, sightings: sightings, skip: described)
+            for index in sightings.indices {
+                let address = sightings[index].address
+                let targets = ssdp.filter { $0.address == address }.compactMap(\.target)
+                sightings[index].signals = DeviceSignals.from(services: services[address] ?? [], upnp: descriptions[address], targets: targets)
+            }
+        }
         return Result(rows: rows, sightings: sightings, router: router)
+    }
+
+    /// The UPnP descriptions of the devices that replied, by address, apart from those whose MAC is in `skip`.
+    static func describe(_ replies: [SSDPDiscovery.Reply], sightings: [DeviceSighting], skip: Set<String>) async -> [String: UPnPDescription] {
+        var locations: [String: String] = [:]
+        for sighting in sightings where !skip.contains(sighting.mac) {
+            if let location = replies.first(where: { $0.address == sighting.address && $0.location != nil })?.location { locations[sighting.address] = location }
+        }
+        return await withTaskGroup(of: (String, UPnPDescription?).self) { group in
+            for (address, location) in locations.sorted(by: { $0.key < $1.key }).prefix(8) {
+                group.addTask { (address, await SSDPDiscovery.describe(location, address: address)) }
+            }
+            var out: [String: UPnPDescription] = [:]
+            for await (address, description) in group { if let description { out[address] = description } }
+            return out
+        }
     }
 
     /// The cache's entries on `interface`, without this Mac's own addresses, broadcast and multicast.

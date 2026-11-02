@@ -58,7 +58,7 @@ public extension SupportReport {
                             String(localized: "router \(Self.ms(latency.routerMedianMs))", comment: "Median latency to the router, in the provider report"),
                             String(localized: "internet \(Self.ms(latency.internetMedianMs)) (p95 \(Self.ms(latency.internetP95Ms)))", comment: "Median and 95th-percentile internet latency, in the provider report"),
                             String(localized: "DNS \(Self.ms(latency.dnsMedianMs))", comment: "Median DNS lookup time, in the provider report")]
-                           + [latency.lossPercent.map { String(localized: "loss \(String(format: "%.1f", $0))%", comment: "Average ping loss, in the provider report") }].compactMap { $0 }).joined(separator: " · ")]
+                           + [latency.lossPercent.map { String(localized: "loss \(String(format: "%.1f", locale: Locale.current, $0))%", comment: "Average ping loss, in the provider report") }].compactMap { $0 }).joined(separator: " · ")]
         }
         if !outages.isEmpty {
             lines += ["", String(localized: "Outages:", comment: "A heading in the provider report")] + outages.map { "  \($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute())) – \($0.end.formatted(date: .omitted, time: .shortened)) (\(Self.minutes($0.minutes)))" }
@@ -94,7 +94,7 @@ public extension SupportReport {
         lines += findings.map { "- " + $0 }
         if let latency {
             lines += ["", "## Latency", "", "| Router | Internet | Internet p95 | DNS | Loss | Checks |", "|---|---|---|---|---|---|",
-                      "| \(Self.ms(latency.routerMedianMs)) | \(Self.ms(latency.internetMedianMs)) | \(Self.ms(latency.internetP95Ms)) | \(Self.ms(latency.dnsMedianMs)) | \(latency.lossPercent.map { String(format: "%.1f%%", $0) } ?? "—") | \(latency.checks) |"]
+                      "| \(Self.ms(latency.routerMedianMs)) | \(Self.ms(latency.internetMedianMs)) | \(Self.ms(latency.internetP95Ms)) | \(Self.ms(latency.dnsMedianMs)) | \(latency.lossPercent.map { String(format: "%.1f%%", locale: Locale.current, $0) } ?? "—") | \(latency.checks) |"]
         }
         if !outages.isEmpty {
             lines += ["", "## Outages", "", "| Started | Ended | Length |", "|---|---|---|"]
@@ -137,8 +137,8 @@ public extension SupportReport {
             body += "<section><h2>\(esc(String(localized: "Latency")))</h2><div class=\"stats\">"
             for (label, value) in [(String(localized: "Router"), Self.ms(latency.routerMedianMs)), (String(localized: "Internet"), Self.ms(latency.internetMedianMs)),
                                    (String(localized: "Internet p95", comment: "95th-percentile internet latency, in the provider report"), Self.ms(latency.internetP95Ms)),
-                                   ("DNS", Self.ms(latency.dnsMedianMs)), (String(localized: "Ping loss", comment: "Share of pings with no reply, in the provider report"), latency.lossPercent.map { String(format: "%.1f%%", $0) } ?? "—"),
-                                   (String(localized: "Checks", comment: "How many health checks the provider report covers"), "\(latency.checks)")] {
+                                   ("DNS", Self.ms(latency.dnsMedianMs)), (String(localized: "Ping loss", comment: "Share of pings with no reply, in the provider report"), latency.lossPercent.map { String(format: "%.1f%%", locale: Locale.current, $0) } ?? "—"),
+                                   (String(localized: "Checks", comment: "How many health checks the provider report covers"), latency.checks.formatted())] {
                 body += "<div><span>\(esc(label))</span><b>\(esc(value))</b></div>"
             }
             body += "</div>\(chart(latency))<p class=\"note\">\(esc(String(localized: "Median per hour. Blue: internet; violet: router; shaded: the internet was unreachable.", comment: "The provider report’s latency chart legend")))</p></section>"
@@ -151,7 +151,7 @@ public extension SupportReport {
         }
         if let starlink {
             body += "<section><h2>\(esc(String(localized: "Starlink dish log", comment: "A heading in the provider report")))</h2><div class=\"stats sides\">"
-            for side in StarlinkOutage.Side.allCases { body += "<div><span>\(esc(side.title))</span><b>\(esc(Self.seconds(starlink, side).map(StarlinkEvidence.length) ?? "0 s"))</b></div>" }
+            for side in StarlinkOutage.Side.allCases { body += "<div><span>\(esc(side.title))</span><b>\(esc(Self.seconds(starlink, side).map(StarlinkEvidence.length) ?? StarlinkEvidence.length(0)))</b></div>" }
             body += "</div><table><tr><th>\(esc(String(localized: "Started", comment: "When an outage started")))</th><th>\(esc(String(localized: "Length", comment: "How long an outage lasted")))</th><th>\(esc(String(localized: "Cause", comment: "Why the Starlink dish was offline, in the provider report")))</th></tr>"
             body += starlink.outages.suffix(20).map { "<tr><td>\(esc($0.start.formatted(.dateTime.weekday(.abbreviated).hour().minute().second())))</td><td>\(esc(StarlinkEvidence.length($0.seconds)))</td><td>\(esc(Self.cause($0)))</td></tr>" }.joined()
             body += "</table><p class=\"note\">\(esc(String(localized: "From the dish’s own outage log. Your setup: obstructions, heat, power save, cable. Starlink’s network: no satellite in view, no reply from the ground station.", comment: "The provider report’s note under the Starlink outage log")))</p></section>"

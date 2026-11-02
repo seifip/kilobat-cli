@@ -80,6 +80,9 @@ import Observation
         record(ended)
     }
 
+    /// The reverse DNS name already looked up for an address, if any; hotspot throttling names video by it too.
+    public func reverseName(_ address: String) -> String? { reverse[address] ?? nil }
+
     /// The Mac is going to sleep or the monitor stopped: transfers in progress end here.
     public func pause() { record(tracker.finish()); network = nil }
 

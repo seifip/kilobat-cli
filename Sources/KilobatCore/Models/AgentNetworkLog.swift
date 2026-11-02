@@ -192,6 +192,18 @@ public struct AgentLogFile: Codable, Equatable, Sendable {
     public static var url: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/agent-network-log.json")
     }
+    /// Clears a period or forgets a site in the saved log, for the command line while the app isn't running.
+    @discardableResult public static func erase(_ action: HistoryAction, at url: URL = AgentLogFile.url, now: Date = Date()) throws -> Int {
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        var file = try decoder.decode(AgentLogFile.self, from: Data(contentsOf: url))
+        var past = Set(file.pastHosts)
+        let removed = HistoryEraser.apply(action, to: &file.sessions, pastHosts: &past, now: now)
+        guard removed > 0 else { return 0 }
+        file.pastHosts = past.sorted()
+        try file.data().write(to: url, options: [.atomic])
+        return removed
+    }
     public static func load(_ url: URL = AgentLogFile.url) -> AgentLogFile? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601

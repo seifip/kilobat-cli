@@ -70,6 +70,8 @@ import Observation
         file = directory?.appendingPathComponent(Self.fileName)
         if let file, let saved: Saved = StoredJSON.read(file) {
             records = saved.networks; switches = saved.switches; applied = saved.applied; current = saved.current
+            // Records from before the history: start it from the runs they kept.
+            for index in records.indices where records[index].tallies == nil { records[index].tallies = FastestDNS.tallies(from: records[index].runs, calendar: calendar) }
         }
     }
     /// Kilobat's own folder; in a screenshot run (KILOBAT_SNAPSHOT) nothing is read, written, measured or switched.
@@ -113,13 +115,16 @@ import Observation
         let preferences = preferences() ?? SavedPreferences()
         let index = context.network.map { record(network: $0, name: context.name, now: now) }
 
-        // The watchdog first: Kilobat's own change goes when lookups stop working through it.
+        // The watchdog first: Kilobat's own change goes when lookups stop working through it, to the person's
+        // fallback when there's one that works, else to the network's own.
         if let applied, applied.network == context.network {
             var answered: Bool?
             if !context.lookupWorked, context.networkUp, let server = applied.servers.first { answered = await probe.lookup("example.com", server: server).answered }
             if watchdog.observe(applied: true, lookupWorked: context.lookupWorked, resolverAnswered: answered, networkUp: context.networkUp) {
                 if let index { records[index].failedUntil[applied.resolver] = now.addingTimeInterval(FastestDNS.failurePause) }
-                await revert(.watchdog, now: now)
+                if let index, let fallback = usableFallback(index: index, preferences: preferences, now: now), fallback.id != applied.resolver {
+                    await useFallback(fallback, context: context, index: index, now: now)
+                } else { await revert(.watchdog, now: now) }
             }
         } else { _ = watchdog.observe(applied: false, lookupWorked: true, resolverAnswered: nil, networkUp: true) }
 
@@ -135,7 +140,8 @@ import Observation
         let failed = index.map { records[$0].failed(at: now) } ?? []
         let situation = FastestDNS.Situation(network: context.network, enabled: context.network.map(preferences.fastestDNSEnabled(on:)) ?? false,
                                              pro: allowed(), helper: applier?.available ?? false, vpn: context.moment.vpn, managed: await isManaged(now: now),
-                                             portal: context.moment.portal, serviceServers: servers, applied: applied, verdict: verdict, failed: failed)
+                                             portal: context.moment.portal, serviceServers: servers, applied: applied, verdict: verdict, failed: failed,
+                                             fallback: index.flatMap { usableFallback(index: $0, preferences: preferences, now: now) })
         await act(FastestDNS.plan(situation), context: context, now: now)
 
         wait = FastestDNS.wait(context.moment, runs: index.map { records[$0].runs } ?? [], now: now)
@@ -148,15 +154,60 @@ import Observation
         case .hold(let reason): hold = reason
         case .forget: applied = nil; hold = .ownDNS
         case .revert(let reason): await revert(reason, now: now); hold = nil
+        case .fallback(let choice):
+            guard let network = context.network, let index = records.firstIndex(where: { $0.network == network }) else { return }
+            await useFallback(choice, context: context, index: index, now: now)
         case .apply(let choice):
             guard let network = context.network, let service = context.service, let applier, !acting, !inert else { return }
             acting = true; defer { acting = false }
+            let from = applied?.resolver ?? DNSResolverChoice.network.id
             do {
                 try await applier.apply(servers: choice.servers, service: service)
                 applied = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers, gateway: context.gateway, date: now)
-                log(DNSSwitch(date: now, network: network, networkName: context.name, from: DNSResolverChoice.network.id, to: choice.id, reason: .fastest))
+                watchdog = FastestDNS.Watchdog()
+                log(DNSSwitch(date: now, network: network, networkName: context.name, from: from, to: choice.id, reason: .fastest))
                 hold = .applied; error = nil
             } catch { self.error = error.localizedDescription }
+        }
+    }
+
+    /// The person's fallback on this network now: set, not left out, not failing in the latest run, and not paused here.
+    private func usableFallback(index: Int, preferences: SavedPreferences, now: Date) -> DNSResolverChoice? {
+        guard let choice = FastestDNS.fallback(preferences.dnsFallback, excluded: preferences.dnsExcludedSet, latest: records[index].runs.last),
+              !records[index].failed(at: now).contains(choice.id) else { return nil }
+        return choice
+    }
+
+    /// Moves to the fallback, from Kilobat's own change or from automatic DNS. Only to a resolver that answers Kilobat's
+    /// own lookup right now; if it doesn't, or the change doesn't take, it's paused here like a failed pick and automatic
+    /// DNS goes back, so the Mac is never left on a resolver that isn't answering.
+    private func useFallback(_ choice: DNSResolverChoice, context: Context, index: Int, now: Date) async {
+        guard let network = context.network, let service = applied?.service ?? context.service, let applier, !acting, !inert else { return }
+        guard applier.available else { await revert(.watchdog, now: now); return }
+        let answers: Bool
+        if let server = choice.servers.first { answers = await probe.lookup("example.com", server: server).answered } else { answers = false }
+        guard answers else {
+            records[index].failedUntil[choice.id] = now.addingTimeInterval(FastestDNS.failurePause)
+            if applied != nil { await revert(.watchdog, now: now) } else { hold = .failedRecently }
+            return
+        }
+        let from = applied?.resolver ?? DNSResolverChoice.network.id
+        acting = true
+        do {
+            try await applier.apply(servers: choice.servers, service: service)
+            acting = false
+            applied = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers,
+                                 gateway: context.gateway, date: now, fallback: true)
+            watchdog = FastestDNS.Watchdog()
+            log(DNSSwitch(date: now, network: network, networkName: context.name, from: from, to: choice.id, reason: .fallback))
+            hold = .onFallback; error = nil
+        } catch {
+            acting = false
+            records[index].failedUntil[choice.id] = now.addingTimeInterval(FastestDNS.failurePause)
+            let message = error.localizedDescription
+            // Whatever the service has now, automatic DNS is the safe place to leave it.
+            if applied != nil { await revert(.watchdog, now: now) } else { try? await applier.apply(servers: [], service: service) }
+            self.error = message
         }
     }
 
@@ -210,6 +261,7 @@ import Observation
             self.measuring = false
             guard !run.resolvers.isEmpty, let index = self.records.firstIndex(where: { $0.network == network }) else { return }
             self.records[index].runs = Array((self.records[index].runs + [run]).filter { run.date.timeIntervalSince($0.date) <= FastestDNS.window }.suffix(FastestDNS.keptRuns))
+            self.records[index].tallies = FastestDNS.tally(run, into: self.records[index].tallies ?? [], calendar: self.calendar)
             if self.current == network {
                 self.verdict = FastestDNS.decide(runs: self.records[index].runs, incumbent: self.records[index].choice, excluded: preferences.dnsExcludedSet,
                                                  calendar: self.calendar)

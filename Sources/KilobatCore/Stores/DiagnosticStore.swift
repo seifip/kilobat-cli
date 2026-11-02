@@ -43,6 +43,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let router = RouterWatch()
     /// Off in Lite, which has no router check-up: then no check is kept for it.
     public var watchesRouter = true
+    /// Which mesh node or access point the Mac is on, and whether a much closer one is in range.
+    public let nodes = NodeWatch()
+    /// Off in Lite, which doesn't scan in the background.
+    public var watchesNodes = true
     /// Fastest DNS: quiet resolver runs per network and, when the person turns it on (Pro), the switch on joining.
     public let fastestDNS = FastestDNSWatch()
     /// Off in Lite, which has neither the panel nor Kilobat's helper.
@@ -53,6 +57,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let survey = SurveyJournal()
     /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
     public let knownDevices = DeviceRegistry()
+    /// Connect your router: every device's usage from the router's own counters (Pro).
+    public let homeUsage = HomeUsageStore()
     public var radio: RadioSample?
     public var networks: [NearbyNetwork] = []
     public var signalHistory: [Double] = []
@@ -103,6 +109,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let bluetooth = BluetoothState()
     /// Bluetooth headphones playing, and what on the Wi-Fi side can make them crackle.
     public let bluetoothAudio = BluetoothAudioWatch()
+    /// "Can I cast or print here?" for this network, and the device's own Wi-Fi the Mac may be on.
+    public let localReach = LocalReachWatch()
+    /// AirPlay or a cast tab, and what on the Mac's side can make it stutter.
+    public let casting = CastingWatch()
     private let probe = DiagnosticProbe()
     private let location = CLLocationManager()
     private var radioTask: Task<Void, Never>?
@@ -117,7 +127,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         // Every switch lands in History beside VPN and outage events.
         fastestDNS.onSwitch = { [weak self] change in
             let to = DNSResolverChoice.from(id: change.to)?.name ?? change.to, why = FastestDNS.describe(change.reason)
-            let detail = change.reason == .fastest ? String(localized: "Kilobat switched DNS to \(to) (\(why)).", comment: "History: fastest DNS switch; resolver and reason")
+            let detail = change.to != DNSResolverChoice.network.id ? String(localized: "Kilobat switched DNS to \(to) (\(why)).", comment: "History: fastest DNS switch; resolver and reason")
                                                    : String(localized: "Kilobat put the network’s own DNS back (\(why)).", comment: "History: fastest DNS switched back; the reason")
             self?.journal.record(kind: "DNS", detail: detail, network: change.networkName, date: change.date)
         }
@@ -230,7 +240,12 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let other = await secondary
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
         await checkPortal(&sample, internetFailed: fallback == false)
+        if sample.wiredInterface == nil {
+            let reachable = sample.internet.average != nil || other.average != nil || fallback == true
+            sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable)
+        }
         snapshot = sample; onSnapshot?(sample)
+        localReach.observe(sample, portal: portal.record != nil)
         await refreshExit()
         if !sleeping {
             journal.ingest(sample, secondary: other, httpReachable: fallback, interval: Double(max(60, checkInterval)))
@@ -238,8 +253,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             let busy = speedRunning || RouterWatch.busy(checkBytes: before.flatMap { b in after.map { $0 >= b ? $0 - b : 0 } } ?? 0, checkSeconds: finished.timeIntervalSince(started),
                                                         sinceBytes: since?.0, sinceSeconds: since?.1)
             lastPortBytes = after.map { ($0, finished) }
-            if watchesRouter { await router.observe(sample, busy: busy, interval: Double(max(60, checkInterval))) }
-            if watchesDNS { await fastestDNS.observe(dnsContext(sample, secondary: other, busy: busy)) }
+            // A device's own Wi-Fi has no internet by design: nothing there to judge a router, mesh or DNS by.
+            let device = sample.setupNetwork != nil
+            if watchesRouter && !device { await router.observe(sample, busy: busy, interval: Double(max(60, checkInterval))) }
+            if watchesNodes && !device { await nodes.observe(sample, locationAllowed: locationAllowed) }
+            if watchesDNS && !device { await fastestDNS.observe(dnsContext(sample, secondary: other, busy: busy)) }
             if automaticTrace, let incident = journal.events.last(where: { $0.kind == "Unreachable" && $0.end == nil }), tracedIncident != incident.id {
                 tracedIncident = incident.id
                 Task { [weak self] in
@@ -368,13 +386,13 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public static func report(_ sample: DiagnosticSnapshot, speed: SpeedTestResult? = nil) -> String {
         let unavailable = String(localized: "Unavailable")
-        func ms(_ number: Double?) -> String { number.map { String(format: "%.1f ms", $0) } ?? unavailable }
+        func ms(_ number: Double?) -> String { number.map { String(format: "%.1f ms", locale: Locale.current, $0) } ?? unavailable }
         let radio = sample.radio, health = sample.health.rawValue
         let network = radio.ssid ?? String(localized: "Name unavailable (Location permission may be required)")
-        let signal = radio.rssi.map { "\($0) dBm" } ?? unavailable, noise = radio.noise.map { "\($0) dBm" } ?? unavailable, snr = radio.snr.map { "\($0) dB" } ?? unavailable
-        let rate = radio.transmitMbps.map { String(format: "%.0f Mbps", $0) } ?? unavailable
-        let channel = radio.channel.map(String.init) ?? unavailable, band = radio.band ?? String(localized: "Unknown band")
-        let router = sample.gateway ?? String(localized: "Unknown"), loss = sample.internet.lossPercent.map { "\($0)%" } ?? unavailable
+        let signal = radio.rssi.map { $0.formatted() + " dBm" } ?? unavailable, noise = radio.noise.map { $0.formatted() + " dBm" } ?? unavailable, snr = radio.snr.map { $0.formatted() + " dB" } ?? unavailable
+        let rate = radio.transmitMbps.map { String(format: "%.0f Mbps", locale: Locale.current, $0) } ?? unavailable
+        let channel = radio.channel.map { $0.formatted() } ?? unavailable, band = radio.band ?? String(localized: "Unknown band")
+        let router = sample.gateway ?? String(localized: "Unknown"), loss = sample.internet.lossPercent.map { $0.formatted(.percent.scale(1)) } ?? unavailable
         let resolvers = sample.dnsServers.joined(separator: ", ")
         let portal = sample.captivePortal.map { $0 ? String(localized: "Suspected", comment: "A captive portal") : String(localized: "Not detected", comment: "A captive portal") } ?? String(localized: "Unknown")
         var lines = [String(localized: "Kilobat · Network diagnostic"), ISO8601DateFormatter().string(from: sample.date),
@@ -390,7 +408,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                      String(localized: "DNS lookup (example.com): \(ms(sample.dnsMilliseconds))"), String(localized: "Resolvers: \(resolvers)"),
                      String(localized: "Captive portal: \(portal)")]
         if let speed {
-            let down = String(format: "%.1f", speed.downloadMbps), up = String(format: "%.1f", speed.uploadMbps), bufferbloat = speed.bufferbloat
+            let down = String(format: "%.1f", locale: Locale.current, speed.downloadMbps), up = String(format: "%.1f", locale: Locale.current, speed.uploadMbps), bufferbloat = speed.bufferbloat
             lines += [String(localized: "Speed: \(down) Mbps down / \(up) Mbps up"), String(localized: "Bufferbloat: \(bufferbloat) · added latency \(ms(speed.addedLatency))")]
         }
         // The advice is stored English (the app matches it by its opening words); the app's catalog translates it.

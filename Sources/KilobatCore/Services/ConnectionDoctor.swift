@@ -45,6 +45,8 @@ public struct DoctorStep: Codable, Identifiable, Sendable {
         case "Provider": String(localized: "Provider", comment: "Connection check layer")
         case "Status page": String(localized: "Status page", comment: "Connection check layer: the service's public status page")
         case "Wi-Fi sign-in": String(localized: "Wi-Fi sign-in", comment: "Connection check layer: a hotel or café Wi-Fi's sign-in page")
+        case "Network block": String(localized: "Network block", comment: "Connection check layer: whether the network the Mac is on blocks the site")
+        case "Region": String(localized: "Region", comment: "Connection check layer: whether the service refuses by where the connection appears to be")
         default: layer
         }
     }
@@ -96,6 +98,8 @@ public struct DoctorReport: Codable, Sendable {
     public var failedAt: Date? = nil
     /// What the status pages of the host's or app's services said, when they map to one Kilobat knows.
     public var services: [ServiceStatus]? = nil
+    /// A block on this network, or the service refusing this region, when the measurements show one.
+    public var block: NetworkBlock? = nil
     public var ok: Bool { !steps.contains { $0.status == .failed } }
 }
 
@@ -115,10 +119,12 @@ public enum ConnectionDoctor {
         /// Protection's switches and lists, as the filter has them.
         public let protection: ProtectionSettings
         public let index: ProtectionIndex?
+        /// The current network's key, so a block check can name the kind of network (home, public Wi-Fi) from what Kilobat learned.
+        public var networkKey: String?
         public init(preferences: SavedPreferences, filterActive: Bool, budgetReached: Bool, metered: Bool = false, killSwitch: KillSwitchPolicy = KillSwitchPolicy(),
-                    protection: ProtectionSettings = ProtectionSettings(), index: ProtectionIndex? = nil) {
+                    protection: ProtectionSettings = ProtectionSettings(), index: ProtectionIndex? = nil, networkKey: String? = nil) {
             self.preferences = preferences; self.filterActive = filterActive; self.budgetReached = budgetReached; self.metered = metered; self.killSwitch = killSwitch
-            self.protection = protection; self.index = index
+            self.protection = protection; self.index = index; self.networkKey = networkKey
         }
     }
 
@@ -225,10 +231,71 @@ public enum ConnectionDoctor {
 
     /// `proxy` is a proxy address the app uses by its own setting, which Kilobat can't read; the request goes through it.
     /// `failedAt` is when the app failed, as the person says; it's recorded, and a passing check made later says it can't see that moment.
-    public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
+    /// `appError` is the error the app got, as the person or agent pastes it: a service's own regional refusal is recognised from it.
+    public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil,
+                           appError: String? = nil) async -> DoctorReport {
         let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt)
         guard !report.steps.isEmpty else { return report }
-        return await withServiceStatus(await withPortal(await withProxyApp(report)))
+        return await withBlockCheck(await withServiceStatus(await withPortal(await withProxyApp(report))), target: target, policy: policy, appError: appError)
+    }
+
+    /// Why a block check doesn't apply, or nil when it does. A sign-in page, Kilobat's own rules, a request made elsewhere,
+    /// this Mac's own proxy or tunnel, split DNS and an outage the status page reports each explain a failure better.
+    enum BlockCheck: Equatable { case network, region }
+    static func blockChecks(_ report: DoctorReport, appError: String? = nil) -> Set<BlockCheck> {
+        func step(_ layer: String) -> DoctorStep? { report.steps.first { $0.layer == layer } }
+        guard step("Wi-Fi sign-in") == nil, step("Kilobat rules")?.status != .failed, step("Context") == nil, step("Provider") == nil else { return [] }
+        if let worst = report.services?.map(\.state).max(), worst >= .partialOutage { return [] }
+        var checks: Set<BlockCheck> = []
+        let answered = report.hops.last?.status
+        if appError.flatMap(RegionRefusal.match) != nil || [400, 403, 451].contains(answered ?? 0)
+            || report.hops.contains(where: { hop in RegionRefusal.match(hop.url) != nil }) { checks.insert(.region) }
+        if let failed = report.steps.first(where: { $0.status == .failed }), ["DNS", "IPv4", "IPv6", "Secure connection", "Request"].contains(failed.layer),
+           !(failed.layer == "DNS" && failed.says(.privateResolver, "private resolver")) { checks.insert(.network) }
+        return checks
+    }
+
+    /// The block check, as one more layer that leads the verdict when it finds something. Its DNS-over-HTTPS question goes
+    /// only to the person's trusted resolver, and only here, while a failure is diagnosed.
+    static func withBlockCheck(_ report: DoctorReport, target: String, policy: Policy?, appError: String?) async -> DoctorReport {
+        let checks = blockChecks(report, appError: appError)
+        guard !checks.isEmpty, let url = requestURL(target.trimmingCharacters(in: .whitespacesAndNewlines)), let host = url.host?.lowercased() else { return report }
+        let service = ServiceTriggers.services(for: report).first
+        let status = service.flatMap { service in report.services?.first { $0.id == service.id } }
+        async let place = NetworkBlockCheck.place(networkKey: policy?.networkKey)
+        async let tunnel = NetworkBlockCheck.vpn()
+        async let scutil = CommandRunner.run("/usr/sbin/scutil", ["--dns"], timeout: 3)
+        let context = BlockContext(serviceID: service?.id, service: service?.name, status: status.flatMap { $0.state == .unknown ? nil : $0.state },
+                                   statusSentence: status?.sentence(notYou: false), scopedResolver: ConnectionProbe.resolver(for: host, in: await scutil.output)?.domain != nil,
+                                   vpn: await tunnel, place: await place)
+        var found: NetworkBlock?
+        if checks.contains(.region) {
+            let who = BlockContext(serviceID: context.serviceID, service: service?.owner ?? service?.name, status: context.status, vpn: context.vpn, place: context.place)
+            found = await NetworkBlockCheck.region(url, context: who, appError: appError)
+            if found != nil { found?.service = service?.name }
+        }
+        if found == nil, checks.contains(.network) {
+            let resolver = TrustedResolver.chosen(policy?.preferences ?? storedPreferences())
+            found = await NetworkBlockCheck.run(host: host, https: url.scheme != "http", port: url.port ?? (url.scheme == "http" ? 80 : 443), context: context, resolver: resolver)
+        }
+        guard let found else { return report }
+        return withBlock(report, found)
+    }
+
+    /// The finding as a layer, the verdict and what to do next.
+    static func withBlock(_ report: DoctorReport, _ block: NetworkBlock) -> DoctorReport {
+        var report = report
+        report.block = block
+        report.steps.append(DoctorStep(layer: block.state == .blocked ? "Network block" : "Region", status: .failed, detail: block.evidence.joined(separator: " ")))
+        report.verdict = block.summary
+        report.next = block.next
+        return report
+    }
+
+    /// The saved preferences, read without the app (the CLI, an intent). Nil when there are none.
+    static func storedPreferences() -> SavedPreferences? {
+        let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/preferences.json")
+        return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(SavedPreferences.self, from: $0) }
     }
 
     /// A failed check behind the Wi-Fi's sign-in page: that page is the cause, not DNS, the secure connection or the server.
@@ -867,6 +934,11 @@ public enum ConnectionDoctor {
     }
 
     /// The same decision the filter makes for this host and app (`FilterPolicy`), in words.
+    /// Kilobat's own rules, Protection or kill switch stop this host (for any app), as the filter would decide it now.
+    public static func kilobatBlocks(_ host: String, policy: Policy) -> Bool {
+        policy.filterActive && rules(host: host, port: "443", app: nil, policy: policy).status == .failed
+    }
+
     static func rules(host: String, port: String, app: String?, policy: Policy) -> DoctorStep {
         let preferences = policy.preferences, profile = preferences.profile.title
         let enforced = policy.filterActive ? "" : " " + String(localized: "The network filter is off, so it isn’t enforced right now.")
@@ -884,6 +956,7 @@ public enum ConnectionDoctor {
         case .filterOff, .unrestricted: return step(.ok, String(localized: "The Unrestricted profile allows everything."))
         case .killSwitch: return step(blocked, String(localized: "Your VPN is down, and Kilobat’s VPN kill switch blocks new connections until it’s back. Reconnect the VPN, or allow traffic for 5 minutes from Kilobat’s menu."))
         case .killSwitchExempt: return step(.ok, String(localized: "Your VPN is down and the kill switch blocks other apps, but this one is let through so the VPN can reconnect."))
+        case .killSwitchPaused, .siteAllowed: return step(.ok, String(localized: "Nothing in Kilobat blocks this."))
         case .connectionRule(let rule): return rule.allowed ? step(.ok, String(localized: "A connection rule allows this.")) : step(blocked, String(localized: "A connection rule in \(profile) blocks this."))
         case .blocklist(let entry): return step(blocked, String(localized: "\(host) matches \(entry) on your blocklist."))
         case .protection(let detail): return step(blocked, ProtectionText.doctor(detail))

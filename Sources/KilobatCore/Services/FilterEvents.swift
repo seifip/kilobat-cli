@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 /// Metadata only: no packet payloads, URLs, or DNS query contents.
 public struct FilterEvent: Codable, Identifiable, Sendable {
@@ -13,10 +12,53 @@ public struct FilterEvent: Codable, Identifiable, Sendable {
     public let via: String?
     /// Set when Protection blocked it: what kind of destination, which list, and the agent behind it.
     public let protection: ProtectionDetail?
+    /// Every rule that matched as the filter blocked it, and the one that decided (`FilterPolicy.trace`). Nil in
+    /// records from filters before the rule inspector, and when the filter blocked without its rules (no app identity).
+    public let trace: DecisionTrace?
     public init(id: UUID = UUID(), date: Date = Date(), app: String, endpoint: String, direction: String, reason: String, via: String? = nil,
-                protection: ProtectionDetail? = nil) {
+                protection: ProtectionDetail? = nil, trace: DecisionTrace? = nil) {
         self.id = id; self.date = date; self.app = app; self.endpoint = endpoint; self.direction = direction; self.reason = reason; self.via = via
-        self.protection = protection
+        self.protection = protection; self.trace = trace
+    }
+
+    /// Every destination that may identify this event in local history. The endpoint can be an IP even when a
+    /// matched rule retains a hostname; forgetting a site must consider those nondeciding rules too.
+    public var historyHosts: [String] {
+        var hosts: [String] = [], seen = Set<String>()
+        func add(_ value: String?) {
+            guard var value = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !value.isEmpty,
+                  value != "unknown endpoint" else { return }
+            if value.hasPrefix("*.") { value.removeFirst(2) }
+            guard !value.isEmpty, seen.insert(value).inserted else { return }
+            hosts.append(value)
+        }
+        if endpoint.hasPrefix("["), let close = endpoint.firstIndex(of: "]") {
+            add(String(endpoint[endpoint.index(after: endpoint.startIndex)..<close]))
+        } else if endpoint.filter({ $0 == ":" }).count == 1, let colon = endpoint.lastIndex(of: ":"),
+                  endpoint[endpoint.index(after: colon)...].allSatisfy(\.isNumber) {
+            add(String(endpoint[..<colon]))
+        } else {
+            add(endpoint)
+        }
+        add(protection?.host)
+        // Older filters recorded only a text reason. Preserve those host names during history clearing too.
+        if reason.hasPrefix("Blocklist: ") { add(String(reason.dropFirst("Blocklist: ".count))) }
+        if reason.hasPrefix("Destination rule: ") {
+            let target = String(reason.dropFirst("Destination rule: ".count).components(separatedBy: " · ")[0])
+            if target.filter({ $0 == ":" }).count == 1, let colon = target.lastIndex(of: ":"),
+               target[target.index(after: colon)...].allSatisfy(\.isNumber) {
+                add(String(target[..<colon]))
+            } else { add(target) }
+        }
+        for match in trace?.matches ?? [] {
+            switch match.reason {
+            case .connectionRule(let rule): add(rule.host)
+            case .protection(let detail): add(detail.host)
+            case .siteAllowed(let host), .blocklist(let host): add(host)
+            default: break
+            }
+        }
+        return hosts
     }
 }
 
@@ -109,19 +151,4 @@ public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
     func protectionDigest(reply: @escaping (String) -> Void)
     /// Hands the filter a new Protection index (`ProtectionIndex`); it checks the file, keeps it on its own disk and maps it.
     func installProtection(_ index: Data, reply: @escaping (Bool) -> Void)
-}
-
-public enum FilterSigning {
-    public static func team() -> String? {
-        var code: SecCode?, staticCode: SecStaticCode?, info: CFDictionary?
-        guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
-              SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
-              SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-              let values = info as? [String: Any], let team = values[kSecCodeInfoTeamIdentifier as String] as? String,
-              team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return nil }
-        return team
-    }
-    public static func requirement(team: String, bundle: String) -> String {
-        "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(bundle)\""
-    }
 }

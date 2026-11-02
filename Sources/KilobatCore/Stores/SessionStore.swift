@@ -707,6 +707,36 @@ public enum AgentCatalog {
         lid?.request(request)
     }
 
+    /// Clears the destinations of sessions in a period, or forgets a site in every session, running ones included.
+    @discardableResult public func erase(_ action: HistoryAction, now: Date = Date()) throws -> Int {
+        var removed = HistoryEraser.apply(action, to: &history, now: now)
+        for (key, session) in agents {
+            var one = [session]
+            removed += HistoryEraser.apply(action, to: &one, now: now)
+            agents[key] = one[0]
+        }
+        if let current = awake {
+            var one = [current]
+            removed += HistoryEraser.apply(action, to: &one, now: now)
+            awake = one[0]
+        }
+        if let directory {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONEncoder().encode(history).write(to: directory.appendingPathComponent("sessions.json"), options: .atomic)
+        }
+        return removed
+    }
+
+    /// The same on sessions.json, for the command line while the app isn't running.
+    @discardableResult public static func erase(_ action: HistoryAction, directory: URL, now: Date = Date()) throws -> Int {
+        let url = directory.appendingPathComponent("sessions.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        var saved = try JSONDecoder().decode([WorkSession].self, from: Data(contentsOf: url))
+        let removed = HistoryEraser.apply(action, to: &saved, now: now)
+        if removed > 0 { try JSONEncoder().encode(saved).write(to: url, options: .atomic) }
+        return removed
+    }
+
     private func persist() {
         guard let directory else { return }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

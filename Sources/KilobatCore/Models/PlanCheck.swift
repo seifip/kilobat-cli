@@ -252,6 +252,6 @@ public struct PlanSummary: Codable, Sendable, Equatable {
         return line
     }
 
-    public static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", value) }
-    public static func percent(_ value: Double) -> String { String(format: "%.0f%%", value) }
+    public static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", locale: Locale.current, value) }
+    public static func percent(_ value: Double) -> String { String(format: "%.0f%%", locale: Locale.current, value) }
 }

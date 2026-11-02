@@ -29,6 +29,16 @@ public enum BluetoothAudioProbe {
                                             sampleRate: rate > 0 ? rate : nil, inputTransport: inputTransport == 0 ? nil : inputTransport, inputRunning: inputRunning != 0)
     }
 
+    /// The sound output's transport type and name, whatever it is: 'airp' says the Mac plays to an AirPlay receiver.
+    public static func defaultOutput() -> (transport: UInt32, name: String)? {
+        var device = AudioObjectID(0), transport: UInt32 = 0
+        guard read(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, &device), device != 0,
+              read(device, kAudioDevicePropertyTransportType, &transport) else { return nil }
+        var name: Unmanaged<CFString>?
+        let label = read(device, kAudioObjectPropertyName, &name) ? (name?.takeRetainedValue() as String?) : nil
+        return (transport, label ?? "")
+    }
+
     private static func read<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ value: inout T) -> Bool {
         var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size = UInt32(MemoryLayout<T>.size)

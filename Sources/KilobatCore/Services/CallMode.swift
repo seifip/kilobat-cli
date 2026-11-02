@@ -45,8 +45,8 @@ public enum CallMode {
     /// The longest Kilobat holds anything, in case a call never seems to end.
     public static let limit: TimeInterval = 3 * 60 * 60
 
-    /// Who holds a process: a call, or a Focus filter. Each lets go only of its own, and a process resumes once nobody holds it.
-    public static let call = "call", focus = "focus"
+    /// Who holds a process: a call, a Focus filter, an OBS stream a cast to a TV or cloud gaming. Each lets go only of its own, and a process resumes once nobody holds it.
+    public static let call = "call", focus = "focus", stream = "stream", cast = "cast", cloudGaming = "cloudGaming"
 
     /// One suspended process, with its start time so a reused PID is never resumed by mistake.
     public struct Held: Codable, Sendable, Equatable {

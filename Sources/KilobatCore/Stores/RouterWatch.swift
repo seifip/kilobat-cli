@@ -67,6 +67,8 @@ import Observation
         }
         guard let index, let check else { return }
         current = records[index].id
+        if records[index].since == nil { records[index].since = records[index].hours.first?.start ?? now }
+        if records[index].maker == nil, let mac = records[index].mac { records[index].maker = vendor(mac) }
         let hour = records[index].draft?.start
         records[index].add(check, calendar: calendar)
         if hour != records[index].draft?.start || now.timeIntervalSince(lastSave) >= 600 { update(now: now) }
@@ -77,6 +79,15 @@ import Observation
         guard let current, let index = records.firstIndex(where: { $0.id == current }) else { return }
         records[index].restarted(at: date, source: .button)
         update(now: date)
+    }
+
+    /// A connected router's uptime: a new boot is a restart Kilobat knows for certain, even one it didn't see.
+    public func routerUptime(_ uptime: TimeInterval, network: String, at date: Date = Date()) {
+        guard let index = records.indices.filter({ records[$0].network == network }).max(by: { records[$0].lastSeen < records[$1].lastSeen }) else { return }
+        let before = records[index].booted
+        let restarted = records[index].reported(uptime: uptime, at: date)
+        if restarted { update(now: date) }
+        else if before == nil || date.timeIntervalSince(lastSave) >= 600 { refresh(now: date); save(now: date) }
     }
 
     /// Judges restarts and slowdowns, then saves.
@@ -116,8 +127,30 @@ import Observation
             records[index].name = name
             return index
         }
-        records.append(RouterRecord(network: network, mac: mac, name: name, lastSeen: now))
+        var record = RouterRecord(network: network, mac: mac, name: name, lastSeen: now)
+        record.since = now
+        records.append(record)
         return records.count - 1
+    }
+
+    /// The maker for router check-up's firmware reminder, once the router's hardware address is known.
+    @ObservationIgnored public var vendor: (String) -> String? = { DeviceVendors.shared.vendor(for: $0) }
+
+    /// The router Kilobat recognised on this network (Connect your router's detection), when its maker isn't known yet.
+    public func identified(network: String, maker: String) {
+        for index in records.indices where records[index].network == network && records[index].maker == nil { records[index].maker = maker }
+        refresh(now: Date())
+    }
+
+    /// The firmware was checked: a connected router reported it, or the person said they looked. The reminder waits another 3 months.
+    public func firmwareChecked(network: String? = nil, at date: Date = Date()) {
+        guard let network = network ?? current.flatMap({ id in records.first { $0.id == id }?.network }) else { return }
+        let before = records.map(\.firmwareChecked)
+        for index in records.indices where records[index].network == network { records[index].firmwareChecked = date }
+        // A connected router reports on every read; save only when the reminder's state can change.
+        if zip(before, records.map(\.firmwareChecked)).contains(where: { old, _ in old.map { date.timeIntervalSince($0) > 86_400 } ?? true }) {
+            refresh(now: date); save(now: date)
+        }
     }
 
     /// Over 1 Mbit/s while the router was pinged, or 4 Mbit/s on average since the previous check: this Mac's own

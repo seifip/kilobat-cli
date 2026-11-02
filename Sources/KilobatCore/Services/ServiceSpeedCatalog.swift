@@ -74,6 +74,17 @@ public enum ServiceSpeedCatalog {
 
     public static func service(_ id: String) -> SpeedService? { services.first { $0.id == id } }
 
+    /// Video, for hotspot throttling's video limit: players that fetch ahead in bursts. Music and calls aren't here.
+    public static let videoServices: Set<String> = ["youtube", "netflix", "twitch", "disney", "prime-video"]
+    /// The video service a connection belongs to, by the host it asked for, the network its address is in, or its
+    /// reverse DNS name; nil for anything else.
+    public static func video(host: String?, reverse: String?, owner: String?) -> String? {
+        if let named = host.flatMap(service(forHost:)) { return videoServices.contains(named.id) ? named.id : nil }
+        if let owner, let network = services.first(where: { $0.networks.contains(owner) }), videoServices.contains(network.id) { return network.id }
+        if let named = reverse.flatMap(service(forHost:)), videoServices.contains(named.id) { return named.id }
+        return nil
+    }
+
     /// The service a host name belongs to; the longest matching domain wins.
     public static func service(forHost host: String) -> SpeedService? {
         let host = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))

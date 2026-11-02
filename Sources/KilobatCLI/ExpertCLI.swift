@@ -32,6 +32,11 @@ import KilobatCore
                     throw CLIError("Kilobat hasn't recorded \(mac) on any network yet. Open Kilobat › Tools › Devices and choose Discover, then try again.")
                 }
                 print("✓ \(mac) marked as \(verdict == .mine ? "yours" : verdict == .unknown ? "unknown to you" : "ignored").")
+            case .type(let mac, let type):
+                guard registry.setType(type, mac: mac) else {
+                    throw CLIError("Kilobat hasn't recorded \(mac) on any network yet. Open Kilobat › Tools › Devices and choose Discover, then try again.")
+                }
+                print(type.map { "✓ \(mac) is now a \($0.name.lowercased())." } ?? "✓ \(mac) goes back to Kilobat's own reading of its type.")
             case .list(let all, let bonjour, let asJSON):
                 let rows = try await deviceListing(all: all, registry: registry)
                 let services = bonjour ? await ExpertTools.bonjour() : nil
@@ -40,7 +45,7 @@ import KilobatCore
                     if let services { try json(Output(devices: rows, bonjour: services)) } else { try json(rows) }
                 } else {
                     if rows.isEmpty { print("No devices in the neighbor cache. Devices appear after this Mac talks to them.") }
-                    for row in rows { print("\(row.address)\t\(row.mac)\t\(row.present ? row.interface : "away")\t\(row.name)\t\(row.status?.rawValue ?? "-")") }
+                    for row in rows { print("\(row.address)\t\(row.mac)\t\(row.present ? row.interface : "away")\t\(row.name)\t\(row.status?.rawValue ?? "-")\t\(row.type == .unknown ? "-" : row.typeLabel)") }
                     let fresh = rows.filter { $0.status == .new }.count
                     if fresh > 0 { print("\n\(fresh) new since Kilobat began watching. Answer with kilobat devices mark <MAC> mine|unknown|ignored.") }
                     if let services { print(services) }

@@ -330,6 +330,29 @@ struct SendLaterTests {
         #expect(status(pid) != UInt32(SSTOP) && CallMode.held(ledger: setup.ledger).isEmpty)
     }
 
+    @MainActor @Test func aDataPackHoldsBigUploadsUntilWiFiAndLeavesOnesSentByHand() throws {
+        let setup = try Setup(); defer { setup.finish() }
+        let pid = setup.child.processIdentifier
+        // The hotspot is on a pack that holds uploads; macOS doesn't call it metered, the pack does.
+        setup.traffic.osExpensive = false
+        var pack = try DataPack.make(name: "Trip", gb: 10, days: 30, start: Date().addingTimeInterval(-3_600), networks: DataPackNetworks(keys: ["hotspot": "Phone hotspot"]))
+        pack.holdUploads = true
+        setup.traffic.addPack(pack)
+        #expect(setup.traffic.metered)
+        setup.store.autoHold = { [traffic = setup.traffic] in traffic.currentPack?.holdUploads == true }
+        setup.upload(13)
+        #expect(setup.store.holds.first?.condition == .unmetered && status(pid) == UInt32(SSTOP))
+        #expect(setup.notices.last?.hasPrefix("Dropbox’s upload waits until an unmetered network") == true)
+        // Sent by hand: it isn't held again on this network.
+        #expect(setup.store.resume("Dropbox"))
+        setup.upload(14)
+        #expect(setup.store.holds.isEmpty && status(pid) != UInt32(SSTOP))
+        // Without the pack's setting nothing is held automatically.
+        setup.traffic.networkKey = "other"; setup.traffic.networkName = "Other hotspot"; setup.traffic.osExpensive = true
+        setup.upload(14)
+        #expect(setup.store.holds.isEmpty)
+    }
+
     @MainActor @Test func otherAppsOnlyHaveNewConnectionsRefused() throws {
         let setup = try Setup(id: "com.example.Uploader", name: "Uploader"); defer { setup.finish() }
         let pid = setup.child.processIdentifier

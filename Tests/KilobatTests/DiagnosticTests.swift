@@ -71,4 +71,47 @@ struct DiagnosticTests {
         #expect(strong.score == 100)
         #expect(strong.snr == 70)
     }
+    @Test func linkDetailsNameTheStandardSecurityAndPower() {
+        #expect(WiFiLink.standard(phyMode: 6, band: "5 GHz")! == ("Wi-Fi 6", "802.11ax"))
+        #expect(WiFiLink.standard(phyMode: 6, band: "6 GHz")!.name == "Wi-Fi 6E")
+        #expect(WiFiLink.standard(phyMode: 7, band: "6 GHz")!.name == "Wi-Fi 7")
+        #expect(WiFiLink.standard(phyMode: 3, band: "2.4 GHz")! == ("802.11g", "802.11g"))
+        #expect(WiFiLink.standard(phyMode: 0, band: nil) == nil)
+        #expect(WiFiLink.standard(phyMode: nil, band: "5 GHz") == nil)
+        #expect(WiFiLink.security(11)?.level == .strong)
+        #expect(WiFiLink.security(4)?.name == "WPA2 Personal")
+        #expect(WiFiLink.security(4)?.note == nil)
+        #expect(WiFiLink.security(0)?.level == .open)
+        #expect(WiFiLink.security(0)?.note != nil)
+        #expect(WiFiLink.security(1)?.level == .weak)
+        #expect(WiFiLink.security(2)?.level == .weak)
+        #expect(WiFiLink.security(3)?.level == .weak)
+        #expect(WiFiLink.security(8)?.level == .weak)
+        #expect(WiFiLink.security(14)?.level == .strong)
+        #expect(WiFiLink.security(Int.max) == nil)
+        #expect(WiFiLink.dBm(milliwatts: 100) == 20)
+        #expect(WiFiLink.dBm(milliwatts: 0) == nil)
+        #expect(WiFiLink.dBm(milliwatts: 50) == 17)
+        var radio = RadioSample(ssid: "Home", interface: "en0", rssi: -50, noise: -90, transmitMbps: 1200, channel: 37, band: "6 GHz")
+        radio.security = "WEP"
+        #expect(radio.securityInfo?.level == .weak)
+        #expect(WiFiLink.security(named: "WPA3 Personal")?.level == .strong)
+        #expect(WiFiLink.security(named: "Something new") == nil)
+    }
+    @Test func nearbyNetworkSecurityIsTheStrongestOffered() {
+        #expect(WiFiLink.strongest(supported: [11, 4]) == 13)
+        #expect(WiFiLink.strongest(supported: [11]) == 11)
+        #expect(WiFiLink.strongest(supported: [4, 3, 2]) == 4)
+        #expect(WiFiLink.strongest(supported: [0]) == 0)
+        #expect(WiFiLink.strongest(supported: [14, 0]) == 14)
+        #expect(WiFiLink.strongest(supported: []) == nil)
+    }
+    @Test func savedRadioSamplesWithoutLinkDetailsStillDecode() throws {
+        let old = #"{"ssid":"Home","interface":"en0","rssi":-58,"noise":-92,"transmitMbps":300,"channel":36,"band":"5 GHz"}"#
+        let radio = try JSONDecoder().decode(RadioSample.self, from: Data(old.utf8))
+        #expect(radio.standard == nil)
+        #expect(radio.securityInfo == nil)
+        let network = try JSONDecoder().decode(NearbyNetwork.self, from: Data(#"{"id":"a","ssid":"a","rssi":-40,"noise":-90,"channel":1,"band":"2.4 GHz","widthMHz":20}"#.utf8))
+        #expect(network.securityInfo == nil)
+    }
 }

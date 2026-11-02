@@ -69,7 +69,7 @@ public struct RouteHistory: Codable, Sendable {
         for hop in answering {
             guard let ms = hop.averageMs else { continue }
             if let before = previous, ms - before >= 30, endMs >= ms - 10 {
-                let rise = String(format: "%.0f", ms - before)
+                let rise = String(format: "%.0f", locale: Locale.current, ms - before)
                 if hop.ttl == 1 { return String(localized: "Delay rises at the first hop, the router: +\(rise) ms over the hop before, and stays up to the last hop that answers.") }
                 let address = hop.addresses.first ?? String(localized: "no reply")
                 return String(localized: "Delay rises at hop \(hop.ttl) (\(address)): +\(rise) ms over the hop before, and stays up to the last hop that answers.")
@@ -78,9 +78,9 @@ public struct RouteHistory: Codable, Sendable {
         }
         let lossy = hops.filter { $0.lossPercent >= 20 && $0.ttl < end.ttl }
         if !lossy.isEmpty, end.lossPercent < 20 {
-            return String(localized: "No hop adds lasting delay. Hops \(lossy.map { String($0.ttl) }.joined(separator: ", ")) skip some replies, but later hops answer, so that's the routers rate-limiting probes, not loss.")
+            return String(localized: "No hop adds lasting delay. Hops \(lossy.map { $0.ttl.formatted() }.joined(separator: ", ")) skip some replies, but later hops answer, so that's the routers rate-limiting probes, not loss.")
         }
-        if end.lossPercent >= 20 { return String(localized: "The last hop that answers missed \(String(format: "%.0f", end.lossPercent))% of probes. Loss that carries on to the end is real; check it with a few more traces.") }
+        if end.lossPercent >= 20 { return String(localized: "The last hop that answers missed \(String(format: "%.0f", locale: Locale.current, end.lossPercent))% of probes. Loss that carries on to the end is real; check it with a few more traces.") }
         return String(localized: "No hop adds lasting delay along this route.")
     }
 

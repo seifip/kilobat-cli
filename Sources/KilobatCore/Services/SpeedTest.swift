@@ -46,6 +46,13 @@ public enum SpeedTest {
         return result
     }
 
+    /// Upload alone, in Mbps: up to eight seconds and `maximumBytes`, for the check before going live.
+    public static func upload(maximumBytes: Int, streams: Int = 1) async throws -> Double {
+        let up = try await transfer(upload: true, cap: max(1, maximumBytes), streams: min(max(streams, 1), 8), updates: { _ in })
+        guard up.bytes > 0 else { throw DiagnosticError(String(localized: "The upload test sent nothing.")) }
+        return Double(up.bytes) * 8 / up.seconds / 1_000_000
+    }
+
     /// What the network ports carried during the test beyond the test itself. Physical ports only, so a VPN's tunnel isn't counted twice.
     static func otherBytes(before: [String: ByteCount], after: [String: ByteCount], test: Int) -> Int {
         let moved = after.reduce(UInt64(0)) { total, entry in

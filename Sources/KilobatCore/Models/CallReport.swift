@@ -21,6 +21,15 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
         public var deviceApp: String? = nil
         /// Named from the paired Mac's report alone, without the router's counters: a service outage found after the call outranks it.
         public var unconfirmed: Bool? = nil
+        /// For `otherDevice`: the connected router's own per-device counters named it, the strongest evidence there is.
+        public var router: Bool? = nil
+        /// For `wifi`: the Mac was on a far mesh node while a much closer one was in range, with the nodes' names
+        /// (nil when unnamed) and signals as they were then.
+        public var farNode: Bool? = nil
+        public var node: String? = nil
+        public var betterNode: String? = nil
+        public var nodeRSSI: Int? = nil
+        public var betterRSSI: Int? = nil
         public init(kind: Kind, app: String? = nil, uploading: Bool? = nil, weakSignal: Bool? = nil, dish: String? = nil, device: String? = nil,
                     kilobat: Bool? = nil, deviceApp: String? = nil) {
             self.kind = kind; self.app = app; self.uploading = uploading; self.weakSignal = weakSignal; self.dish = dish; self.device = device
@@ -31,8 +40,17 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             switch kind {
             case .app: uploading == true ? String(localized: "caused by \(app ?? "another app") uploading", comment: "Call report: what caused a freeze; the argument is an app")
                                          : String(localized: "caused by \(app ?? "another app") downloading", comment: "Call report: what caused a freeze; the argument is an app")
+            case .wifi where farNode == true: String(localized: "on the far Wi-Fi node", comment: "Call report: where a freeze happened; the Mac stayed on a distant mesh node while a closer one was in range")
             case .wifi: weakSignal == true ? String(localized: "on weak Wi-Fi", comment: "Call report: where a freeze happened")
                                            : String(localized: "on the Wi-Fi or router", comment: "Call report: where a freeze happened")
+            case .otherDevice where router == true:
+                if let device, let deviceApp {
+                    String(localized: "while \(device) was busy with network traffic (\(deviceApp))", comment: "Call report: router traffic overlaps a freeze; paired Mac reports the named app, but internet usage and causation are not established")
+                } else if let device {
+                    String(localized: "while \(device) was busy with network traffic", comment: "Call report: router counters overlap a freeze but can include LAN traffic; the argument is a device name")
+                } else {
+                    String(localized: "while another device was busy with network traffic", comment: "Call report: router counters overlap a freeze but can include LAN traffic")
+                }
             case .otherDevice:
                 if let device, let deviceApp {
                     uploading == true ? String(localized: "caused by \(device) uploading (\(deviceApp))", comment: "Call report: a paired Mac on the same network was uploading; the arguments are its name and its busiest app, such as “Anna’s MacBook” and “Dropbox”")
@@ -50,12 +68,35 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             case .portal: String(localized: "after the Wi-Fi’s sign-in page logged you out", comment: "Call report: where a freeze came from; a hotel or café Wi-Fi's sign-in ran out")
             }
         }
+        /// "You were on the Living room node at -78 dBm while the Office node was at -52 dBm. …"
+        var farNodeAdvice: String {
+            let after = String(localized: "Reconnect Wi-Fi before calls so the Mac switches; if it keeps happening, check your mesh system’s steering settings.", comment: "Call report advice after a freeze on a far mesh node")
+            guard let nodeRSSI, let betterRSSI else { return after }
+            let mine = node.map { String(localized: "the \($0) node", comment: "A Wi-Fi mesh node the user named, such as “the Office node”") }
+            let better = betterNode.map { String(localized: "the \($0) node", comment: "A Wi-Fi mesh node the user named, such as “the Office node”") }
+            let first: String = switch (mine, better) {
+            case let (mine?, better?): String(localized: "You were on \(mine) at \(nodeRSSI) dBm while \(better) was at \(betterRSSI) dBm.", comment: "Call report: the arguments are two named mesh nodes and their signals")
+            case let (nil, better?): String(localized: "You were on a node at \(nodeRSSI) dBm while \(better) was at \(betterRSSI) dBm.", comment: "Call report: the arguments are a signal, a named mesh node and its signal")
+            case let (mine?, nil): String(localized: "You were on \(mine) at \(nodeRSSI) dBm while another node was \(betterRSSI - nodeRSSI) dB stronger.", comment: "Call report: the arguments are a named mesh node, its signal and a difference in dB")
+            case (nil, nil): String(localized: "You were on a node at \(nodeRSSI) dBm while another was \(betterRSSI - nodeRSSI) dB stronger.", comment: "Call report: the arguments are a signal and a difference in dB")
+            }
+            return first + " " + after
+        }
         /// What to try before the next call.
         public var advice: String {
             switch kind {
             case .app: String(localized: "Pause \(app ?? "that app") before calls, or block it with a profile while you’re on one.", comment: "Call report advice; the argument is an app")
+            case .wifi where farNode == true: farNodeAdvice
             case .wifi: weakSignal == true ? String(localized: "Move closer to the router, or use Radar to find a stronger spot.", comment: "Call report advice")
                                            : String(localized: "Restart the router, or try a cable or the 5 GHz band.", comment: "Call report advice")
+            case .otherDevice where router == true:
+                if let device, let deviceApp {
+                    String(localized: "Your router counted \(device) as the busiest device during the freeze, with \(deviceApp) as Kilobat on that Mac reported. Pause it there before calls, or turn on call mode in Kilobat on that Mac.", comment: "Call report advice; the arguments are a paired Mac's name and an app, such as “Anna’s MacBook” and “Steam”") + " " + String(localized: "These counters can include local transfers; they don’t prove internet usage or the cause of the freeze.", comment: "Call report: limits of router device counters")
+                } else if let device {
+                    String(localized: "Your router counted \(device) as the busiest device during the freeze. Pause its downloads, uploads or streams before calls, or turn on your router’s QoS for calls.", comment: "Call report advice; the argument is a device's name, such as “Rita’s iPad”") + " " + String(localized: "These counters can include local transfers; they don’t prove internet usage or the cause of the freeze.", comment: "Call report: limits of router device counters")
+                } else {
+                    String(localized: "Your router counted another device as the busiest during the freeze. Name it in Devices, and pause its downloads or streams before calls.", comment: "Call report advice") + " " + String(localized: "These counters can include local transfers; they don’t prove internet usage or the cause of the freeze.", comment: "Call report: limits of router device counters")
+                }
             case .otherDevice where kilobat == true && device != nil:
                 deviceApp.map { String(localized: "\(device ?? "") was busy with \($0) during the freeze, as Kilobat on that Mac reported. Pause it there before calls, or turn on call mode in Kilobat on that Mac.", comment: "Call report advice; the arguments are a paired Mac's name and an app, such as “Anna’s MacBook” and “Steam”") }
                 ?? String(localized: "\(device ?? "") was busy during the freeze, as Kilobat on that Mac reported. Pause its downloads or uploads before calls, or turn on call mode in Kilobat on that Mac.", comment: "Call report advice; the argument is a paired Mac's name, such as “Anna’s MacBook”")
@@ -131,6 +172,9 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
     public var service: ServiceStatus? = nil
     /// The call went through Bluetooth headphones, and what on the Wi-Fi side can make them crackle; nil otherwise.
     public var bluetooth: BluetoothCallNote? = nil
+    /// Another device's upload froze the call and there are cameras on the network: what they sent, from the router's
+    /// per-device counters, or else that cloud cameras can upload a lot, with their makers' figures.
+    public var cameras: CameraUploadNote? = nil
 
     public var seconds: Double { end.timeIntervalSince(start) }
     public var clean: Bool { freezes.isEmpty && strain.isEmpty }
@@ -170,7 +214,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
             return String(localized: "That was \(service.service)’s own trouble, not your line, so there’s nothing to change here.", comment: "Call report advice when the calling service's status page reported an outage; the argument is a service such as Zoom")
         }
         if first.kind == .beyondRouter, household != true {
-            return String(localized: "If others share this network, a TV or console may be the cause; Kilobat sees other devices only when your router shares its traffic counters (UPnP).", comment: "Call report advice")
+            return String(localized: "If others share this network, a TV or console may be the cause; Kilobat sees other devices once you connect your router in Devices, or when it shares its traffic counters (UPnP).", comment: "Call report advice")
         }
         return first.advice
     }
@@ -197,12 +241,27 @@ public struct CallSamples: Sendable {
     /// call's start, negative before it. `name` is how the report names it, nil when nothing specific is known.
     public struct Arrival: Sendable { public let at: Double; public let name: String?; public init(at: Double, name: String?) { self.at = at; self.name = name } }
     public var arrivals: [Arrival] = []
+    /// The cameras and doorbells on the network, and what each device sent during the call when a router's per-device
+    /// counters say (`DeviceUsage`), to name the cameras when another device's upload froze it.
+    public var cameras: [KnownDevice] = []
+    public var deviceUsage: DeviceUsageWindow? = nil
     /// What paired Macs running Kilobat reported during the call, every few seconds: their rates and busiest app.
     public struct Peer: Sendable {
         public let at: Double; public let name: String; public let upload: Double; public let download: Double; public let app: String?
         public init(at: Double, name: String, upload: Double, download: Double, app: String?) { self.at = at; self.name = name; self.upload = upload; self.download = download; self.app = app }
     }
     public var peers: [Peer] = []
+    /// Each other device's rates as a connected router measured them, every poll during the call (about every 10 s),
+    /// with its name and, for a paired Mac, its busiest app.
+    public struct RouterDevice: Sendable {
+        public let at: Double; public let mac: String; public let name: String?; public let upload: Double; public let download: Double; public let app: String?
+        public init(at: Double, mac: String, name: String?, upload: Double, download: Double, app: String? = nil) {
+            self.at = at; self.mac = mac; self.name = name; self.upload = upload; self.download = download; self.app = app
+        }
+    }
+    public var routerDevices: [RouterDevice] = []
+    /// A connected router counted each device during the call.
+    public var routerPerDevice = false
     /// Whether a busy paired Mac may name a freeze the router's counters can't speak to; off once the calling service
     /// reported an outage for it, which is the better explanation.
     public var peersWithoutRouter = true
@@ -213,6 +272,13 @@ public struct CallSamples: Sendable {
     public var weakSignal: [Double] = []
     /// AirDrop's link was busy at some point in the call.
     public var airDrop = false
+    /// Moments the Mac was on a far mesh node while a much closer one was in range, and the nodes as first seen then.
+    public var farNode: [Double] = []
+    public struct FarNode: Sendable, Equatable {
+        public let node: String?, better: String?, rssi: Int, betterRSSI: Int
+        public init(node: String?, better: String?, rssi: Int, betterRSSI: Int) { self.node = node; self.better = better; self.rssi = rssi; self.betterRSSI = betterRSSI }
+    }
+    public var farNodes: FarNode? = nil
     /// What a Starlink dish logged during the call: outages and moments it was obstructed.
     public var dish: [Dish] = []
     /// Seconds into the call from which the Wi-Fi's sign-in page had logged the Mac out (the last check that still went through).
@@ -246,8 +312,12 @@ public enum CallAnalysis {
         }
         var card = CallReport(app: app, browser: browser, start: start, end: end, networkKey: network?.key, networkName: network?.name,
                           median: median, jitter: jitter, lossPercent: loss, freezes: freezes, strain: strain(samples.load), line: line(samples.internet, points: 240))
-        card.household = samples.household != nil
+        card.household = samples.household != nil || samples.routerPerDevice
         card.bluetooth = BluetoothCallNote.from(samples.bluetoothAudio, calledFor: samples.audioChecks)
+        // Upload from elsewhere on the network froze it: cameras may contribute while recording or viewed live.
+        if freezes.contains(where: { $0.cause.kind == .otherDevice && $0.cause.uploading == true && $0.cause.kilobat != true }) {
+            card.cameras = CameraUploadNote.make(cameras: samples.cameras, usage: samples.deviceUsage)
+        }
         return card
     }
 
@@ -272,6 +342,13 @@ public enum CallAnalysis {
         let local = samples.router.contains { $0.at >= start - 1 && $0.at <= end + 1 && ($0.ms.map { $0 > routerMedian + 100 } ?? true) }
         if local {
             let weak = samples.weakSignal.contains { abs($0 - start) < 60 }
+            // On the far node at the time: the far node is what made the Wi-Fi weak, and what to fix.
+            if samples.farNode.contains(where: { $0 >= start - 30 && $0 <= end + 5 }) {
+                var cause = CallReport.Cause(kind: .wifi, weakSignal: weak)
+                cause.farNode = true; cause.node = samples.farNodes?.node; cause.betterNode = samples.farNodes?.better
+                cause.nodeRSSI = samples.farNodes?.rssi; cause.betterRSSI = samples.farNodes?.betterRSSI
+                return cause
+            }
             if samples.airDrop && !weak { return .init(kind: .airDrop) }
             return .init(kind: .wifi, weakSignal: weak)
         }
@@ -280,6 +357,8 @@ public enum CallAnalysis {
         if let top = busy.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
             return .init(kind: .app, app: top.app, uploading: top.upload / uploadLoad >= top.download / downloadLoad)
         }
+        // The router's own count of each device beats everything below: a paired Mac's word or a device that joined.
+        if let device = busyRouterDevice(from: start, to: end, samples.routerDevices) { return device }
         // Router samples are a few seconds apart, so look a little wider.
         let others = (samples.household ?? []).filter { $0.at >= start - 8 && $0.at <= end + 3 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
         if let top = others.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) {
@@ -307,6 +386,17 @@ public enum CallAnalysis {
         let near = peers.filter { $0.at >= start - 8 && $0.at <= end + 4 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
         guard let top = near.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) else { return nil }
         return .init(kind: .otherDevice, uploading: top.upload / uploadLoad >= top.download / downloadLoad, device: top.name, kilobat: true, deviceApp: top.app)
+    }
+
+    /// The device a connected router measured moving the most at the time of a freeze, when it moved enough to choke
+    /// a call. The router is read about every 10 seconds during a call, so the window reaches a poll on either side.
+    static func busyRouterDevice(from start: Double, to end: Double, _ devices: [CallSamples.RouterDevice]) -> CallReport.Cause? {
+        let near = devices.filter { $0.at >= start - 12 && $0.at <= end + 8 && ($0.upload >= uploadLoad || $0.download >= downloadLoad) }
+        guard let top = near.max(by: { $0.upload / uploadLoad + $0.download / downloadLoad < $1.upload / uploadLoad + $1.download / downloadLoad }) else { return nil }
+        var cause = CallReport.Cause(kind: .otherDevice, uploading: top.upload / uploadLoad >= top.download / downloadLoad, device: top.name,
+                                     kilobat: top.app != nil ? true : nil, deviceApp: top.app)
+        cause.router = true
+        return cause
     }
 
     /// Each kind of strain that lasted at least 15 seconds, longest first. Samples are a few seconds apart.

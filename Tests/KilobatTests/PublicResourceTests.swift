@@ -10,6 +10,10 @@ struct PublicResourceTests {
         for name in ["countries.deflate", "centroids.json", "oui.deflate", "networks.deflate"] {
             #expect(FileManager.default.fileExists(atPath: resource.appendingPathComponent(name).path), "missing bundled resource: \(name)")
         }
+        let dictionary = Explainer(json: try Data(contentsOf: resource.appendingPathComponent("explainer.json")))
+        #expect(dictionary.available)
+        #expect(dictionary.process(path: "/usr/libexec/nsurlsessiond")?.slug == "nsurlsessiond")
+        #expect(dictionary.host("gateway.icloud.com")?.slug == "gateway-icloud-com")
         #expect(GeoIP.shared.available)
         #expect(NetworkOwners.shared.available)
         #expect(NetworkOwners.shared.owner("140.82.121.4") == "github")

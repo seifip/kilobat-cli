@@ -36,10 +36,14 @@ public actor DiagnosticProbe {
         }
         let channel = wifi.wlanChannel()
         let noise = wifi.noiseMeasurement()
+        let standard = WiFiLink.standard(phyMode: wifi.activePHYMode().rawValue, band: Self.band(channel?.channelBand))
         return RadioSample(bssid: wifi.bssid(), ssid: wifi.ssid(), interface: wifi.interfaceName,
                            rssi: wifi.rssiValue() == 0 ? nil : wifi.rssiValue(), noise: noise == 0 ? nil : noise,
                            transmitMbps: wifi.transmitRate() > 0 ? wifi.transmitRate() : nil,
-                           channel: channel?.channelNumber, band: Self.band(channel?.channelBand))
+                           channel: channel?.channelNumber, band: Self.band(channel?.channelBand),
+                           widthMHz: channel.flatMap { Self.knownWidth($0.channelWidth) }, standard: standard?.name, phyMode: standard?.phy,
+                           security: WiFiLink.security(wifi.security().rawValue)?.name,
+                           transmitPowerDBm: WiFiLink.dBm(milliwatts: wifi.transmitPower()), countryCode: wifi.countryCode())
     }
     public func scan() throws -> [NearbyNetwork] {
         guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else { throw DiagnosticError(String(localized: "Wi-Fi is unavailable or switched off.")) }
@@ -47,14 +51,26 @@ public actor DiagnosticProbe {
             NearbyNetwork(id: network.bssid ?? "hidden-\(index)", ssid: network.ssid ?? "Hidden network",
                           rssi: network.rssiValue, noise: network.noiseMeasurement,
                           channel: network.wlanChannel?.channelNumber ?? 0, band: Self.band(network.wlanChannel?.channelBand) ?? "Unknown",
-                          widthMHz: Self.width(network.wlanChannel?.channelWidth ?? .width20MHz))
+                          widthMHz: Self.width(network.wlanChannel?.channelWidth ?? .width20MHz),
+                          security: WiFiLink.strongest(supported: Set(WiFiLink.securityValues.filter { CWSecurity(rawValue: $0).map(network.supportsSecurity) ?? false }))
+                            .flatMap { WiFiLink.security($0)?.name })
         }.sorted { $0.rssi > $1.rssi }
     }
-    private static func band(_ band: CWChannelBand?) -> String? {
+    static func band(_ band: CWChannelBand?) -> String? {
         switch band { case .band2GHz: "2.4 GHz"; case .band5GHz: "5 GHz"; case .band6GHz: "6 GHz"; default: nil }
     }
-    private static func width(_ width: CWChannelWidth) -> Int {
+    static func width(_ width: CWChannelWidth) -> Int {
         switch width { case .width40MHz: 40; case .width80MHz: 80; case .width160MHz: 160; default: 20 }
+    }
+    /// CoreWLAN has no 320 MHz case yet. Do not report an unknown negotiated width as 20 MHz.
+    private static func knownWidth(_ width: CWChannelWidth) -> Int? {
+        switch width {
+        case .width20MHz: 20
+        case .width40MHz: 40
+        case .width80MHz: 80
+        case .width160MHz: 160
+        default: nil
+        }
     }
     public static func matches(_ pattern: String, in value: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }

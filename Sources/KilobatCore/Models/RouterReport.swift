@@ -5,7 +5,7 @@ public struct RouterReport: Codable, Sendable {
     public enum State: String, Codable, Sendable { case learning, waiting, normal, degraded, signal }
     public struct Restart: Codable, Sendable {
         public let date: Date
-        /// outage: Kilobat saw the router go and come back; button: you said you restarted it.
+        /// outage: Kilobat saw the router go and come back; router: the connected router said so (its uptime started again); button: you said you restarted it.
         public let source: String
         public let outageSeconds: Double?
         /// fixed, helped, didntHelp, unclear, noProblem; nil while the day after it is still being watched.
@@ -57,6 +57,17 @@ public struct RouterReport: Codable, Sendable {
     public let followUpGood: Bool?
     /// Whether the Health tab shows it (Pro): a slowdown, or a restart being followed up.
     public let showsFinding: Bool
+    /// Seconds since the router booted, as it last said itself (a connected router); nil otherwise.
+    public let uptimeSeconds: Double?
+    /// A low-key reminder to check for a firmware update: the router is known by its maker and no check is known
+    /// for about 3 months. `guide` is the router guide's firmware section on kilobat.app when there is one.
+    public struct Firmware: Codable, Sendable, Equatable {
+        public let maker: String
+        public let line: String
+        public let guide: String?
+        public let lastChecked: Date?
+    }
+    public let firmware: Firmware?
 
     public init(_ record: RouterRecord, now: Date = Date(), calendar: Calendar = .current) {
         let assessment = record.assess(now: now, calendar: calendar)
@@ -127,6 +138,11 @@ public struct RouterReport: Codable, Sendable {
         let follow = Self.followUp(record, now: now)
         followUp = follow?.text; followUpGood = follow?.good
         showsFinding = state == .degraded || follow != nil
+        uptimeSeconds = record.booted.map { max(0, now.timeIntervalSince($0)) }
+        firmware = record.firmwareDue(now: now) ? record.maker.map { maker in
+            Firmware(maker: maker, line: String(localized: "It’s been a while since this router’s firmware was checked. Look for an update in its settings; makers fix security holes and Wi-Fi bugs that way.", comment: "Router check-up: a gentle firmware reminder"),
+                     guide: RouterGuides.firmware(maker: maker), lastChecked: record.firmwareChecked)
+        } : nil
     }
 
     /// How earlier restarts went, newest first, for the advice line.
@@ -175,9 +191,9 @@ public struct RouterReport: Codable, Sendable {
 
     /// JSON numbers to a tenth: medians of pings aren't more precise than that.
     static func tenth(_ value: Double) -> Double { (value * 10).rounded() / 10 }
-    public static func ms(_ value: Double) -> String { value < 2 ? String(format: "%.1f ms", value) : String(format: "%.0f ms", value) }
-    static func percent(_ value: Double) -> String { value < 1 && value > 0 ? String(format: "%.1f%%", value) : String(format: "%.0f%%", value) }
-    static func count(_ value: Double) -> String { value < 1 && value > 0 ? String(format: "%.1f", value) : String(format: "%.0f", value) }
+    public static func ms(_ value: Double) -> String { value < 2 ? String(format: "%.1f ms", locale: Locale.current, value) : String(format: "%.0f ms", locale: Locale.current, value) }
+    static func percent(_ value: Double) -> String { value < 1 && value > 0 ? String(format: "%.1f%%", locale: Locale.current, value) : String(format: "%.0f%%", locale: Locale.current, value) }
+    static func count(_ value: Double) -> String { value < 1 && value > 0 ? String(format: "%.1f", locale: Locale.current, value) : String(format: "%.0f", locale: Locale.current, value) }
 
     /// `kilobat router [--all] [--json]`.
     public struct Options: Equatable, Sendable {

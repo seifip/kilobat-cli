@@ -77,9 +77,13 @@ public struct FilterPolicy: Sendable {
         case killSwitch
         /// The kill switch blocks, but this connection is what the VPN needs to come back.
         case killSwitchExempt(KillSwitchPolicy.Exemption)
+        /// Only in a trace: the VPN is down, but "allow for 5 minutes" lets everything through until then.
+        case killSwitchPaused(Date)
         case connectionRule(ConnectionRule)
         /// Protection: a known threat, a tracker, or the agent guard.
         case protection(ProtectionDetail)
+        /// Only in a trace: the site the person allowed past Protection, which one of its lists has.
+        case siteAllowed(String)
         case blocklist(String)
         case temporaryRule(TemporaryRule)
         case budget
@@ -102,8 +106,10 @@ public struct FilterPolicy: Sendable {
             case .unrestricted: "Unrestricted profile"
             case .killSwitch: "VPN kill switch: the VPN is down"
             case .killSwitchExempt: "Needed while the VPN reconnects"
+            case .killSwitchPaused: "VPN kill switch paused"
             case .connectionRule(let rule): "Destination rule: \(rule.host)\(rule.port.isEmpty ? "" : ":" + rule.port) · \(rule.direction)"
             case .protection(let detail): detail.summary
+            case .siteAllowed(let site): "Allowed site: " + site
             case .blocklist(let entry): "Blocklist: " + entry
             case .temporaryRule: "Temporary app rule"
             case .budget: "Network budget reached"
@@ -126,41 +132,88 @@ public struct FilterPolicy: Sendable {
     public func decide(_ flow: Flow, now: Date = Date(), appleSigned: () -> Bool = { false }, recentDecision: Bool? = nil,
                        tunnelUp: (String) -> Bool = { _ in true }, index: ProtectionIndex? = nil,
                        agent: () -> AgentOwner? = { nil }) -> (verdict: Verdict, reason: Reason) {
-        guard enabled else { return (.allow, .filterOff) }
+        evaluate(flow, now: now, appleSigned: appleSigned, recentDecision: recentDecision, tunnelUp: tunnelUp, index: index, agent: agent, trace: nil)
+    }
+
+    /// The same checks as `decide`, run to the end: every rule that applies, in order, and the one that decided
+    /// (`DecisionTrace.decision` is always what `decide` returns). For the rule inspector, off the filter's hot path.
+    public func trace(_ flow: Flow, now: Date = Date(), appleSigned: () -> Bool = { false }, recentDecision: Bool? = nil,
+                      tunnelUp: (String) -> Bool = { _ in true }, index: ProtectionIndex? = nil,
+                      agent: () -> AgentOwner? = { nil }) -> DecisionTrace {
+        let builder = DecisionTrace.Builder()
+        _ = evaluate(flow, now: now, appleSigned: appleSigned, recentDecision: recentDecision, tunnelUp: tunnelUp, index: index, agent: agent, trace: builder)
+        return builder.finish()
+    }
+
+    /// The one decision path. Without `trace` it returns at the first rule that applies, as the filter needs; with
+    /// one it records that rule and keeps checking, so the rules that lost show too. Rules that only stand in for a
+    /// missing one (Apple software, asking, the profile default) are checked only while nothing has decided.
+    func evaluate(_ flow: Flow, now: Date, appleSigned: () -> Bool, recentDecision: Bool?, tunnelUp: (String) -> Bool,
+                  index: ProtectionIndex?, agent: () -> AgentOwner?, trace: DecisionTrace.Builder?) -> (verdict: Verdict, reason: Reason) {
+        var decided: (verdict: Verdict, reason: Reason)?
+        /// Records a rule that applies; true when checking stops here.
+        func apply(_ verdict: Verdict, _ reason: Reason) -> Bool {
+            if decided == nil { decided = (verdict, reason) }
+            guard let trace else { return true }
+            trace.rule(verdict, reason)
+            return false
+        }
+        guard enabled else { _ = apply(.allow, .filterOff); return decided! }
         // Before every rule: an allow rule for an app mustn't leak it past a VPN that is down. What the VPN needs to
         // reconnect goes through even where a profile would otherwise block it; local traffic still follows the rules.
         if killSwitch.blocks(now: now, tunnelUp: tunnelUp) {
             switch killSwitch.exemption(flow, appleSigned: appleSigned) {
-            case nil: return (.block, .killSwitch)
-            case .localNetwork?: break
-            case let exemption?: return (.allow, .killSwitchExempt(exemption))
+            case nil: if apply(.block, .killSwitch) { return decided! }
+            case .localNetwork?: trace?.note(.allow, .killSwitchExempt(.localNetwork))
+            case let exemption?: if apply(.allow, .killSwitchExempt(exemption)) { return decided! }
             }
+        } else if let trace, let until = killSwitch.pausedUntil(now: now, tunnelUp: tunnelUp) {
+            trace.note(.allow, .killSwitchPaused(until))
         }
         // Known threats win over every allow rule: only the local network, Apple's and Kilobat's own domains and the
         // person's "Allow this site" stay out of reach (Kilobat itself and DNS are exempt in the filter before this).
-        if let detail = ProtectionCheck.threat(flow, settings: protection, index: index, agent: agent) { return (.block, .protection(detail)) }
-        if unrestricted { return (.allow, .unrestricted) }
-        if let app = flow.app, let rule = connectionRules.reversed().first(where: {
-            $0.matches(app: app, process: flow.process, host: flow.host, address: flow.address, port: flow.port, direction: flow.direction)
-        }) { return (rule.allowed ? .allow : .block, .connectionRule(rule)) }
-        if let entry = DomainPolicy.blocked(flow.host, address: flow.address, app: flow.app ?? "", domains: blockedEntries, exceptions: domainExceptions) {
-            return (.block, .blocklist(entry))
+        if let detail = ProtectionCheck.threat(flow, settings: protection, index: index, agent: agent) {
+            if apply(.block, .protection(detail)) { return decided! }
+        } else if let trace, let site = ProtectionCheck.allowedSite(flow, settings: protection, index: index) {
+            trace.note(.allow, .siteAllowed(site))
         }
+        if unrestricted, apply(.allow, .unrestricted) { return decided! }
+        if let app = flow.app {
+            if trace == nil {
+                if let rule = connectionRules.reversed().first(where: {
+                    $0.matches(app: app, process: flow.process, host: flow.host, address: flow.address, port: flow.port, direction: flow.direction)
+                }) { _ = apply(rule.allowed ? .allow : .block, .connectionRule(rule)); return decided! }
+            } else {
+                // Newest first, as the filter takes them: the first decides, the rest show as also matched.
+                for rule in connectionRules.reversed() where rule.matches(app: app, process: flow.process, host: flow.host, address: flow.address, port: flow.port, direction: flow.direction) {
+                    _ = apply(rule.allowed ? .allow : .block, .connectionRule(rule))
+                }
+            }
+        }
+        if let entry = DomainPolicy.blocked(flow.host, address: flow.address, app: flow.app ?? "", domains: blockedEntries, exceptions: domainExceptions),
+           apply(.block, .blocklist(entry)) { return decided! }
         // Trackers lose to the allow rules above: Unrestricted, a destination rule and "Allow this site".
-        if let detail = ProtectionCheck.tracker(flow, settings: protection, index: index) { return (.block, .protection(detail)) }
-        guard let app = flow.app else { return budgetReached ? (.block, .budget) : (.allow, .noAppRule) }
+        if let detail = ProtectionCheck.tracker(flow, settings: protection, index: index), apply(.block, .protection(detail)) { return decided! }
+        guard let app = flow.app else {
+            if budgetReached, apply(.block, .budget) { return decided! }
+            if decided == nil { _ = apply(.allow, .noAppRule) }
+            return decided!
+        }
         let keys = [app] + ProcessRuleKey.keys("process:" + flow.process)
         // Explicit rules win over the budget, quotas and paused updaters, so "allow for N minutes" still works.
-        if let rule = keys.lazy.compactMap({ temporary[$0] }).first, rule.expires > now { return (rule.allowed ? .allow : .block, .temporaryRule(rule)) }
-        if budgetReached { return (.block, .budget) }
-        if let key = keys.first(where: quotaReached.contains) { return (.block, .quota(key)) }
-        if updatersPaused, let helper = UpdaterHelpers.helper(app, process: flow.process) ?? UpdaterHelpers.helper(flow.via) {
-            return (.block, .updaterPaused(helper.name))
-        }
-        if let saved = keys.lazy.compactMap({ rules[$0] }).first { return (saved ? .allow : .block, .appRule(saved)) }
-        if let recentDecision { return (recentDecision ? .allow : .block, .recentDecision(recentDecision)) }
-        if (askNewApps || !defaultAllow) && allowApple && appleSigned() { return (.allow, .appleSoftware) }
-        if askNewApps { return (.ask, .askNewApps) }
-        return (defaultAllow ? .allow : .block, .newAppDefault(defaultAllow))
+        if let rule = keys.lazy.compactMap({ temporary[$0] }).first, rule.expires > now, apply(rule.allowed ? .allow : .block, .temporaryRule(rule)) { return decided! }
+        if budgetReached, apply(.block, .budget) { return decided! }
+        if let key = keys.first(where: quotaReached.contains), apply(.block, .quota(key)) { return decided! }
+        if updatersPaused, let helper = UpdaterHelpers.helper(app, process: flow.process) ?? UpdaterHelpers.helper(flow.via),
+           apply(.block, .updaterPaused(helper.name)) { return decided! }
+        let saved = keys.lazy.compactMap({ rules[$0] }).first
+        if let saved, apply(saved ? .allow : .block, .appRule(saved)) { return decided! }
+        // An answer given moments ago stands in for the saved rule until it arrives.
+        if saved == nil, let recentDecision, apply(recentDecision ? .allow : .block, .recentDecision(recentDecision)) { return decided! }
+        guard decided == nil else { return decided! }
+        if (askNewApps || !defaultAllow) && allowApple && appleSigned() { _ = apply(.allow, .appleSoftware) }
+        else if askNewApps { _ = apply(.ask, .askNewApps) }
+        else { _ = apply(defaultAllow ? .allow : .block, .newAppDefault(defaultAllow)) }
+        return decided!
     }
 }

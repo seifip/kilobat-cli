@@ -34,29 +34,10 @@ import KilobatCore
                 if !extra.isEmpty { print(Terminal.dim("  \(String(repeating: " ", count: 46))" + extra.joined(separator: " · "))) }
             }
         case "why":
-            var target: String?, app: String?, proxy: String?, context: ConnectionDoctor.Context?, failedAt: Date?, index = 1
-            let usage = "Use why <url|host> [--app <id>] [--proxy <url>] [--context container|vm|remote|provider] [--failed-at <time>] [--json]."
-            while index < args.count {
-                switch args[index] {
-                case "--json": index += 1
-                case "--app":
-                    guard index + 1 < args.count, args[index + 1].contains(".") || args[index + 1].hasPrefix("process:") else { throw CLIError("--app takes a bundle ID such as com.example.App, or process:<name>.") }
-                    app = args[index + 1]; index += 2
-                case "--proxy":
-                    guard index + 1 < args.count, !args[index + 1].hasPrefix("-") else { throw CLIError("--proxy takes the proxy the app uses, such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080.") }
-                    proxy = args[index + 1]; index += 2
-                case "--context":
-                    guard index + 1 < args.count, let value = ConnectionDoctor.Context(rawValue: args[index + 1]) else { throw CLIError("--context takes container, vm, remote or provider.") }
-                    context = value; index += 2
-                case "--failed-at":
-                    guard index + 1 < args.count, let value = ConnectionDoctor.failureTime(args[index + 1]) else { throw CLIError("--failed-at takes when the app failed, such as 14:05 or 2026-10-29T14:05:00Z, not a time still ahead.") }
-                    failedAt = value; index += 2
-                case let value where target == nil && !value.hasPrefix("-"): target = value; index += 1
-                default: throw CLIError(usage)
-                }
-            }
-            guard let target else { throw CLIError(usage) }
-            let report = await ConnectionDoctor.run(target, app: app, proxy: proxy, context: context, policy: await policy(), failedAt: failedAt)
+            let command: ConnectionCheckCommand
+            do { command = try ConnectionCheckCommand.parse(args) } catch let error as ConnectionCheckCommand.Failure { throw CLIError(error.message) }
+            let report = await ConnectionDoctor.run(command.target, app: command.app, proxy: command.proxy, context: command.context, policy: await policy(),
+                                                    failedAt: command.failedAt, appError: command.appError)
             if report.steps.isEmpty { throw CLIError(report.verdict + " " + report.next) }
             if args.contains("--json") { print(String(decoding: try doctorJSON(report), as: UTF8.self)) }
             else {
@@ -67,6 +48,7 @@ import KilobatCore
                     let mark = switch step.status { case .ok: Terminal.green("✓"); case .warning: Terminal.violet("!"); case .failed: Terminal.rose("✗"); case .skipped: Terminal.dim("–") }
                     print("  \(mark) \(KilobatCLI.pad(step.layer, 18))\(step.detail)")
                 }
+                if let block = report.block { print("\n" + Terminal.rose("⊘ " + block.title)) }
                 print("\n" + Terminal.bold(report.verdict))
                 print("→ " + report.next)
             }
@@ -300,7 +282,8 @@ import KilobatCore
         return ConnectionDoctor.Policy(preferences: preferences, filterActive: app?["filteringActive"] as? Bool ?? false, budgetReached: budgetReached,
                                        metered: app?["metered"] as? Bool ?? false,
                                        killSwitch: KillSwitchPolicy(armed: blocking, vpnDown: blocking, allowLAN: killSwitch?["allowLAN"] as? Bool ?? true),
-                                       protection: ProtectionPreferences.settings(preferences, pro: app?["pro"] as? Bool ?? false), index: ProtectionUpdater().loadIndex())
+                                       protection: ProtectionPreferences.settings(preferences, pro: app?["pro"] as? Bool ?? false), index: ProtectionUpdater().loadIndex(),
+                                       networkKey: app?["networkKey"] as? String)
     }
     /// What was sent, over which path, and when, against when the app failed: "HEAD through LM Studio’s own proxy (127.0.0.1:7890) · checked 14:31 · app failed 14:02".
     static func doctorRequest(_ report: DoctorReport) -> String {

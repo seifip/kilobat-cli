@@ -34,6 +34,10 @@ public struct KnownDevice: Codable, Identifiable, Sendable, Equatable {
     public var learned: Bool? = nil
     /// When the new-device notification went out.
     public var alerted: Date? = nil
+    /// What it says about itself on the network (Bonjour services, model names, UPnP), merged over scans.
+    public var signals: DeviceSignals? = nil
+    /// The type the person chose, which beats every signal.
+    public var userType: DeviceType? = nil
 
     public init(mac: String, name: String? = nil, hostname: String? = nil, vendor: String? = nil, address: String? = nil, verdict: DeviceVerdict? = nil,
                 firstSeen: Date, lastSeen: Date? = nil, arrived: Date? = nil, learned: Bool? = nil) {
@@ -53,6 +57,16 @@ public struct KnownDevice: Codable, Identifiable, Sendable, Equatable {
     }
     public var privateAddress: Bool { MACAddress.locallyAdministered(mac) }
     public var macs: [String] { [mac] + (aliases ?? []) }
+    /// What kind of device it is: the person's choice, else Kilobat's reading of its signals, name and maker.
+    /// `router` says it is the network's gateway.
+    public func guess(router: Bool = false) -> DeviceGuess {
+        let auto = DeviceClassifier.classify(signals: signals, vendor: vendor, hostname: hostname, router: router)
+        guard let userType else { return auto }
+        return DeviceGuess(type: userType, confidence: .set, brand: auto.type == userType || DeviceClassifier.related(auto.type, userType) ? auto.brand : nil,
+                           evidence: String(localized: "you chose it", comment: "Why Kilobat says a device is of a type: the user set it"))
+    }
+    /// HomeKit, Matter, Thread border router.
+    public var tags: [DeviceTag] { signals?.tags ?? [] }
     /// The name to show: the person's, else the device's own, else its maker's.
     public var label: String {
         if let name, !name.isEmpty { return name }
@@ -65,6 +79,8 @@ public struct KnownDevice: Codable, Identifiable, Sendable, Equatable {
     public var callName: String? {
         if let name, !name.isEmpty { return name }
         if let own = DeviceNames.readable(hostname) { return own }
+        let guess = guess()
+        if guess.sure { return String(localized: "a new \(guess.named)", comment: "Call report: an unnamed device that just joined the network, named by its type, such as “a new Wyze camera”") }
         return vendor.map { String(localized: "a new \($0) device", comment: "Call report: an unnamed device that just joined the network, named by its maker, such as “a new Samsung device”") }
     }
 }
@@ -91,7 +107,11 @@ public struct DeviceSighting: Sendable, Equatable {
     public let mac: String
     public let address: String
     public var hostname: String?
-    public init(mac: String, address: String, hostname: String? = nil) { self.mac = mac; self.address = address; self.hostname = hostname }
+    /// What it announced during the scan: Bonjour services and its UPnP description.
+    public var signals: DeviceSignals?
+    public init(mac: String, address: String, hostname: String? = nil, signals: DeviceSignals? = nil) {
+        self.mac = mac; self.address = address; self.hostname = hostname; self.signals = signals
+    }
 }
 
 /// Every network's devices, as saved in devices.json. Pure, so learning and matching can be tested.
@@ -115,7 +135,8 @@ public struct DeviceBook: Codable, Sendable, Equatable {
         var seen: [String: DeviceSighting] = [:]
         for sighting in sightings {
             guard let mac = MACAddress.normalized(sighting.mac), MACAddress.unicast(mac) else { continue }
-            seen[mac] = DeviceSighting(mac: mac, address: sighting.address, hostname: sighting.hostname ?? seen[mac]?.hostname)
+            seen[mac] = DeviceSighting(mac: mac, address: sighting.address, hostname: sighting.hostname ?? seen[mac]?.hostname,
+                                       signals: DeviceSignals.merge(seen[mac]?.signals, sighting.signals))
         }
         var touched: Set<Int> = [], newcomers: [KnownDevice] = []
         for sighting in seen.values.sorted(by: { $0.mac < $1.mac }) {
@@ -138,6 +159,7 @@ public struct DeviceBook: Codable, Sendable, Equatable {
                                      vendor: MACAddress.locallyAdministered(sighting.mac) ? nil : vendor(sighting.mac), address: sighting.address,
                                      firstSeen: now, learned: watching ? nil : true)
             if device.name?.isEmpty == true { device.name = nil }
+            device.signals = sighting.signals?.isEmpty == false ? sighting.signals : nil
             net.devices.append(device); touched.insert(net.devices.count - 1)
             if watching { newcomers.append(device) }
         }
@@ -158,6 +180,7 @@ public struct DeviceBook: Codable, Sendable, Equatable {
         device.lastSeen = max(device.lastSeen, now)
         device.address = sighting.address
         if let hostname = sighting.hostname { device.hostname = hostname }
+        device.signals = DeviceSignals.merge(device.signals, sighting.signals)
     }
 
     public mutating func setHome(_ home: Bool, network key: String, name: String) {
@@ -177,6 +200,12 @@ public struct DeviceBook: Codable, Sendable, Equatable {
     public mutating func rename(mac: String, to name: String, network: String? = nil) -> Bool {
         let clean = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         return edit(mac: mac, network: network) { $0.name = clean.isEmpty ? nil : clean }
+    }
+
+    /// Sets the device's type, or with nil goes back to Kilobat's own reading.
+    @discardableResult
+    public mutating func setType(_ type: DeviceType?, mac: String, network: String? = nil) -> Bool {
+        edit(mac: mac, network: network) { $0.userType = type }
     }
 
     public mutating func markAlerted(mac: String, network: String, at date: Date = Date()) {
@@ -227,6 +256,12 @@ public enum DeviceAlert: Equatable, Sendable {
         return fresh.count == 1 ? .one(first) : .several(fresh.count)
     }
 
+    /// "A new Wyze camera joined The Batcave" when Kilobat is sure of the type, else "A new device joined The Batcave".
+    public static func title(network: String, device: KnownDevice) -> String {
+        let guess = device.guess()
+        guard guess.sure else { return title(network: network) }
+        return String(localized: "A new \(guess.named) joined \(network)", comment: "Notification title; the arguments are a device's maker and type, such as “Wyze camera”, and the home network's Wi-Fi name")
+    }
     /// "A new device joined The Batcave"; the name stays on this Mac.
     public static func title(network: String, count: Int = 1) -> String {
         count == 1 ? String(localized: "A new device joined \(network)", comment: "Notification title; the argument is the home network's Wi-Fi name")
@@ -234,7 +269,15 @@ public enum DeviceAlert: Equatable, Sendable {
     }
     /// What is known: the device's name or maker, its address and when it joined.
     public static func body(_ device: KnownDevice) -> String {
+        let guess = device.guess()
         var parts = [device.label]
+        // "Probably a camera (Wyze)" says more than "Wyze Labs device"; a sure type is in the title already.
+        let named = !(device.name ?? "").isEmpty || DeviceNames.readable(device.hostname) != nil
+        if guess.type != .unknown, !guess.sure {
+            if named { parts.append(guess.label) } else { parts = [guess.label] }
+        } else if guess.sure, !named {
+            parts = []
+        }
         if let address = device.address { parts.append(address) }
         parts.append(String(localized: "first seen \(device.firstSeen.formatted(date: .omitted, time: .shortened))", comment: "Notification detail; the argument is a time"))
         return parts.joined(separator: " · ")
@@ -344,6 +387,27 @@ public enum DeviceNames {
         change { newcomers = $0.observe(sightings, network: key, name: name, router: router, vendor: vendor, names: names, now: now) }
         return newcomers
     }
+    /// Enriches only devices whose address was recently learned from the neighbour cache on this network.
+    /// Bonjour instance/friendly names are not identities: repeated names and ambiguous or stale addresses never
+    /// attach a model to a different device. This does not add devices, rename them, or emit new-device alerts.
+    public func observeServices(_ services: [BonjourService], network: String, now: Date = Date()) {
+        guard network != "unknown", !services.isEmpty else { return }
+        let grouped = BonjourBrowse.byAddress(services)
+        change { book in
+            guard var net = book.networks[network] else { return }
+            for (address, services) in grouped {
+                let matches = net.devices.indices.filter { index in
+                    let device = net.devices[index]
+                    let age = now.timeIntervalSince(device.lastSeen)
+                    return device.address == address && age >= 0 && age <= 600
+                }
+                guard matches.count == 1, let index = matches.first,
+                      let signals = DeviceSignals.from(services: services) else { continue }
+                net.devices[index].signals = DeviceSignals.merge(net.devices[index].signals, signals)
+            }
+            book.networks[network] = net
+        }
+    }
     public func isHome(_ network: String) -> Bool { book.networks[network]?.home == true }
     public func setHome(_ home: Bool, network: String, name: String) { change { $0.setHome(home, network: network, name: name) } }
     @discardableResult
@@ -354,7 +418,15 @@ public enum DeviceNames {
     public func rename(mac: String, to name: String, network: String? = nil) -> Bool {
         var found = false; change { found = $0.rename(mac: mac, to: name, network: network) }; return found
     }
+    @discardableResult
+    public func setType(_ type: DeviceType?, mac: String, network: String? = nil) -> Bool {
+        var found = false; change { found = $0.setType(type, mac: mac, network: network) }; return found
+    }
     public func markAlerted(mac: String, network: String, at date: Date = Date()) { change { $0.markAlerted(mac: mac, network: network, at: date) } }
+    /// MAC addresses on `network` whose UPnP description Kilobat already has, so a scan doesn't fetch it again.
+    public func described(on network: String) -> Set<String> {
+        Set(devices(on: network).filter { !($0.signals?.upnp.isEmpty ?? true) }.flatMap(\.macs))
+    }
     public func devices(on network: String) -> [KnownDevice] { book.networks[network]?.devices ?? [] }
     public func device(mac: String, network: String) -> KnownDevice? { book.device(mac: mac, network: network) }
 }

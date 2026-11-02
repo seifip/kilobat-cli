@@ -555,8 +555,8 @@ public struct StarlinkEvidence: Codable, Sendable {
 
     static func length(_ seconds: Double) -> String {
         seconds < 60 ? String(localized: "\(Int(seconds.rounded())) s", comment: "Seconds, abbreviated")
-            : seconds < 5400 ? String(localized: "\(String(format: "%.1f", seconds / 60)) min", comment: "Minutes with one decimal, abbreviated")
-            : String(localized: "\(String(format: "%.1f", seconds / 3600)) h", comment: "Hours, abbreviated")
+            : seconds < 5400 ? String(localized: "\(String(format: "%.1f", locale: Locale.current, seconds / 60)) min", comment: "Minutes with one decimal, abbreviated")
+            : String(localized: "\(String(format: "%.1f", locale: Locale.current, seconds / 3600)) h", comment: "Hours, abbreviated")
     }
 
     /// The finding: how often the dish was down, and which side each share was on.

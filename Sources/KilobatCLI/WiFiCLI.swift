@@ -37,7 +37,11 @@ import KilobatCore
             print("\(ssid ?? (radio.rssi == nil ? "Not connected" : "Connected · name hidden (open the Kilobat app to show it)"))")
             if let rssi = radio.rssi {
                 print("Signal \(rssi) dBm · SNR \(radio.snr.map { "\($0) dB" } ?? "—") · score \(radio.score ?? 0)/100")
-                print("Channel \(radio.channel.map(String.init) ?? "—") · \(radio.band ?? "—") · link \(radio.transmitMbps.map { String(format: "%.0f Mbps", $0) } ?? "—")")
+                print("Channel \(radio.channel.map(String.init) ?? "—") · \(radio.band ?? "—")\(radio.widthMHz.map { " · \($0) MHz" } ?? "") · link \(radio.transmitMbps.map { String(format: "%.0f Mbps", $0) } ?? "—")")
+                let standard = radio.standard.map { name in radio.phyMode.map { $0 == name ? name : "\(name) (\($0))" } ?? name }
+                let parts = [standard, radio.security, radio.transmitPowerDBm.map { "transmit \($0) dBm" }].compactMap { $0 }
+                if !parts.isEmpty { print(parts.joined(separator: " · ")) }
+                if let note = radio.securityInfo?.note { print(note) }
             }
         case "on", "off":
             guard args.count == 1 else { throw CLIError("Use wifi on or wifi off.") }
@@ -69,7 +73,67 @@ import KilobatCore
             if args[0] == "password" { print(password); return }
             print(qr(payload) ?? payload)
             print("\(name)\(password.isEmpty ? " · open network" : " · password: \(password)")")
-        default: throw CLIError("Use wifi [status|on|off|restart|disconnect|join|known|password|share]. Run kilobat wifi --help.")
+        case "nodes", "reconnect":
+            let command: WiFiNodesCommand
+            do { command = try WiFiNodesCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
+            try await nodes(command, json: json)
+        default: throw CLIError("Use wifi [status|on|off|restart|disconnect|join|known|password|share|nodes|reconnect]. Run kilobat wifi --help.")
+        }
+    }
+
+    // MARK: Mesh nodes
+
+    /// The nodes as the app sees them: BSSIDs need Location permission, which only the app has.
+    static func nodesReport() async throws -> [String: Any] {
+        guard AppRelay.appRunning else { throw CLIError("Wi-Fi nodes need the Kilobat app running: macOS shows access point addresses only to apps with Location access. Open it with kilobat open.") }
+        guard let data = await AppRelay.ask("nodes", timeout: .seconds(4)), let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CLIError("The Kilobat app didn’t answer. If it keeps not answering, update the app: older versions don’t list Wi-Fi nodes.")
+        }
+        return value
+    }
+    static func nodes(_ command: WiFiNodesCommand, json: Bool) async throws {
+        switch command {
+        case .list:
+            let report = try await nodesReport()
+            if json { try printObject(report); return }
+            let state = report["state"] as? String ?? ""
+            if state == "noLocation" { print("Kilobat needs Location access to see Wi-Fi nodes. Allow it in System Settings › Privacy & Security › Location Services."); return }
+            if state == "notWiFi" { print("Not on Wi-Fi."); return }
+            let nodes = report["nodes"] as? [[String: Any]] ?? []
+            if nodes.isEmpty { print(state == "checking" ? "Kilobat is still taking its first reading. Try again in a minute." : "No nodes heard yet."); return }
+            print("\(report["ssid"] as? String ?? "This network") · \(nodes.count == 1 ? "one node" : "\(nodes.count) nodes")")
+            for node in nodes {
+                let name = node["name"] as? String ?? "Unnamed node", current = node["current"] as? Bool == true
+                let bands = (node["bands"] as? [String] ?? []).joined(separator: ", ")
+                print("  \(current ? "●" : " ") \(KilobatCLI.pad(name, 20))\(KilobatCLI.pad("\(node["rssi"] as? Int ?? 0) dBm", 9))\(KilobatCLI.pad(bands, 16))\(node["id"] as? String ?? "")\(current ? "  (this Mac)" : "")")
+            }
+            if let headline = report["headline"] as? String {
+                print("")
+                print(headline + ". " + (report["detail"] as? String ?? ""))
+                if let advice = report["advice"] as? String { print(advice) }
+                print("Switch with: kilobat wifi reconnect")
+            } else if state == "watching" { print("A closer node is in range; Kilobat waits two minutes before calling it.") }
+            if nodes.contains(where: { $0["name"] is NSNull }) { print("Name one with: kilobat wifi nodes name <id> Office") }
+        case .name(let node, let name):
+            guard AppRelay.appRunning else { throw CLIError("Naming nodes needs the Kilobat app running. Open it with kilobat open.") }
+            let action = "nodes|name|\(node.replacingOccurrences(of: "|", with: ""))|\(name)"
+            guard let data = await AppRelay.ask(action, timeout: .seconds(4)), let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CLIError("The Kilobat app didn’t answer.") }
+            if json { try printObject(value); return }
+            guard value["named"] as? Bool == true else { throw CLIError(value["error"] as? String ?? "Couldn’t name that node.") }
+            print(name.trimmingCharacters(in: .whitespaces).isEmpty ? "✓ Name cleared." : "✓ Named \(name).")
+        case .reconnect:
+            guard AppRelay.appRunning else {
+                // Without the app there are no BSSIDs to aim at; off and on still lets macOS pick the strongest radio.
+                try await WiFiConnection().restart()
+                if json { try printObject(["reconnected": true, "method": "power", "node": NSNull(), "sentence": "Wi-Fi restarted. Open Kilobat to see which node you’re on."]) }
+                else { print("✓ Wi-Fi turned off and on; macOS joins the strongest radio it hears. Open Kilobat to see which node you’re on.") }
+                return
+            }
+            if !json { print("Reconnecting… Wi-Fi drops for a few seconds.") }
+            guard let data = await AppRelay.ask("nodes|reconnect", timeout: .seconds(60)), let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CLIError("The Kilobat app didn’t answer.") }
+            if json { try printObject(value); return }
+            guard value["reconnected"] as? Bool == true else { throw CLIError(value["error"] as? String ?? "Couldn’t reconnect.") }
+            print((value["better"] as? Bool == true ? "✓ " : "") + (value["sentence"] as? String ?? "Reconnected."))
         }
     }
 
@@ -81,7 +145,10 @@ import KilobatCore
         if ssid == nil { ssid = await appSSID() }
         return ["powered": powered, "ssid": ssid ?? NSNull(), "interface": radio.interface ?? NSNull(), "rssi": radio.rssi ?? NSNull(),
                 "noise": radio.noise ?? NSNull(), "signalNoiseRatio": radio.snr ?? NSNull(), "channel": radio.channel ?? NSNull(), "band": radio.band ?? NSNull(),
-                "transmitMbps": radio.transmitMbps ?? NSNull(), "score": radio.score ?? NSNull()]
+                "transmitMbps": radio.transmitMbps ?? NSNull(), "score": radio.score ?? NSNull(), "widthMHz": radio.widthMHz ?? NSNull(),
+                "standard": radio.standard ?? NSNull(), "phyMode": radio.phyMode ?? NSNull(), "security": radio.security ?? NSNull(),
+                "securityLevel": radio.securityInfo?.level.rawValue ?? NSNull(), "securityNote": radio.securityInfo?.note ?? NSNull(),
+                "transmitPowerDBm": radio.transmitPowerDBm ?? NSNull(), "countryCode": radio.countryCode ?? NSNull()]
     }
     static func interfaceName() -> String { CWWiFiClient.shared().interface()?.interfaceName ?? "en0" }
 
@@ -286,8 +353,8 @@ import KilobatCore
 
     /// A redacted report for an ISP or IT desk: findings, latency, outages, speed tests and an optional host check.
     static func supportReport(_ args: [String], json: Bool) async throws {
-        let usage = "Use support-report [--hours 1…168] [--host <host>] [--markdown|--html] [--output <file>] [--json]."
-        var hours = 24, host: String?, format = "text", output: String?
+        let usage = "Use support-report [--hours 1…168] [--host <host>] [--include-sites] [--markdown|--html] [--output <file>] [--json]."
+        var hours = 24, host: String?, format = "text", output: String?, includeSites = false
         var index = 0
         while index < args.count {
             switch args[index] {
@@ -300,12 +367,13 @@ import KilobatCore
             case "--output", "-o":
                 guard index + 1 < args.count else { throw CLIError(usage) }
                 output = args[index + 1]; index += 2
+            case "--include-sites": includeSites = true; index += 1
             case "--markdown": format = "markdown"; index += 1
             case "--html": format = "html"; index += 1
             default: throw CLIError(usage)
             }
         }
-        let report = try await makeSupportReport(hours: hours, host: host)
+        let report = try await makeSupportReport(hours: hours, host: host, includeSites: includeSites)
         let body: String
         if json { body = String(decoding: try DiagnosticsCLI.encode(report), as: UTF8.self) }
         else { body = format == "html" ? report.html : format == "markdown" ? report.markdown : report.text }
@@ -316,7 +384,8 @@ import KilobatCore
         } else { print(body) }
     }
 
-    static func makeSupportReport(hours: Int, host: String?) async throws -> SupportReport {
+    /// Without the names of the sites in it unless `includeSites`: the checked host and a slow service's name.
+    static func makeSupportReport(hours: Int, host: String?, includeSites: Bool = false) async throws -> SupportReport {
         let journal = NetworkJournal()
         let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
         let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
@@ -326,9 +395,10 @@ import KilobatCore
         if status != nil, let history = await Starlink.history() { dish.merge(history.outages); dish.lastSeen = Date() }
         // A slow route to one service, from what the app measured on this network.
         let services = journal.samples.last.map { ServiceSpeedReport(log: ServiceSpeedWatch.load(), network: $0.networkKey, speedTests: journal.speedTests) }
-        return SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
-                                  hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
-                                  starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours), serviceSpeed: services)
+        let report = SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
+                                        hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
+                                        starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours), serviceSpeed: services)
+        return includeSites ? report : report.withoutSiteNames()
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {
@@ -381,10 +451,20 @@ import KilobatCore
                 read: { _ in defaults.bool(forKey: "networkAlerts") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "networkAlerts") }, appRestart: true),
         Setting(key: "router-alerts", values: "on|off", detail: "Pro: one notification when the router has been slower than its normal for days (on by default)",
                 read: { _ in RouterWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: RouterWatch.alertsKey) }),
+        Setting(key: "node-alerts", values: "on|off", detail: "One notification when the Mac stays on a far Wi-Fi mesh node for five minutes (on by default)",
+                read: { _ in NodeWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: NodeWatch.alertsKey) }),
         Setting(key: "bluetooth-audio-alerts", values: "on|off", detail: "One notification per listening session when Wi-Fi may make Bluetooth audio crackle (on by default)",
                 read: { _ in BluetoothAudioWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: BluetoothAudioWatch.alertsKey) }),
         Setting(key: "digest", values: "on|off", detail: "One notification with last week's outages, calls and data, Monday at 9 by default (on by default; day and time in the app)",
                 read: { _ in DigestSchedule.load(defaults).enabled ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: DigestSchedule.enabledKey) }, appRestart: true),
+        Setting(key: "block-alerts", values: "on|off", detail: "One notification per service, network and day when a service you use looks blocked on this network (on by default)",
+                read: { _ in defaults.object(forKey: "blockAlerts") as? Bool ?? true ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "blockAlerts") }, appRestart: true),
+        Setting(key: "block-check-resolver", values: "cloudflare|quad9", detail: "Asked over DNS-over-HTTPS for a control answer, only while a failure is diagnosed (Cloudflare by default)",
+                read: { TrustedResolver.chosen($0.preferences).rawValue },
+                write: { store, value in
+                    guard let resolver = TrustedResolver(rawValue: value) else { throw CLIError("Use cloudflare or quad9.") }
+                    store.preferences.blockCheckResolver = resolver == .cloudflare ? nil : resolver.rawValue
+                }),
         Setting(key: "outage-trace", values: "on|off", detail: "Run a route trace automatically during outages",
                 read: { _ in defaults.bool(forKey: "automaticOutageTrace") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "automaticOutageTrace") }, appRestart: true),
         Setting(key: "public-ip", values: "on|off", detail: "Have the app ask Cloudflare for your public IP on network changes and every 30 minutes (off by default)",

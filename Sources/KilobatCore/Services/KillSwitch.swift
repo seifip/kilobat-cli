@@ -54,6 +54,12 @@ public struct KillSwitchPolicy: Sendable, Equatable {
         return false
     }
 
+    /// When "allow for 5 minutes" ends, while it holds off a kill switch that would otherwise block now.
+    public func pausedUntil(now: Date = Date(), tunnelUp: (String) -> Bool = { _ in true }) -> Date? {
+        guard armed, let allowedUntil, allowedUntil > now else { return nil }
+        return vpnDown || tunnel.map({ !tunnelUp($0) }) == true ? allowedUntil : nil
+    }
+
     /// Why a connection still goes through while the kill switch blocks.
     public enum Exemption: Sendable, Equatable {
         case kilobat

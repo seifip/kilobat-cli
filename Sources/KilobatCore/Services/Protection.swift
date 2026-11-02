@@ -411,6 +411,21 @@ public enum ProtectionCheck {
         return detail(match, agent: nil)
     }
 
+    /// Only for the rule inspector: the site the person allowed ("Allow this site") that keeps a host one of the lists
+    /// in use has, or an agent-guard rule would stop, out of Protection's reach.
+    public static func allowedSite(_ flow: FilterPolicy.Flow, settings: ProtectionSettings, index: ProtectionIndex?) -> String? {
+        guard settings.active, !settings.allowed.isEmpty else { return nil }
+        let (host, address) = names(flow)
+        guard !HostName.isLocal(host, address: address),
+              let site = settings.allowed.first(where: { site in [host, address].contains { $0.map { $0 == site || $0.hasSuffix("." + site) } == true } }) else { return nil }
+        var categories: Set<ProtectionCategory> = []
+        if settings.threats || settings.agentGuard { categories.formUnion(ProtectionCategory.threats) }
+        if settings.trackers { categories.insert(.tracker) }
+        if let index, index.match(host: host, address: address, in: categories) != nil { return site }
+        if settings.agentGuard, let host, !HostName.isAddress(host), AgentHostRules.share(host) != nil { return site }
+        return nil
+    }
+
     /// The agent guard's upload limit for this connection: set when an agent's process sends to a host no agent on
     /// this Mac used before (and that isn't a package registry or the agent's own service).
     public static func uploadLimit(_ flow: FilterPolicy.Flow, settings: ProtectionSettings, index: ProtectionIndex?, agent: () -> AgentOwner?) -> (limit: UInt64, owner: AgentOwner)? {

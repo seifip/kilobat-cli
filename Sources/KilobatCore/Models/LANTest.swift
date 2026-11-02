@@ -14,7 +14,7 @@ public struct LANTestResult: Codable, Sendable, Equatable {
     public let retransmits: Int?
 
     public var summary: String {
-        let mbps = String(format: "%.0f", receivedMbps), time = String(format: "%.0f", seconds), moved = TrafficFormat.bytes(UInt64(max(0, bytes)))
+        let mbps = String(format: "%.0f", locale: Locale.current, receivedMbps), time = String(format: "%.0f", locale: Locale.current, seconds), moved = TrafficFormat.bytes(UInt64(max(0, bytes)))
         var text = direction == "upload" ? String(localized: "This Mac → \(host): \(mbps) Mbps received over \(time) s") : String(localized: "\(host) → this Mac: \(mbps) Mbps received over \(time) s")
         if streams > 1 { text += " " + String(localized: "on \(streams) streams") }
         if let retransmits { text += " · " + String(localized: "\(retransmits) retransmissions") }

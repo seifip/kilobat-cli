@@ -135,6 +135,25 @@ public struct HostLookup: Sendable {
         dirty = true; persist(now: Date(), force: true)
     }
 
+    /// Clears a period or forgets a site (see `HistoryEraser`), and saves at once. Returns how many hosts went.
+    @discardableResult public func erase(_ action: HistoryAction, now: Date = Date()) throws -> Int {
+        let removed = HistoryEraser.apply(action, to: &sessions, pastHosts: &pastHosts, now: now)
+        // The name a forgotten host's address had goes too, so a later connection there isn't named from it.
+        switch action {
+        case .forget(let match): names = names.filter { !match.matches($0.value.host) && !match.matches($0.key) }
+        case .clear(.all): names = [:]
+        case .clear: break
+        }
+        dirty = true
+        if let file, !previewing {
+            let saved = AgentLogFile(recording: allowed(), updated: now, sessions: sessions.filter { !$0.hosts.isEmpty || $0.end == nil }, pastHosts: pastHosts.sorted())
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try saved.data().write(to: file, options: .atomic)
+        }
+        dirty = false; lastPersist = now
+        return removed
+    }
+
     /// One nettop sample. Its first sighting of a process only sets the baseline, unless the process started after the last sample.
     public func consume(_ snapshot: TrafficSnapshot) {
         let now = snapshot.timestamp

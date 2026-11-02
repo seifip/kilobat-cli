@@ -20,7 +20,7 @@ enum DiagnosticsCLI {
             if args.contains("--json") { print(String(decoding: try scanJSON(networks), as: UTF8.self)) }
             else {
                 print("Nearby Wi-Fi networks · macOS Location permission may be required\n")
-                for network in networks { print("\(KilobatCLI.pad(network.ssid, 30)) \(network.rssi) dBm · Ch \(network.channel > 0 ? String(network.channel) : "—") · \(network.band == "Unknown" ? "—" : network.band) · \(network.widthMHz) MHz") }
+                for network in networks { print("\(KilobatCLI.pad(network.ssid, 30)) \(network.rssi) dBm · Ch \(network.channel > 0 ? String(network.channel) : "—") · \(network.band == "Unknown" ? "—" : network.band) · \(network.widthMHz) MHz\(network.security.map { " · \($0)" } ?? "")") }
                 if networks.isEmpty { print("No networks returned. Enable Wi-Fi scanning in the Kilobat app.") }
                 else if networks.allSatisfy({ $0.ssid == "Hidden network" }) { print("\nNames are hidden: macOS shows them only to apps with Location permission. Open the Kilobat app and run this again.") }
             }
@@ -110,7 +110,8 @@ enum DiagnosticsCLI {
     /// Scan results with unmeasured noise, channel and band as null, so agents never compute SNR against 0 dBm.
     static func scanJSON(_ networks: [NearbyNetwork]) throws -> Data {
         try encode(networks.map { ScanOutput(id: $0.id, ssid: $0.ssid, rssi: $0.rssi, noise: $0.noise == 0 ? nil : $0.noise, channel: $0.channel > 0 ? $0.channel : nil,
-                                             band: $0.band == "Unknown" ? nil : $0.band, widthMHz: $0.widthMHz) })
+                                             band: $0.band == "Unknown" ? nil : $0.band, widthMHz: $0.widthMHz,
+                                             security: $0.security, securityLevel: $0.securityInfo?.level.rawValue) })
     }
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
         try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
@@ -142,12 +143,13 @@ enum DiagnosticsCLI {
         let internetJitterMs: Double?
     }
     private struct ScanOutput: Encodable {
-        let id: String, ssid: String, rssi: Int, noise: Int?, channel: Int?, band: String?, widthMHz: Int
-        enum CodingKeys: CodingKey { case id, ssid, rssi, noise, channel, band, widthMHz }
+        let id: String, ssid: String, rssi: Int, noise: Int?, channel: Int?, band: String?, widthMHz: Int, security: String?, securityLevel: String?
+        enum CodingKeys: CodingKey { case id, ssid, rssi, noise, channel, band, widthMHz, security, securityLevel }
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(id, forKey: .id); try container.encode(ssid, forKey: .ssid); try container.encode(rssi, forKey: .rssi)
             try container.encode(noise, forKey: .noise); try container.encode(channel, forKey: .channel); try container.encode(band, forKey: .band); try container.encode(widthMHz, forKey: .widthMHz)
+            try container.encode(security, forKey: .security); try container.encode(securityLevel, forKey: .securityLevel)
         }
     }
     private struct RadioOutput: Encodable {

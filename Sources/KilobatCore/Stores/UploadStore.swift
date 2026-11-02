@@ -35,6 +35,11 @@ import UserNotifications
     /// App IDs whose temporary block is this store's, so only those are cleared.
     @ObservationIgnored private var blocked: [String: Set<String>] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
+    /// True while the Mac is on a data pack set to hold big uploads: each one that can be held is, until an unmetered network.
+    @ObservationIgnored public var autoHold: () -> Bool = { false }
+    /// Uploads sent by hand, or that couldn't be held, which holding automatically leaves alone until the network changes.
+    @ObservationIgnored private var declined: Set<String> = []
+    @ObservationIgnored private var declinedOn: String?
     private let ledger: URL
     private let defaults: UserDefaults
 
@@ -42,6 +47,13 @@ import UserNotifications
         self.ledger = ledger; self.defaults = defaults
         // Whatever a previous run left suspended resumes before this one holds anything.
         CallMode.recoverAtLaunch(ledger: ledger)
+    }
+
+    /// The hold behind each app ID this store blocks with a timed rule, for the rule inspector.
+    public var heldApps: [String: UploadHold] {
+        var held: [String: UploadHold] = [:]
+        for hold in holds { for id in blocked[hold.key] ?? [] { held[id] = hold } }
+        return held
     }
 
     /// Networks you said are fast enough, by key.
@@ -86,8 +98,20 @@ import UserNotifications
         }
         last = last.filter { seen.contains($0.key) }
         live = tracker.observe(readings, elapsed: elapsed, threshold: threshold, now: now)
+        holdAutomatically(traffic: traffic, now: now)
         checkHolds(traffic: traffic, now: now)
         publish()
+    }
+
+    /// On a data pack that asks for it, a big upload is held as soon as it shows, until an unmetered network.
+    private func holdAutomatically(traffic: TrafficStore, now: Date) {
+        if declinedOn != traffic.networkKey { declined = []; declinedOn = traffic.networkKey }
+        guard !live.isEmpty, autoHold(), allowed() else { return }
+        for item in live where !holds.contains(where: { $0.key == item.key }) && !declined.contains(item.key) {
+            guard let hold = try? hold(item.key, until: .unmetered, now: now) else { declined.insert(item.key); continue }
+            notify(String(localized: "Upload held for Wi-Fi", comment: "Notification title: a big upload was held automatically on a data pack"),
+                   String(localized: "\(hold.name)’s upload waits until an unmetered network, so it doesn’t use your data pack. Send it now from Kilobat’s menu.", comment: "Notification: 'Dropbox’s upload waits…'"))
+        }
     }
 
     /// The row's list from the last sample's big uploads and what's held.
@@ -229,6 +253,8 @@ import UserNotifications
         blocked[hold.key] = nil
         holds.removeAll { $0.key == hold.key }
         uploads.removeAll { $0.key == hold.key }
+        // Sent by hand or by opening the app: not held again automatically on this network.
+        if reason == .manual || reason == .opened { declined.insert(hold.key) }
         let place = network?.name ?? ""
         switch reason {
         case .condition: notify(String(localized: "Upload resumed", comment: "Notification title: a held upload went again"),

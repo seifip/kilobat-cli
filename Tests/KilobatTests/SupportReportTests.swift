@@ -56,6 +56,31 @@ struct SupportReportTests {
         #expect(report.connection == "Wi-Fi 5 GHz, channel 149, signal -55 dBm, link 400 Mbps")
     }
 
+    @Test func leavesOutSiteNamesUnlessAsked() {
+        let check = DoctorReport(target: "https://api.github.com/", host: "api.github.com", app: nil, verdict: "API.GitHub.com doesn’t answer from this Mac.", next: "",
+                                 steps: [DoctorStep(layer: "DNS", status: .ok, detail: "api.github.com → 203.0.113.4 in 1 ms."),
+                                         DoctorStep(layer: "TLS", status: .failed, detail: "The handshake with api.github.com timed out. Redirected through https://auth.example.net/private-document?token=[redacted] and login.example.org/sensitive-page.")],
+                                 date: now)
+        var full = SupportReport.make(samples: [sample(30, router: 3, internet: 30, ssid: "Home")], events: [], speedTests: [], hours: 24, check: check, mac: "Mac", now: now)
+        full.serviceRoute = SupportReport.ServiceRoute(service: "GitHub", slowMbps: 2, elsewhereMbps: 200, transfers: 4, since: now - 3_600, pattern: "Evenings, when GitHub is busiest.",
+                                                       trace: "Delay rose at the fourth hop toward 198.51.100.3.", address: "198.51.100.3")
+        full.findings.append("Downloads from GitHub ran at about 2 Mbps.")
+        let quiet = full.withoutSiteNames()
+        for output in [quiet.text, quiet.markdown, quiet.html, String(decoding: try! JSONEncoder().encode(quiet), as: UTF8.self)] {
+            #expect(!output.localizedCaseInsensitiveContains("github"), "\(output)")
+            #expect(!output.contains("198.51.100.3"))
+            #expect(!output.contains("auth.example.net") && !output.contains("login.example.org"))
+            #expect(!output.contains("private-document") && !output.contains("sensitive-page"))
+            #expect(output.contains("203.0.113.4"), "the measurements, addresses of the check included, stay")
+        }
+        #expect(quiet.check?.host == "the site checked" && quiet.serviceRoute?.service == "one service" && quiet.serviceRoute?.address == nil)
+        #expect(quiet.leftOut.count == full.leftOut.count + 1)
+        #expect(full.text.contains("api.github.com") && full.text.contains("GitHub"), "ticked, the names stay")
+        // Nothing named: the report is as it was.
+        let plain = SupportReport.make(samples: [], events: [], speedTests: [], hours: 24, mac: "Mac", now: now)
+        #expect(plain.withoutSiteNames().leftOut == plain.leftOut)
+    }
+
     @Test func comparesSpeedsWithThePlan() {
         let ping = PingResult(host: "1.1.1.1", samples: [20, 21], lossPercent: 0)
         let result = SpeedTestResult(date: now.addingTimeInterval(-600), downloadMbps: 50, uploadMbps: 10, baseline: ping, downloadLoaded: ping, uploadLoaded: ping,

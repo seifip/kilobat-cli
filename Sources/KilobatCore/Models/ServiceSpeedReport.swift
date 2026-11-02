@@ -194,8 +194,8 @@ public struct ServiceSpeedReport: Codable, Sendable {
     static func traceSentence(_ trace: ServiceRouteTrace) -> String {
         if let hop = trace.hop, let rise = trace.riseMs {
             return hop <= 1
-                ? String(localized: "Route trace: the delay rises at your router (+\(String(format: "%.0f", rise)) ms).", comment: "Service speed evidence from a route trace")
-                : String(localized: "Route trace: the delay rises by \(String(format: "%.0f", rise)) ms at hop \(hop), beyond your router, and stays up to \(trace.address).", comment: "Service speed evidence from a route trace: a latency rise, a hop number, the server address")
+                ? String(localized: "Route trace: the delay rises at your router (+\(String(format: "%.0f", locale: Locale.current, rise)) ms).", comment: "Service speed evidence from a route trace")
+                : String(localized: "Route trace: the delay rises by \(String(format: "%.0f", locale: Locale.current, rise)) ms at hop \(hop), beyond your router, and stays up to \(trace.address).", comment: "Service speed evidence from a route trace: a latency rise, a hop number, the server address")
         }
         return String(localized: "Route trace to \(trace.address): \(trace.verdict)", comment: "Service speed evidence: a route trace's verdict")
     }
@@ -214,7 +214,7 @@ public struct ServiceSpeedReport: Codable, Sendable {
         let sorted = values.sorted(), middle = sorted.count / 2
         return sorted.count.isMultiple(of: 2) ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle]
     }
-    public static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", value) }
+    public static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", locale: Locale.current, value) }
 
     /// One line for the provider report, when there's a route finding.
     public var providerLine: String? {
@@ -226,6 +226,8 @@ public struct ServiceSpeedReport: Codable, Sendable {
 
     /// The terminal's table.
     public var text: String {
+        // The fixed-width technical table keeps ASCII digits and a period; app/report labels use the user's locale.
+        func tableMbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", value) }
         var lines = ["\(networkName) · " + (capacity.map { "line \(Self.mbps($0.mbps)) (\($0.source == "speedTest" ? "speed test" : "fastest download") \($0.date.formatted(date: .abbreviated, time: .shortened)))" } ?? "no speed test or big download here yet")]
         if let finding {
             lines.append("✗ \(finding.headline)")
@@ -240,9 +242,9 @@ public struct ServiceSpeedReport: Codable, Sendable {
         lines.append("Service                 Typical      Latest        vs line  Downloads")
         for row in rows {
             let line = row.percentOfLine.map { String(format: "%5.0f%%", $0) } ?? "    —"
-            let latest = Self.mbps(row.latestMbps).padding(toLength: 10, withPad: " ", startingAt: 0) + " " + row.latest.formatted(.dateTime.hour().minute())
+            let latest = tableMbps(row.latestMbps).padding(toLength: 10, withPad: " ", startingAt: 0) + " " + row.latest.formatted(.dateTime.hour().minute())
             let mark = row.state == "slow" ? " ✗" : row.state == "mixed" ? " ~" : ""
-            lines.append(row.name.padding(toLength: 22, withPad: " ", startingAt: 0) + "  " + Self.mbps(row.typicalMbps).padding(toLength: 11, withPad: " ", startingAt: 0)
+            lines.append(row.name.padding(toLength: 22, withPad: " ", startingAt: 0) + "  " + tableMbps(row.typicalMbps).padding(toLength: 11, withPad: " ", startingAt: 0)
                          + "  " + latest.padding(toLength: 16, withPad: " ", startingAt: 0) + line + "  \(row.transfers)" + mark)
             if let pattern = row.pattern { lines.append("    \(pattern.sentence)") }
         }

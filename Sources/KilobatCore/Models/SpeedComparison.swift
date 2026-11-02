@@ -75,7 +75,7 @@ public struct SpeedComparison: Codable, Sendable {
                 add("signal", "\(a) dBm", "\(b) dBm", String(localized: "A weaker signal lowers the Wi-Fi link rate and causes retries; 6 dB is about a quarter of the signal power."))
             }
             if let a = cx.transmitMbps, let b = cy.transmitMbps, max(a, b) > 0, abs(a - b) / max(a, b) >= 0.3 {
-                add("linkRate", String(format: "%.0f Mbps", a), String(format: "%.0f Mbps", b), String(localized: "The Wi-Fi link rate is the ceiling between the Mac and the router; real throughput is usually well under half of it."))
+                add("linkRate", String(format: "%.0f Mbps", locale: Locale.current, a), String(format: "%.0f Mbps", locale: Locale.current, b), String(localized: "The Wi-Fi link rate is the ceiling between the Mac and the router; real throughput is usually well under half of it."))
             }
             if let a = cx.otherBytes, let b = cy.otherBytes {
                 let busy = { (bytes: Int, test: Int) in bytes >= 5_000_000 && Double(bytes) >= Double(test) * 0.1 }
@@ -86,7 +86,7 @@ public struct SpeedComparison: Codable, Sendable {
             if cx.kind == nil || cy.kind == nil { missing.append(String(localized: "connection")) }
         } else { missing += [String(localized: "connection"), "VPN", String(localized: "Wi-Fi band and signal"), String(localized: "other traffic")] }
         if let a = x.baseline.average, let b = y.baseline.average, abs(a - b) >= 20, max(a, b) >= min(a, b) * 1.5 {
-            add("latency", String(format: "%.0f ms", a), String(format: "%.0f ms", b), String(localized: "Higher idle latency means a longer or busier path, and a single connection speeds up more slowly over it."))
+            add("latency", String(format: "%.0f ms", locale: Locale.current, a), String(format: "%.0f ms", locale: Locale.current, b), String(localized: "Higher idle latency means a longer or busier path, and a single connection speeds up more slowly over it."))
         }
         let capped = { (result: SpeedTestResult) in result.downloadSeconds < 7.5 }
         if capped(x) != capped(y) {
@@ -95,8 +95,11 @@ public struct SpeedComparison: Codable, Sendable {
         differences = found
         unknown = Array(NSOrderedSet(array: missing)) as? [String] ?? missing
 
-        let download = String(format: "%.1f → %.1f", x.downloadMbps, y.downloadMbps), downloadChange = downloadChangePercent.map { String(format: " (%+.0f%%)", $0) } ?? ""
-        let upload = String(format: "%.1f → %.1f", x.uploadMbps, y.uploadMbps), uploadChange = uploadChangePercent.map { String(format: " (%+.0f%%)", $0) } ?? ""
+        func transition(_ before: Double, _ after: Double) -> String {
+            String(localized: "\(String(format: "%.1f", locale: Locale.current, before)) → \(String(format: "%.1f", locale: Locale.current, after))", comment: "Speed comparison: previous value, arrow, next value. Arabic uses a left-pointing arrow; keep the value arguments in their original before/after roles.")
+        }
+        let download = transition(x.downloadMbps, y.downloadMbps), downloadChange = downloadChangePercent.map { String(format: " (%+.0f%%)", locale: Locale.current, $0) } ?? ""
+        let upload = transition(x.uploadMbps, y.uploadMbps), uploadChange = uploadChangePercent.map { String(format: " (%+.0f%%)", locale: Locale.current, $0) } ?? ""
         let headline = String(localized: "Download \(download) Mbps\(downloadChange), upload \(upload) Mbps\(uploadChange).")
         let factors = Dictionary(uniqueKeysWithValues: [("network", String(localized: "network")), ("time", String(localized: "time of day")), ("server", String(localized: "server")),
                                                          ("method", String(localized: "number of connections")), ("connection", String(localized: "connection")), ("vpn", "VPN"),

@@ -14,16 +14,34 @@ import UserNotifications
         ledger = StoredJSON.read(url) ?? AlertLedger()
     }
 
-    /// `budgets` says whether budget and quota alerts are on (they are Pro); upload alerts follow their own setting.
+    /// Posts a data pack's alert; the app adds the button that holds big uploads. Without it, a plain notification.
+    public var packAlert: (@MainActor (DataPackAlert) -> Void)?
+
+    /// `budgets` says whether budget, quota and data pack alerts are on (they are Pro); upload alerts follow their own setting.
     public func start(_ store: TrafficStore, budgets: @escaping @MainActor () -> Bool) {
         guard task == nil else { return }
         task = Task { [weak self, weak store] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(30)) } catch { return }
                 guard let self, let store else { return }
-                for (title, body) in self.check(store, budgets: budgets()) { Self.post(title, body) }
+                let pro = budgets()
+                for (title, body) in self.check(store, budgets: pro) { Self.post(title, body) }
+                guard pro else { continue }
+                for alert in self.checkPacks(store) {
+                    if let packAlert = self.packAlert { packAlert(alert) } else { Self.post(alert.title, alert.body) }
+                }
             }
         }
+    }
+
+    /// Running data packs' alerts due now, marked as sent: thresholds once each, running out early at most daily.
+    public func checkPacks(_ store: TrafficStore, now: Date = Date()) -> [DataPackAlert] {
+        let statuses = store.dataPacks.filter { $0.active(at: now) }.map { store.packStatus($0, now: now) }
+        guard !statuses.isEmpty else { return [] }
+        let before = ledger
+        let alerts = DataPackAlert.due(statuses, ledger: &ledger, now: now)
+        if ledger != before { try? JSONEncoder().encode(ledger).write(to: url, options: .atomic) }
+        return alerts
     }
 
     /// The alerts due now, marked as sent.

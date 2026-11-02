@@ -208,9 +208,9 @@ struct FastestDNSTests {
     /// closures that change their argument.
     private func situation(network: String? = "home", enabled: Bool = true, pro: Bool = true, helper: Bool = true, vpn: Bool = false,
                            managed: Bool = false, portal: Bool = false, verdict: FastestDNS.Verdict? = nil, failed: Set<String> = [],
-                           applied: DNSApplied? = nil, serviceServers: [String] = []) -> FastestDNS.Situation {
+                           applied: DNSApplied? = nil, serviceServers: [String] = [], fallback: DNSResolverChoice? = nil) -> FastestDNS.Situation {
         FastestDNS.Situation(network: network, enabled: enabled, pro: pro, helper: helper, vpn: vpn, managed: managed, portal: portal,
-                             serviceServers: serviceServers, applied: applied, verdict: verdict ?? faster, failed: failed)
+                             serviceServers: serviceServers, applied: applied, verdict: verdict ?? faster, failed: failed, fallback: fallback)
     }
 
     @Test func switchesWhenEverythingAllows() {
@@ -334,6 +334,229 @@ struct FastestDNSTests {
         #expect(watch.applied == nil && watch.hold == .off)
     }
 
+    // MARK: Fallback
+
+    @Test func aFailedPickGoesToTheFallback() {
+        let onQuad9 = applied(), quad9 = DNSResolverChoice.quad9.servers
+        // Quad9 failed here: Cloudflare, the fallback, takes over straight from Quad9 or from automatic.
+        #expect(FastestDNS.plan(situation(failed: ["quad9"], applied: onQuad9, serviceServers: quad9, fallback: .cloudflare)) == .fallback(.cloudflare))
+        #expect(FastestDNS.plan(situation(failed: ["quad9"], fallback: .cloudflare)) == .fallback(.cloudflare))
+        // Already on it.
+        var onCloudflare = applied("cloudflare"); onCloudflare.fallback = true
+        #expect(FastestDNS.plan(situation(failed: ["quad9"], applied: onCloudflare, serviceServers: DNSResolverChoice.cloudflare.servers, fallback: .cloudflare)) == .hold(.onFallback))
+        // The fallback failed too, or it's the pick itself: the network's own.
+        #expect(FastestDNS.plan(situation(failed: ["quad9", "cloudflare"], applied: onCloudflare, serviceServers: DNSResolverChoice.cloudflare.servers, fallback: .cloudflare)) == .revert(.watchdog))
+        #expect(FastestDNS.plan(situation(failed: ["quad9", "cloudflare"], fallback: .cloudflare)) == .hold(.failedRecently))
+        #expect(FastestDNS.plan(situation(failed: ["quad9"], fallback: .quad9)) == .hold(.failedRecently))
+        #expect(FastestDNS.plan(situation(failed: ["quad9"], fallback: .network)) == .hold(.failedRecently))
+        // Without the helper nothing switches, and Kilobat's own change goes rather than stay on a failing resolver.
+        #expect(FastestDNS.plan(situation(helper: false, failed: ["quad9"], applied: onQuad9, serviceServers: quad9, fallback: .cloudflare)) == .revert(.watchdog))
+        // Once the pick's pause is over, it's back to the pick.
+        #expect(FastestDNS.plan(situation(applied: onCloudflare, serviceServers: DNSResolverChoice.cloudflare.servers, fallback: .cloudflare)) == .apply(.quad9))
+        // A VPN still gets its own DNS while on the fallback.
+        #expect(FastestDNS.plan(situation(vpn: true, failed: ["quad9"], applied: onCloudflare, serviceServers: DNSResolverChoice.cloudflare.servers, fallback: .cloudflare)) == .revert(.vpn))
+    }
+
+    @Test func onlyAUsableFallbackCounts() {
+        let latest = DNSRun(date: at(0), resolvers: [resolver("network", 30), resolver("quad9", 12), resolver("google", 20, failures: 5)])
+        #expect(FastestDNS.fallback("cloudflare", excluded: [], latest: latest) == .cloudflare)
+        #expect(FastestDNS.fallback("quad9", excluded: [], latest: latest) == .quad9)
+        #expect(FastestDNS.fallback(nil, excluded: [], latest: latest) == nil)
+        #expect(FastestDNS.fallback("network", excluded: [], latest: latest) == nil)
+        #expect(FastestDNS.fallback("cloudflare", excluded: ["cloudflare"], latest: latest) == nil)
+        // Failing in the latest run here.
+        #expect(FastestDNS.fallback("google", excluded: [], latest: latest) == nil)
+        #expect(FastestDNS.fallback("custom:94.140.14.14", excluded: [], latest: nil)?.servers == ["94.140.14.14"])
+        #expect(FastestDNS.fallback("nonsense", excluded: [], latest: nil) == nil)
+    }
+
+    @MainActor @Test func watchMovesToTheFallbackThenToAutomatic() async throws {
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        // Cloudflare answers Kilobat's own lookup; Quad9 doesn't.
+        let watch = FastestDNSWatch(directory: nil, system: system, probe: FakeProbe(lookups: ["1.1.1.1": 15]), calendar: calendar)
+        var preferences = SavedPreferences(); preferences.setFastestDNS(true, network: nil); preferences.setDNSFallback(.cloudflare)
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: at(3))
+        record.runs = (0..<4).map { run($0, network: 48, [("quad9", 12)]) }
+        watch.preview(record)
+        watch.allowed = { true }; watch.preferences = { preferences }; watch.applier = applier
+        var logged: [DNSSwitch.Reason] = []
+        watch.onSwitch = { logged.append($0.reason) }
+
+        let now = at(3, 12)
+        await watch.observe(context(lookupWorked: true), now: now)
+        #expect(system.servers == DNSResolverChoice.quad9.servers)
+
+        // Quad9 stops answering: straight to Cloudflare, never through a moment without DNS.
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(60))
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(120))
+        #expect(system.servers == DNSResolverChoice.cloudflare.servers && watch.applied?.onFallback == true && watch.applied?.resolver == "cloudflare")
+        #expect(logged == [.fastest, .fallback] && watch.switches.last?.from == "quad9" && applier.calls == 2)
+        await watch.observe(context(lookupWorked: true), now: now.addingTimeInterval(180))
+        #expect(watch.hold == .onFallback && system.servers == DNSResolverChoice.cloudflare.servers)
+
+        // Then Cloudflare fails too: the network's own, and both wait a day here.
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(240))
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(300))
+        #expect(system.servers.isEmpty && watch.applied == nil && logged == [.fastest, .fallback, .watchdog])
+        #expect(watch.record?.failed(at: now.addingTimeInterval(360)) == ["quad9", "cloudflare"])
+        await watch.observe(context(lookupWorked: true), now: now.addingTimeInterval(360))
+        #expect(system.servers.isEmpty && watch.hold == .failedRecently)
+
+        // A day after Quad9 failed, Quad9 again.
+        await watch.observe(context(lookupWorked: true), now: now.addingTimeInterval(86_400 + 400))
+        #expect(watch.applied?.resolver == "quad9" && watch.applied?.onFallback == false)
+    }
+
+    @MainActor @Test func aFallbackThatDoesntAnswerIsSkipped() async throws {
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        // Nothing answers Kilobat's own lookups: neither Quad9 nor the fallback.
+        let watch = FastestDNSWatch(directory: nil, system: system, probe: FakeProbe(lookups: [:]), calendar: calendar)
+        var preferences = SavedPreferences(); preferences.setFastestDNS(true, network: nil); preferences.setDNSFallback(.google)
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: at(3))
+        record.runs = (0..<4).map { run($0, network: 48, [("quad9", 12)]) }
+        watch.preview(record)
+        watch.allowed = { true }; watch.preferences = { preferences }; watch.applier = applier
+        let now = at(3, 12)
+        await watch.observe(context(lookupWorked: true), now: now)
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(60))
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(120))
+        // Automatic DNS, Google never set, and Google paused here like the pick.
+        #expect(system.servers.isEmpty && watch.applied == nil && !applier.history.contains(DNSResolverChoice.google.servers))
+        #expect(watch.record?.failed(at: now.addingTimeInterval(180)).contains("google") == true && watch.switches.last?.reason == .watchdog)
+    }
+
+    @MainActor @Test func aFallbackThatDoesntTakePutsAutomaticBack() async throws {
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: nil, system: system, probe: FakeProbe(lookups: ["1.1.1.1": 15]), calendar: calendar)
+        var preferences = SavedPreferences(); preferences.setFastestDNS(true, network: nil); preferences.setDNSFallback(.cloudflare)
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: at(3))
+        record.runs = (0..<4).map { run($0, network: 48, [("quad9", 12)]) }
+        watch.preview(record)
+        watch.allowed = { true }; watch.preferences = { preferences }; watch.applier = applier
+        let now = at(3, 12)
+        await watch.observe(context(lookupWorked: true), now: now)
+        // The helper fails to set Cloudflare, and leaves the service half changed.
+        applier.refuse = DNSResolverChoice.cloudflare.servers
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(60))
+        await watch.observe(context(lookupWorked: false), now: now.addingTimeInterval(120))
+        #expect(system.servers.isEmpty && watch.applied == nil && watch.error != nil)
+    }
+
+    @MainActor @Test func quitPutsAutomaticBackFromTheFallback() async throws {
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: nil, system: system, probe: FakeProbe(lookups: ["1.1.1.1": 15]), calendar: calendar)
+        var preferences = SavedPreferences(); preferences.setFastestDNS(true, network: nil); preferences.setDNSFallback(.cloudflare)
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: at(3))
+        record.runs = (0..<4).map { run($0, network: 48, [("quad9", 12)]) }
+        watch.preview(record)
+        watch.allowed = { true }; watch.preferences = { preferences }; watch.applier = applier
+        let now = at(3, 12)
+        for offset in [0.0, 60, 120] { await watch.observe(context(lookupWorked: offset == 0), now: now.addingTimeInterval(offset)) }
+        #expect(watch.applied?.onFallback == true)
+        var restored: [String] = []
+        watch.quit { service in restored.append(service); system.servers = []; return true }
+        #expect(restored == ["Wi-Fi"] && watch.applied == nil && system.servers.isEmpty && watch.switches.last?.reason == .quit)
+    }
+
+    @Test func fallbackPreferences() {
+        var preferences = SavedPreferences()
+        #expect(preferences.dnsFallbackChoice == nil)
+        preferences.setDNSExcluded(.google, excluded: true)
+        // Picking a resolver the person left out times it again.
+        preferences.setDNSFallback(.google)
+        #expect(preferences.dnsFallbackChoice == .google && !preferences.dnsExcludedSet.contains("google"))
+        // Leaving it out again clears the fallback.
+        preferences.setDNSExcluded(.google, excluded: true)
+        #expect(preferences.dnsFallback == nil)
+        let adguard = DNSResolverChoice.custom("94.140.14.14")!
+        preferences.setDNSFallback(adguard)
+        #expect(preferences.dnsExtra == ["94.140.14.14"] && preferences.dnsFallbackChoice == adguard)
+        preferences.setDNSFallback(.network)
+        #expect(preferences.dnsFallback == nil)
+        preferences.setDNSFallback(.cloudflare); preferences.setDNSFallback(nil)
+        #expect(preferences.dnsFallback == nil)
+    }
+
+    // MARK: Who runs it
+
+    @Test func jurisdictionsComeFromTheTable() {
+        let english = Locale(identifier: "en_US")
+        #expect(DNSResolverChoice.quad9.jurisdiction(locale: english) == "Quad9 · Switzerland")
+        #expect(DNSResolverChoice.cloudflare.jurisdiction(locale: english) == "Cloudflare · United States")
+        #expect(DNSResolverChoice.google.jurisdiction(locale: english) == "Google · United States")
+        #expect(DNSResolverChoice.quad9.runBy()?.entity == "Quad9 Foundation")
+        // Added by address: known ones by their operator, others unknown; nothing is guessed.
+        #expect(DNSResolverChoice.custom("94.140.14.14")!.jurisdiction(locale: english) == "AdGuard · Cyprus")
+        #expect(DNSResolverChoice.custom("86.54.11.100")!.jurisdiction(locale: english) == "DNS4EU · Czechia")
+        #expect(DNSResolverChoice.custom("203.0.113.53")!.runBy() == nil)
+        #expect(DNSResolverChoice.custom("203.0.113.53")!.jurisdiction(locale: english) == "Unknown operator")
+        // The network's own: the provider's, unless the router hands out a known public resolver.
+        #expect(DNSResolverChoice.network.jurisdiction(server: "192.168.1.1", locale: english) == "Your provider’s")
+        #expect(DNSResolverChoice.network.jurisdiction(locale: english) == "Your provider’s")
+        #expect(DNSResolverChoice.network.jurisdiction(server: "1.1.1.1", locale: english) == "Cloudflare · United States")
+        #expect(DNSOperator.lookup("2620:FE::FE")?.name == "Quad9")
+        // Every preset, and each of its addresses, is in the table with a source.
+        for preset in DNSResolverChoice.presets {
+            for server in preset.servers { #expect(DNSOperator.lookup(server)?.name == preset.name) }
+        }
+        #expect(DNSOperator.table.allSatisfy { $0.source.hasPrefix("https://") && $0.country.count == 2 && !$0.addresses.isEmpty })
+        #expect(Set(DNSOperator.table.flatMap(\.addresses)).count == DNSOperator.table.flatMap(\.addresses).count)
+    }
+
+    // MARK: Success over time
+
+    @Test func runsAddUpPerResolverAndDay() {
+        // Quad9: 10 first lookups and 10 repeats, two of them failed; Google slow on every first lookup.
+        let first = DNSRun(date: at(0, 9), resolvers: [resolver("network", 30), resolver("quad9", 12, failures: 2),
+                                                        DNSResolverRun(id: "google", server: "8.8.8.8", firstMs: Array(repeating: 250, count: 10), repeatMs: Array(repeating: 20, count: 10), queries: 20, failures: 0)])
+        var tallies = FastestDNS.tally(first, into: [], calendar: calendar)
+        let quad9 = tallies.first { $0.resolver == "quad9" }
+        #expect(quad9?.answered == 18 && quad9?.failed == 2 && quad9?.slow == 0 && quad9?.successRate == 0.9)
+        #expect(tallies.first { $0.resolver == "google" }?.slow == 10)
+        // The same day adds up; the next day is its own.
+        tallies = FastestDNS.tally(DNSRun(date: at(0, 15), resolvers: [resolver("quad9", 12)]), into: tallies, calendar: calendar)
+        tallies = FastestDNS.tally(DNSRun(date: at(1, 9), resolvers: [resolver("quad9", 12)]), into: tallies, calendar: calendar)
+        #expect(tallies.filter { $0.resolver == "quad9" }.map(\.answered) == [38, 20])
+        // Days older than the kept span go.
+        tallies = FastestDNS.tally(DNSRun(date: at(FastestDNS.talliesKept + 1), resolvers: [resolver("quad9", 12)]), into: tallies, calendar: calendar)
+        #expect(tallies.count == 1)
+    }
+
+    @Test func historyShowsTwoWeeksPerResolver() {
+        let runs = [run(0, network: 30, [("quad9", 12), ("custom:94.140.14.14", 15), ("cloudflare", 14)]), run(3, network: 30, [("quad9", 12)])]
+        let tallies = FastestDNS.tallies(from: runs, calendar: calendar)
+        let history = FastestDNS.history(tallies, now: at(3, 20), calendar: calendar)
+        // The network's own first, then the presets in their order, then added ones.
+        #expect(history.map(\.resolver) == ["network", "cloudflare", "quad9", "custom:94.140.14.14"])
+        let quad9 = history.first { $0.resolver == "quad9" }!
+        #expect(quad9.days.count == FastestDNS.historyShown && quad9.days.last??.answered == 20 && quad9.days[quad9.days.count - 4]?.answered == 20)
+        #expect(quad9.days.compactMap { $0 }.count == 2 && quad9.answered == 40 && quad9.successRate == 1 && quad9.slowRate == 0)
+        // Out of the window, nothing.
+        #expect(FastestDNS.history(tallies, now: at(30), calendar: calendar).isEmpty)
+    }
+
+    @MainActor @Test func savedRecordsWithoutHistoryStillRead() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-dns-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        // As 1.29 saved it: no tallies on the record, no fallback on what Kilobat applied.
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: Date())
+        record.runs = [run(0, network: 30, [("quad9", 12)])]
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(FastestDNSWatch.Saved(current: "home", networks: [record], switches: [], applied: applied()))) as! [String: Any]
+        var networks = json["networks"] as! [[String: Any]]
+        networks[0].removeValue(forKey: "tallies")
+        json["networks"] = networks
+        #expect((json["applied"] as? [String: Any])?["fallback"] == nil)
+        try JSONSerialization.data(withJSONObject: json).write(to: folder.appendingPathComponent(FastestDNSWatch.fileName))
+        let watch = FastestDNSWatch(directory: folder, calendar: calendar)
+        #expect(watch.records.first?.tallies?.first { $0.resolver == "quad9" }?.answered == 20)
+        #expect(watch.applied?.resolver == "quad9" && watch.applied?.onFallback == false)
+    }
+
     private func context(lookupWorked: Bool, vpn: Bool = false) -> FastestDNSWatch.Context {
         FastestDNSWatch.Context(network: "home", name: "Home", service: "Wi-Fi", interface: "en0", gateway: "192.168.1.1", resolvers: ["192.168.1.1"],
                                 lookupWorked: lookupWorked, networkUp: true,
@@ -375,6 +598,13 @@ struct FastestDNSTests {
         #expect(try FastestDNSCommand.parse(["exclude", "google"]) == .exclude(.google))
         #expect(try FastestDNSCommand.parse(["include", "9.9.9.9"]) == .include(.quad9))
         #expect(try FastestDNSCommand.parse(["include", "94.140.14.14"]) == .include(DNSResolverChoice(id: "custom:94.140.14.14", name: "94.140.14.14", servers: ["94.140.14.14"])))
+        #expect(try FastestDNSCommand.parse(["fallback", "cloudflare"]) == .fallback(.cloudflare, json: false))
+        #expect(try FastestDNSCommand.parse(["fallback", "9.9.9.9", "--json"]) == .fallback(.quad9, json: true))
+        #expect(try FastestDNSCommand.parse(["fallback", "off"]) == .fallback(nil, json: false))
+        #expect(try FastestDNSCommand.parse(["fallback", "automatic"]) == .fallback(nil, json: false))
+        for bad in [["fallback"], ["fallback", "maybe"], ["fallback", "quad9", "google"]] {
+            #expect(throws: FastestDNSCommand.CommandError.self) { try FastestDNSCommand.parse(bad) }
+        }
         // Other dns commands aren't these.
         #expect(try FastestDNSCommand.parse([]) == nil)
         #expect(try FastestDNSCommand.parse(["quad9"]) == nil)
@@ -437,7 +667,22 @@ struct FastestDNSTests {
         let report = FastestDNSReport(saved: saved, preferences: preferences, current: nil, all: false, now: at(3), calendar: calendar)
         #expect(report.networks.count == 1 && report.networks[0].state == "faster" && report.networks[0].choice == "quad9" && report.networks[0].auto)
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any]
-        #expect(json?["applied"] is NSNull)
+        #expect(json?["applied"] is NSNull && json?["fallback"] is NSNull && json?["slowMs"] as? Double == FastestDNS.slowMs)
+        // Who runs each, and the history from the runs.
+        let quad9 = report.networks[0].resolvers.first { $0.id == "quad9" }, network = report.networks[0].resolvers.first { $0.id == "network" }
+        #expect(quad9?.label == "Quad9 · Switzerland" && quad9?.jurisdiction == "Switzerland" && quad9?.jurisdictionCode == "CH" && quad9?.entity == "Quad9 Foundation")
+        #expect(network?.label == "Your provider’s" && network?.jurisdiction == nil && network?.runBy == nil)
+        let networkJSON = ((json?["networks"] as? [[String: Any]])?.first?["resolvers"] as? [[String: Any]])?.first { $0["id"] as? String == "network" }
+        #expect(networkJSON?["jurisdiction"] is NSNull && networkJSON?["runBy"] is NSNull && networkJSON?["label"] as? String == "Your provider’s")
+        #expect(report.networks[0].history.map(\.id) == ["network", "quad9"] && report.networks[0].history[1].answered == 60 && report.networks[0].history[1].days.count == 3)
+
+        // With a fallback, and Kilobat on it.
+        preferences.setDNSFallback(.cloudflare)
+        var onFallback = applied("cloudflare"); onFallback.fallback = true
+        record.failedUntil = ["quad9": at(3).addingTimeInterval(3600)]
+        let later = FastestDNSReport(saved: .init(current: "home", networks: [record], switches: [], applied: onFallback), preferences: preferences, current: nil, all: false, now: at(3), calendar: calendar)
+        #expect(later.fallback?.id == "cloudflare" && later.fallback?.label == "Cloudflare · United States" && later.applied?.fallback == true)
+        #expect(later.networks[0].pausedUntil.keys.sorted() == ["quad9"])
     }
 }
 
@@ -469,5 +714,15 @@ private final class FakeSystem: DNSSystem, @unchecked Sendable {
     let system: FakeSystem
     init(system: FakeSystem) { self.system = system }
     var available: Bool { true }
-    func apply(servers: [String], service: String) async throws { system.servers = servers }
+    /// Every change asked for, in order.
+    var history: [[String]] = []
+    var calls: Int { history.count }
+    /// Servers it fails to set, leaving the service half changed, as a helper error might.
+    var refuse: [String]?
+    func apply(servers: [String], service: String) async throws {
+        history.append(servers)
+        if servers == refuse { system.servers = Array(servers.prefix(1)); throw FakeError() }
+        system.servers = servers
+    }
+    struct FakeError: Error {}
 }

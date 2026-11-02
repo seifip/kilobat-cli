@@ -112,7 +112,11 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
                 events[open].routerChecks = (events[open].routerChecks ?? 0) + 1
                 events[open].routerAnswered = (events[open].routerAnswered ?? 0) + (answered ? 1 : 0)
             } else { pendingChecks += 1; pendingAnswered += answered ? 1 : 0 }
-            if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.captivePortal == true {
+            if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.setupNetwork != nil {
+                // A printer's, camera's or drone's own Wi-Fi: no internet by design, so logged once and never counted or alerted.
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Device Wi-Fi",
+                                           detail: sample.setupNetwork!.headline))
+            } else if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.captivePortal == true {
                 // The Wi-Fi's sign-in page, not an outage: logged, not counted against the provider, no alert (PortalWatch has its own).
                 events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Wi-Fi sign-in",
                                            detail: sample.portalLoggedOut == true ? String(localized: "The Wi-Fi’s sign-in page logged this Mac out.") : String(localized: "The Wi-Fi’s sign-in page is waiting for you to sign in.")))
@@ -122,7 +126,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
                 notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }
         }
-        let slow = (sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.radio.health == .poor
+        let slow = sample.setupNetwork == nil && ((sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.radio.health == .poor)
         degraded = slow ? degraded + 1 : 0
         if degraded == 3 { notify(String(localized: "Connection quality dropped"), String(localized: "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).")) }
         events = Array(events.suffix(500)); save(events, "events.json")

@@ -57,10 +57,10 @@ public struct StutterResult: Codable, Sendable {
     }
 
     public var verdict: String {
-        let peak = max.map { String(format: "%.0f ms", $0) } ?? "—"
+        let peak = max.map { String(format: "%.0f ms", locale: Locale.current, $0) } ?? "—"
         let loss = pingLimited ? " " + (local ? String(localized: "The router answered only some of the fast pings; that's rate limiting, not lost traffic.")
                                               : String(localized: "It answered only some of the fast pings; that's rate limiting, not lost traffic."))
-            : lossPercent >= 2 ? " " + String(localized: "\(String(format: "%.0f", lossPercent))% of pings got no reply.") : ""
+            : lossPercent >= 2 ? " " + String(localized: "\(String(format: "%.0f", locale: Locale.current, lossPercent))% of pings got no reply.") : ""
         // Past the router, a sign-in page in the way stops every reply; that's the cause, not the line.
         if portal == true, !local, pattern == .noReplies || lossPercent >= 50 {
             return String(localized: "The Wi-Fi’s sign-in page is holding the connection, so pings past the router go unanswered. Sign in again, then run the test.", comment: "Stutter test verdict while a hotel or café Wi-Fi's sign-in page is in the way")
@@ -154,7 +154,7 @@ public enum StutterTest {
         return best?.period
     }
     public static func every(_ seconds: Double) -> String {
-        abs(seconds - 1) < 0.15 ? String(localized: "about every second") : String(localized: "about every \(String(format: seconds < 10 ? "%.1f" : "%.0f", seconds)) s")
+        abs(seconds - 1) < 0.15 ? String(localized: "about every second") : String(localized: "about every \(String(format: seconds < 10 ? "%.1f" : "%.0f", locale: Locale.current, seconds)) s")
     }
     public static func analyze(_ samples: [Double?], target: String, host: String, interval: Double = interval, awdl: AWDLStatus? = nil, date: Date = Date(), started: Date? = nil, starlink: Bool? = nil) -> StutterResult {
         let sorted = samples.compactMap { $0 }.sorted()
@@ -219,7 +219,7 @@ public enum StutterTest {
     }
     public static func comparison(before: StutterResult, after: StutterResult) -> String {
         let was = before.spikes.count, now = after.spikes.count
-        let worst = { (result: StutterResult) in result.max.map { String(format: "%.0f ms", $0) } ?? "—" }
+        let worst = { (result: StutterResult) in result.max.map { String(format: "%.0f ms", locale: Locale.current, $0) } ?? "—" }
         if was < 3 { return String(localized: "There were few spikes to begin with (\(was) before, \(now) with the pause), so this can't tell much.") }
         if now <= was / 3 { return String(localized: "With the pause on, spikes dropped from \(was) to \(now) and the worst ping from \(worst(before)) to \(worst(after)). Keep it on for your call or stream.") }
         if now * 3 >= was * 2 { return String(localized: "Spikes stayed (\(was) before, \(now) with the pause), so AirDrop/AWDL is unlikely to be the cause here. You can restore it.") }

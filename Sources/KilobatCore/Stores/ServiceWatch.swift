@@ -154,6 +154,13 @@ public enum ConnectionStates {
     public var alerts = UserDefaults.standard.object(forKey: "serviceAlerts") as? Bool ?? true {
         didSet { UserDefaults.standard.set(alerts, forKey: "serviceAlerts") }
     }
+    /// Notifications when a service you use looks blocked on this network, at most once per service per network a day.
+    /// Connection checks and the Services list show blocks either way.
+    public var blockAlerts = UserDefaults.standard.object(forKey: "blockAlerts") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(blockAlerts, forKey: "blockAlerts") }
+    }
+    /// Blocks and regional refusals measured on the current network, by service id (or host).
+    public private(set) var blocks: [String: NetworkBlock] = [:]
     /// The latest answer for each service, by id.
     public private(set) var statuses: [String: ServiceStatus] = [:]
     /// Health's last check of the apps in use: what was asked and when.
@@ -163,6 +170,16 @@ public enum ConnectionStates {
     /// Posts the notification, with the app or agent that was failing when there is one; set by the app.
     @ObservationIgnored public var onAlert: ((ServiceStatus, String?) -> Void)?
     @ObservationIgnored private var policy: ServiceAlertPolicy
+    /// Posts the block notification, with the app that kept failing; set by the app.
+    @ObservationIgnored public var onBlockAlert: ((NetworkBlock, String?) -> Void)?
+    /// Whether Kilobat's own rules, Protection or kill switch stop this host; set by the app. A block of Kilobat's own is never the network's.
+    @ObservationIgnored public var ownBlock: (@MainActor (_ host: String) -> Bool)?
+    @ObservationIgnored private var blockPolicy: BlockAlertPolicy
+    /// The network the listed blocks were measured on, and when each service was last checked there.
+    @ObservationIgnored private var blockNetwork: String?
+    @ObservationIgnored private var blockChecked: [String: Date] = [:]
+    /// How long a block stays listed without a fresh check, and the least time between two checks of one service on one network.
+    public static let blockListedFor: TimeInterval = 3600, blockSpacing: TimeInterval = 3600
     @ObservationIgnored private var failing = FailingApps()
     @ObservationIgnored private var loop: Task<Void, Never>?
     /// How long a problem stays listed without a fresh answer.
@@ -170,13 +187,27 @@ public enum ConnectionStates {
 
     public init() {
         policy = UserDefaults.standard.data(forKey: "serviceAlertsSent").flatMap { try? JSONDecoder().decode(ServiceAlertPolicy.self, from: $0) } ?? ServiceAlertPolicy()
+        blockPolicy = UserDefaults.standard.data(forKey: "blockAlertsSent").flatMap { try? JSONDecoder().decode(BlockAlertPolicy.self, from: $0) } ?? BlockAlertPolicy()
+    }
+
+    /// A block a connection check or this watch measured, kept for the network it was measured on. Another network clears the list.
+    public func record(_ block: NetworkBlock, network: String?) {
+        if network != blockNetwork { blocks = [:]; blockChecked = [:]; blockNetwork = network }
+        blocks[block.serviceID ?? block.host] = block
+    }
+
+    /// Blocks measured on this network lately, newest first.
+    public func blocked(network: String?, now: Date = Date()) -> [NetworkBlock] {
+        guard network == blockNetwork else { return [] }
+        return blocks.values.filter { now.timeIntervalSince($0.date) < Self.blockListedFor }.sorted { $0.date != $1.date ? $0.date > $1.date : $0.host < $1.host }
     }
 
     #if DEBUG
     /// Made-up answers for screenshots; debug builds only.
-    public func preview(_ statuses: [ServiceStatus], active: [ServiceStatus]? = nil) {
+    public func preview(_ statuses: [ServiceStatus], active: [ServiceStatus]? = nil, blocks: [NetworkBlock] = [], network: String? = nil) {
         for status in statuses { self.statuses[status.id] = status }
         self.active = active.map { ($0, Date()) }
+        for block in blocks { record(block, network: network) }
     }
     #endif
 
@@ -242,6 +273,28 @@ public enum ConnectionStates {
         }
         let statuses = await check(Array(asked.prefix(4).map(\.service)))
         for (status, entry) in zip(statuses, asked.prefix(4)) { alert(status, app: entry.app) }
+        // A page that reports no outage: whether this network blocks the service, at most once an hour per service here.
+        let network = traffic.networkKey
+        for (status, entry) in zip(statuses, asked.prefix(4)) where !status.outage {
+            let key = entry.service.id + "|" + network, now = Date()
+            guard blockChecked[key].map({ now.timeIntervalSince($0) >= Self.blockSpacing }) ?? true,
+                  let host = entry.service.endpoints.first ?? entry.service.hosts.first, ownBlock?(host) != true else { continue }
+            if network != blockNetwork { blocks = [:]; blockChecked = [:]; blockNetwork = network }
+            blockChecked[key] = now
+            async let place = NetworkBlockCheck.place(networkKey: network)
+            async let vpn = NetworkBlockCheck.vpn()
+            let found = await NetworkBlockCheck.reach(entry.service, status: status, place: await place, vpn: await vpn,
+                                                      resolver: TrustedResolver.chosen(traffic.preferences))
+            if let block = found.block { record(block, network: network); alert(block, app: entry.app, network: network) }
+            else if found.reachable == true { blocks[entry.service.id] = nil }
+        }
+    }
+
+    /// The block notification, at most once per service per network a day, when it's on.
+    public func alert(_ block: NetworkBlock, app: String? = nil, network: String, now: Date = Date()) {
+        guard blockAlerts, blockPolicy.shouldAlert(block, network: network, now: now) else { return }
+        if let data = try? JSONEncoder().encode(blockPolicy) { UserDefaults.standard.set(data, forKey: "blockAlertsSent") }
+        onBlockAlert?(block, app)
     }
 
     @ObservationIgnored private var endpointCache: (addresses: [String: [String]], date: Date)?

@@ -113,7 +113,7 @@ public struct BluetoothAudioConditions: Codable, Sendable, Equatable {
 
 /// One thing to change, in the order to try them, with the button Kilobat can offer for it.
 public struct BluetoothAudioAdvice: Codable, Sendable, Equatable, Identifiable {
-    public enum Action: String, Codable, Sendable { case joinFasterBand, pauseAirDrop }
+    public enum Action: String, Codable, Sendable { case joinFasterBand, pauseAirDrop, pauseBackground }
     public let risk: BluetoothAudioRisk?
     public let text: String
     public let action: Action?

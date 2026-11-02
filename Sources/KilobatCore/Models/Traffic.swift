@@ -126,6 +126,9 @@ public struct NetworkSession: Codable, Sendable {
     public var identified: Bool? = nil
     public var local: UInt64? = nil
     public var unattributed: UInt64? = nil
+    public init(name: String, received: UInt64 = 0, sent: UInt64 = 0, identified: Bool? = nil, local: UInt64? = nil, unattributed: UInt64? = nil) {
+        self.name = name; self.received = received; self.sent = sent; self.identified = identified; self.local = local; self.unattributed = unattributed
+    }
 }
 
 /// What a network costs, set by hand for hotspots and tethering macOS doesn't flag. Automatic follows macOS.
@@ -201,6 +204,12 @@ public struct SavedPreferences: Codable, Equatable {
     public var dnsExcluded: [String]? = nil
     /// Resolvers the person added by IP address, timed alongside the presets.
     public var dnsExtra: [String]? = nil
+    /// Prepaid data packs, such as a travel eSIM reached through a phone's hotspot: running, upcoming and a year of finished ones.
+    public var dataPacks: [DataPack]? = nil
+    /// The resolver asked over DNS-over-HTTPS for a control answer while a failure is diagnosed: "cloudflare" or "quad9". Nil is Cloudflare.
+    public var blockCheckResolver: String? = nil
+    /// The resolver fastest DNS falls back to when the one it picked fails, before the network's own; nil is none.
+    public var dnsFallback: String? = nil
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]
@@ -211,7 +220,7 @@ public struct SavedPreferences: Codable, Equatable {
 
 public enum TrafficFormat {
     public static func bytes(_ value: UInt64) -> String {
-        if value < 1000 { return "\(value) B" } // ByteCountFormatter spells these out as "617 bytes"
+        if value < 1000 { return value.formatted() + " B" } // ByteCountFormatter spells these out as "617 bytes"
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .decimal)
     }
     public static func rate(_ value: Double) -> String { guard value.isFinite, value >= 0, value < Double(UInt64.max) else { return "—" }; return String(localized: "\(bytes(UInt64(value)))/s", comment: "A data rate, e.g. 3.2 MB/s") }

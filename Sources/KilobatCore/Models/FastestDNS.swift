@@ -153,6 +153,9 @@ public struct DNSNetworkRecord: Codable, Equatable, Sendable, Identifiable {
     /// Resolvers the watchdog took away here, and until when they aren't used again.
     public var failedUntil: [String: Date] = [:]
     public var lastSeen: Date
+    /// Each resolver's answered, failed and slow lookups per day, from the runs; kept longer than the runs themselves.
+    /// Optional so records saved before it existed still read.
+    public var tallies: [DNSTally]?
 
     public init(network: String, name: String, lastSeen: Date) { self.network = network; self.name = name; self.lastSeen = lastSeen }
 
@@ -169,9 +172,14 @@ public struct DNSApplied: Codable, Equatable, Sendable {
     /// The router's address when it was set, to notice a new network before the next health check names it.
     public var gateway: String?
     public var date: Date
-    public init(network: String, networkName: String, service: String, resolver: String, servers: [String], gateway: String?, date: Date) {
+    /// Set to the person's fallback because lookups failed through the fastest one. Nil rather than false otherwise,
+    /// so files saved before it existed still read.
+    public var fallback: Bool?
+    public init(network: String, networkName: String, service: String, resolver: String, servers: [String], gateway: String?, date: Date, fallback: Bool = false) {
         self.network = network; self.networkName = networkName; self.service = service; self.resolver = resolver; self.servers = servers; self.gateway = gateway; self.date = date
+        self.fallback = fallback ? true : nil
     }
+    public var onFallback: Bool { fallback == true }
 }
 
 /// One switch, for the log and Undo.
@@ -185,6 +193,8 @@ public struct DNSSwitch: Codable, Equatable, Sendable, Identifiable {
         case vpn, profile, portal, leftNetwork, quit
         /// Lookups through the chosen resolver failed.
         case watchdog
+        /// Lookups through the chosen resolver failed, so Kilobat moved to the person's fallback.
+        case fallback
         /// The person pressed Undo.
         case undo
     }
@@ -424,10 +434,13 @@ public enum FastestDNS {
         public var verdict: Verdict?
         /// The resolvers the watchdog took away on this network.
         public var failed: Set<String>
+        /// The person's second choice for when the fastest fails here, already checked by `FastestDNS.fallback`; nil
+        /// goes straight back to the network's own.
+        public var fallback: DNSResolverChoice?
         public init(network: String?, enabled: Bool, pro: Bool, helper: Bool, vpn: Bool = false, managed: Bool = false, portal: Bool = false,
-                    serviceServers: [String] = [], applied: DNSApplied? = nil, verdict: Verdict? = nil, failed: Set<String> = []) {
+                    serviceServers: [String] = [], applied: DNSApplied? = nil, verdict: Verdict? = nil, failed: Set<String> = [], fallback: DNSResolverChoice? = nil) {
             self.network = network; self.enabled = enabled; self.pro = pro; self.helper = helper; self.vpn = vpn; self.managed = managed; self.portal = portal
-            self.serviceServers = serviceServers; self.applied = applied; self.verdict = verdict; self.failed = failed
+            self.serviceServers = serviceServers; self.applied = applied; self.verdict = verdict; self.failed = failed; self.fallback = fallback
         }
     }
 
@@ -441,6 +454,8 @@ public enum FastestDNS {
         case networkBest
         /// The watchdog took the faster resolver away for a day.
         case failedRecently
+        /// The faster resolver failed here, so the person's fallback is in use until its pause ends.
+        case onFallback
         /// Switching without a password needs Kilobat's helper.
         case needsHelper
         /// Already on the fastest.
@@ -451,6 +466,8 @@ public enum FastestDNS {
         case hold(Hold)
         /// Set the service to this resolver.
         case apply(DNSResolverChoice)
+        /// Set the service to the person's fallback, because the fastest failed here.
+        case fallback(DNSResolverChoice)
         /// Put automatic DNS back, undoing Kilobat's own change.
         case revert(DNSSwitch.Reason)
         /// Someone else changed DNS since Kilobat did: forget Kilobat's change without touching theirs.
@@ -478,7 +495,15 @@ public enum FastestDNS {
         guard verdict.choice != DNSResolverChoice.network.id, let choice = DNSResolverChoice.from(id: verdict.choice) else {
             return mine ? .revert(.networkFaster) : .hold(.networkBest)
         }
-        if s.failed.contains(choice.id) { return mine ? .revert(.watchdog) : .hold(.failedRecently) }
+        if s.failed.contains(choice.id) {
+            // The fallback, when there's one that hasn't failed here too; otherwise the network's own.
+            guard let fallback = s.fallback, fallback.id != choice.id, !fallback.isNetwork, !s.failed.contains(fallback.id) else {
+                return mine ? .revert(.watchdog) : .hold(.failedRecently)
+            }
+            if let applied = s.applied, applied.resolver == fallback.id { return .hold(.onFallback) }
+            guard s.helper else { return mine ? .revert(.watchdog) : .hold(.needsHelper) }
+            return .fallback(fallback)
+        }
         if let applied = s.applied, applied.resolver == choice.id { return .hold(.applied) }
         guard s.helper else { return .hold(.needsHelper) }
         return .apply(choice)
@@ -507,18 +532,18 @@ public enum FastestDNS {
     /// "Quad9 (12 ms vs your network’s 48 ms)", or nil before there's anything to say.
     public static func headline(_ verdict: Verdict?) -> String? {
         guard let verdict else { return nil }
-        let network = verdict.networkMs.map { String(format: "%.0f", $0) }
+        let network = verdict.networkMs.map { String(format: "%.0f", locale: Locale.current, $0) }
         switch verdict.state {
         case .faster:
             let name = DNSResolverChoice.from(id: verdict.choice)?.name ?? verdict.choice
-            guard let ms = verdict.choiceMs.map({ String(format: "%.0f", $0) }), let network else { return String(localized: "Fastest here: \(name)", comment: "Fastest DNS; the argument is a resolver such as Quad9") }
+            guard let ms = verdict.choiceMs.map({ String(format: "%.0f", locale: Locale.current, $0) }), let network else { return String(localized: "Fastest here: \(name)", comment: "Fastest DNS; the argument is a resolver such as Quad9") }
             return String(localized: "Fastest here: \(name) (\(ms) ms vs your network’s \(network) ms)", comment: "Fastest DNS; resolver, its typical lookup time and the network's own")
         case .network:
             guard let network else { return String(localized: "Your network’s DNS is fastest here", comment: "Fastest DNS") }
             return String(localized: "Your network’s DNS is fastest here (\(network) ms)", comment: "Fastest DNS; the network's own typical lookup time")
         case .learning:
             let days = verdict.days, needed = daysNeeded
-            guard let leader = verdict.leader.flatMap(DNSResolverChoice.from(id:)), let ms = verdict.choiceMs.map({ String(format: "%.0f", $0) }) else {
+            guard let leader = verdict.leader.flatMap(DNSResolverChoice.from(id:)), let ms = verdict.choiceMs.map({ String(format: "%.0f", locale: Locale.current, $0) }) else {
                 return String(localized: "Measuring: \(days) of \(needed) days", comment: "Fastest DNS: runs on different days so far, of those needed")
             }
             let name = leader.isNetwork ? String(localized: "your network’s DNS", comment: "Fastest DNS: the network's own resolver, mid-sentence") : leader.name
@@ -535,6 +560,7 @@ public enum FastestDNS {
         case .ownDNS: String(localized: "You set DNS servers yourself, so Kilobat doesn’t change them. Choose Automatic to let it.", comment: "Fastest DNS guard")
         case .failedRecently: String(localized: "Lookups failed through the faster resolver here, so Kilobat went back to the network’s DNS for a day.", comment: "Fastest DNS watchdog")
         case .needsHelper: String(localized: "Switching without a password uses Kilobat’s helper.", comment: "Fastest DNS: needs the privileged helper")
+        case .onFallback: String(localized: "Lookups failed through the faster resolver here, so Kilobat uses your fallback for a day. If that fails too, the network’s DNS comes back.", comment: "Fastest DNS: on the person's fallback resolver")
         case .off, .pro, .noNetwork, .learning, .networkBest, .applied: nil
         }
     }
@@ -550,8 +576,149 @@ public enum FastestDNS {
         case .leftNetwork: String(localized: "left the network", comment: "Why Kilobat switched DNS back")
         case .quit: String(localized: "Kilobat quit", comment: "Why Kilobat switched DNS back")
         case .watchdog: String(localized: "lookups failed", comment: "Why Kilobat switched DNS back")
+        case .fallback: String(localized: "your fallback, lookups failed through the fastest", comment: "Why Kilobat switched DNS to the person's fallback resolver")
         case .undo: String(localized: "undone", comment: "Why Kilobat switched DNS back")
         }
+    }
+}
+
+// MARK: Who runs a resolver
+
+/// Who runs a public resolver and under which country's law, for the well-known ones Kilobat offers or may see added,
+/// each from the operator's own pages. Anything not
+/// here, the network's own included, is "your provider's" or unknown: Kilobat never guesses from an address.
+public struct DNSOperator: Equatable, Sendable {
+    /// As shown: "Quad9".
+    public let name: String
+    /// The legal entity: "Quad9 Foundation".
+    public let entity: String
+    /// The ISO 3166 code of the country it's established in: "CH".
+    public let country: String
+    /// The operator's page that says so.
+    public let source: String
+    public let addresses: [String]
+
+    public static let table: [DNSOperator] = [
+        DNSOperator(name: "Cloudflare", entity: "Cloudflare, Inc.", country: "US", source: "https://www.cloudflare.com/privacypolicy/",
+                    addresses: ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]),
+        DNSOperator(name: "Quad9", entity: "Quad9 Foundation", country: "CH", source: "https://www.quad9.net/privacy/policy/",
+                    addresses: ["9.9.9.9", "149.112.112.112", "2620:fe::fe", "2620:fe::9"]),
+        DNSOperator(name: "Google", entity: "Google LLC", country: "US", source: "https://policies.google.com/terms",
+                    addresses: ["8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844"]),
+        DNSOperator(name: "AdGuard", entity: "Adguard Software Limited", country: "CY", source: "https://adguard-dns.io/en/privacy.html",
+                    addresses: ["94.140.14.14", "94.140.15.15"]),
+        DNSOperator(name: "OpenDNS", entity: "Cisco OpenDNS LLC", country: "US", source: "https://www.cisco.com/c/en/us/about/legal/privacy-full.html",
+                    addresses: ["208.67.222.222", "208.67.220.220", "208.67.222.123", "208.67.220.123"]),
+        DNSOperator(name: "DNS4EU", entity: "Whalebone, s.r.o.", country: "CZ", source: "https://www.joindns4.eu/for-public",
+                    addresses: ["86.54.11.1", "86.54.11.201", "86.54.11.100", "86.54.11.200"]),
+    ]
+
+    /// The operator of the resolver at `address`, nil for any address not in the table.
+    public static func lookup(_ address: String) -> DNSOperator? {
+        let address = address.trimmingCharacters(in: .whitespaces).lowercased()
+        return table.first { $0.addresses.contains(address) }
+    }
+
+    /// "Switzerland", in `locale`'s language.
+    public func countryName(_ locale: Locale = .current) -> String { locale.localizedString(forRegionCode: country) ?? country }
+    /// "Quad9 · Switzerland".
+    public func label(_ locale: Locale = .current) -> String { name + " · " + countryName(locale) }
+}
+
+extension DNSResolverChoice {
+    /// Who runs it. The network's own is whatever the router hands out, so it's named only when `server` (the address
+    /// a run asked) is a known public resolver; an unknown address is nil.
+    public func runBy(server: String? = nil) -> DNSOperator? {
+        if isNetwork { return server.flatMap(DNSOperator.lookup) }
+        return servers.lazy.compactMap(DNSOperator.lookup).first
+    }
+
+    /// "Quad9 · Switzerland", "Your provider’s" for the network's own, "Unknown" for an address not in the table.
+    public func jurisdiction(server: String? = nil, locale: Locale = .current) -> String {
+        if let known = runBy(server: server) { return known.label(locale) }
+        return isNetwork ? String(localized: "Your provider’s", comment: "Fastest DNS: who runs the network's own resolver (the internet provider or the router), not known by name")
+                         : String(localized: "Unknown operator", comment: "Fastest DNS: who runs a resolver the person added by address, not known")
+    }
+}
+
+// MARK: Success over time
+
+/// One resolver's lookups on one day, from the quiet runs: answered, failed (no answer, an error or no address) and
+/// slow (answered, but after more than `FastestDNS.slowMs`).
+public struct DNSTally: Codable, Equatable, Sendable {
+    /// The start of the day.
+    public var day: Date
+    public var resolver: String
+    public var answered: Int
+    public var failed: Int
+    public var slow: Int
+    public init(day: Date, resolver: String, answered: Int = 0, failed: Int = 0, slow: Int = 0) {
+        self.day = day; self.resolver = resolver; self.answered = answered; self.failed = failed; self.slow = slow
+    }
+    public var lookups: Int { answered + failed }
+    /// Answered of all lookups, 0…1; nil without any.
+    public var successRate: Double? { lookups > 0 ? Double(answered) / Double(lookups) : nil }
+}
+
+/// A resolver's recent days on one network, for the DNS panel, the report and the command line.
+public struct DNSHistory: Equatable, Sendable {
+    public var resolver: String
+    /// One entry per day, oldest first, ending today; nil where it wasn't timed.
+    public var days: [DNSTally?]
+    public var answered: Int { days.reduce(0) { $0 + ($1?.answered ?? 0) } }
+    public var failed: Int { days.reduce(0) { $0 + ($1?.failed ?? 0) } }
+    public var slow: Int { days.reduce(0) { $0 + ($1?.slow ?? 0) } }
+    public var lookups: Int { answered + failed }
+    public var successRate: Double? { lookups > 0 ? Double(answered) / Double(lookups) : nil }
+    public var slowRate: Double? { answered > 0 ? Double(slow) / Double(answered) : nil }
+}
+
+extension FastestDNS {
+    /// An answer slower than this is slow: a page waits noticeably before it starts.
+    public static let slowMs = 200.0
+    /// Days of tallies kept per network, and shown.
+    public static let talliesKept = 90
+    public static let historyShown = 14
+
+    /// `run` added to `tallies`, one entry per resolver per day; days older than `talliesKept` before the run go.
+    public static func tally(_ run: DNSRun, into tallies: [DNSTally], calendar: Calendar = .current) -> [DNSTally] {
+        let day = calendar.startOfDay(for: run.date)
+        let oldest = calendar.date(byAdding: .day, value: -(talliesKept - 1), to: day) ?? day
+        var list = tallies.filter { $0.day >= oldest }
+        for resolver in run.resolvers {
+            let times = resolver.firstMs + resolver.repeatMs
+            let slow = times.filter { $0 > slowMs }.count
+            if let index = list.firstIndex(where: { $0.day == day && $0.resolver == resolver.id }) {
+                list[index].answered += times.count; list[index].failed += resolver.failures; list[index].slow += slow
+            } else {
+                list.append(DNSTally(day: day, resolver: resolver.id, answered: times.count, failed: resolver.failures, slow: slow))
+            }
+        }
+        return list.sorted { ($0.day, $0.resolver) < ($1.day, $1.resolver) }
+    }
+
+    /// Tallies for a record saved before they existed, from the runs it kept.
+    public static func tallies(from runs: [DNSRun], calendar: Calendar = .current) -> [DNSTally] {
+        runs.sorted { $0.date < $1.date }.reduce([]) { tally($1, into: $0, calendar: calendar) }
+    }
+
+    /// Each resolver's last `days` days, ending on `now`'s day: the network's own first, then the presets, then the rest.
+    public static func history(_ tallies: [DNSTally], days: Int = historyShown, now: Date = Date(), calendar: Calendar = .current) -> [DNSHistory] {
+        let today = calendar.startOfDay(for: now)
+        let span = (0..<days).reversed().compactMap { calendar.date(byAdding: .day, value: -$0, to: today) }
+        let shown = tallies.filter { $0.day >= (span.first ?? today) && $0.day <= today }
+        let order = [DNSResolverChoice.network.id] + DNSResolverChoice.presets.map(\.id)
+        let ids = Set(shown.map(\.resolver)).sorted { (order.firstIndex(of: $0) ?? .max, $0) < (order.firstIndex(of: $1) ?? .max, $1) }
+        return ids.map { id in DNSHistory(resolver: id, days: span.map { day in shown.first { $0.resolver == id && $0.day == day } }) }
+    }
+
+    /// The person's fallback when it can be used on this network: a public or added resolver they haven't left out,
+    /// that isn't the network's own (that's where Kilobat goes anyway) and that didn't fail or rewrite missing names
+    /// in the latest run here.
+    public static func fallback(_ id: String?, excluded: Set<String>, latest: DNSRun?) -> DNSResolverChoice? {
+        guard let id, let choice = DNSResolverChoice.from(id: id), !choice.isNetwork, !excluded.contains(choice.id) else { return nil }
+        if let run = latest?[choice.id], !run.reliable { return nil }
+        return choice
     }
 }
 
@@ -593,19 +760,22 @@ public enum ManagedDNS {
 
 // MARK: The command line
 
-/// `kilobat dns fastest [--all] [--json]`, `dns auto on|off [--network <name>]`, `dns exclude|include <resolver>`.
+/// `kilobat dns fastest [--all] [--json]`, `dns auto on|off [--network <name>]`, `dns exclude|include <resolver>`,
+/// `dns fallback <resolver>|off`.
 public enum FastestDNSCommand: Equatable, Sendable {
     case fastest(all: Bool, json: Bool)
     /// `network` nil is every network (the global setting).
     case auto(on: Bool, network: String?, json: Bool)
     case exclude(DNSResolverChoice)
     case include(DNSResolverChoice)
+    /// The resolver to use when the fastest fails; nil is none (straight back to the network's own).
+    case fallback(DNSResolverChoice?, json: Bool)
 
-    public static let usage = "Use dns fastest [--all] [--json], dns auto on|off [--network <name>] or dns exclude|include <cloudflare|quad9|google|IP address>."
+    public static let usage = "Use dns fastest [--all] [--json], dns auto on|off [--network <name>], dns exclude|include <cloudflare|quad9|google|IP address> or dns fallback <cloudflare|quad9|google|IP address|off>."
 
     /// Nil when `args` (after "dns") is another dns command; throws on a malformed one.
     public static func parse(_ args: [String]) throws -> FastestDNSCommand? {
-        guard let verb = args.first, ["fastest", "auto", "exclude", "include"].contains(verb) else { return nil }
+        guard let verb = args.first, ["fastest", "auto", "exclude", "include", "fallback"].contains(verb) else { return nil }
         let json = args.contains("--json")
         var rest = Array(args.dropFirst()).filter { $0 != "--json" }
         switch verb {
@@ -621,6 +791,12 @@ public enum FastestDNSCommand: Equatable, Sendable {
             }
             guard rest.count == 1, ["on", "off"].contains(rest[0]) else { throw CommandError(usage) }
             return .auto(on: rest[0] == "on", network: network, json: json)
+        case "fallback":
+            guard rest.count == 1 else { throw CommandError(usage) }
+            // Off, or the network's own: no fallback, since automatic DNS is where Kilobat goes anyway.
+            if ["off", "none"].contains(rest[0].lowercased()) { return .fallback(nil, json: json) }
+            guard let choice = DNSResolverChoice.named(rest[0]) else { throw CommandError("Name cloudflare, quad9, google, a resolver's IP address, or off.") }
+            return .fallback(choice.isNetwork ? nil : choice, json: json)
         default:
             guard rest.count == 1, let choice = DNSResolverChoice.named(rest[0]), !choice.isNetwork else {
                 throw CommandError("Name cloudflare, quad9, google, or a resolver's IP address.")
@@ -647,8 +823,18 @@ extension SavedPreferences {
         map[network] = on
         networkFastestDNS = map
     }
-    /// Excluding a resolver the person added removes it; including an address adds it.
+    /// The resolver to fall back to when the fastest fails, before the network's own; nil is none.
+    public var dnsFallbackChoice: DNSResolverChoice? { dnsFallback.flatMap(DNSResolverChoice.from(id:)).flatMap { $0.isNetwork ? nil : $0 } }
+    /// A resolver the person added becomes one Kilobat times too, so its record shows whether it works.
+    public mutating func setDNSFallback(_ choice: DNSResolverChoice?) {
+        guard let choice, !choice.isNetwork else { dnsFallback = nil; return }
+        if dnsExcludedSet.contains(choice.id) || (choice.id.hasPrefix("custom:") && !(dnsExtra ?? []).contains(choice.servers[0])) { setDNSExcluded(choice, excluded: false) }
+        dnsFallback = choice.id
+    }
+    /// Excluding a resolver the person added removes it; including an address adds it. Leaving out the fallback
+    /// clears it, since Kilobat never uses a resolver the person left out.
     public mutating func setDNSExcluded(_ choice: DNSResolverChoice, excluded: Bool) {
+        if excluded, dnsFallback == choice.id { dnsFallback = nil }
         var set = dnsExcludedSet, extra = dnsExtra ?? []
         if choice.id.hasPrefix("custom:") {
             let address = choice.servers[0]

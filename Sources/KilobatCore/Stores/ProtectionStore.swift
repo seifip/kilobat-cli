@@ -382,6 +382,24 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
         return true
     }
 
+    /// Clears a period or forgets a site in the memory of which notifications went out.
+    @discardableResult public func erase(_ action: HistoryAction, now: Date = Date()) throws -> Int {
+        if let saved = UserDefaults.standard.data(forKey: limiterKey) { _ = try JSONDecoder().decode(ProtectionNoticeLimiter.self, from: saved) }
+        let removed = HistoryEraser.apply(action, to: &limiter, now: now)
+        if removed > 0 { UserDefaults.standard.set(try JSONEncoder().encode(limiter), forKey: limiterKey) }
+        return removed
+    }
+
+    /// The same on the app's saved copy, for the command line while the app isn't running.
+    @discardableResult public nonisolated static func erase(_ action: HistoryAction, defaults: UserDefaults, now: Date = Date()) throws -> Int {
+        let key = "protection.notices"
+        guard let data = defaults.data(forKey: key) else { return 0 }
+        var limiter = try JSONDecoder().decode(ProtectionNoticeLimiter.self, from: data)
+        let removed = HistoryEraser.apply(action, to: &limiter, now: now)
+        if removed > 0 { defaults.set(try JSONEncoder().encode(limiter), forKey: key) }
+        return removed
+    }
+
     /// Downloads what's due and rebuilds the index when a list changed, the lists in use changed, or the known hosts did.
     public func refresh(_ lists: [ProtectionList], known: [String], force: Bool = false) async {
         guard !updating, !lists.isEmpty else { return }

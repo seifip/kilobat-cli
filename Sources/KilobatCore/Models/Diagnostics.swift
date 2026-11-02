@@ -15,6 +15,17 @@ public struct RadioSample: Codable, Sendable {
     public let transmitMbps: Double?
     public let channel: Int?
     public let band: String?
+    /// The link's channel width in MHz.
+    public var widthMHz: Int? = nil
+    /// "Wi-Fi 6E" and "802.11ax"; the 802.11 name alone for modes older than Wi-Fi 4 (WiFiLink.standard).
+    public var standard: String? = nil
+    public var phyMode: String? = nil
+    /// Such as "WPA3 Personal" (WiFiLink.security); `securityInfo` adds how safe it is.
+    public var security: String? = nil
+    public var transmitPowerDBm: Int? = nil
+    /// The regulatory country the Wi-Fi reports, when CoreWLAN provides it.
+    public var countryCode: String? = nil
+    public var securityInfo: WiFiLink.Security? { security.flatMap(WiFiLink.security(named:)) }
     public var snr: Int? { guard let rssi, let noise else { return nil }; return rssi - noise }
     public var score: Int? { rssi.map { min(100, max(0, ($0 + 90) * 2)) } }
     public var health: ConnectionHealth {
@@ -32,6 +43,9 @@ public struct NearbyNetwork: Identifiable, Codable, Sendable {
     public let channel: Int
     public let band: String
     public let widthMHz: Int
+    /// The strongest security the network offers, such as "WPA2 Personal" (WiFiLink.security).
+    public var security: String? = nil
+    public var securityInfo: WiFiLink.Security? { security.flatMap(WiFiLink.security(named:)) }
 }
 public struct PingResult: Codable, Sendable {
     public let host: String
@@ -59,13 +73,19 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     public var wiredInterface: String? = nil
     /// The sign-in page came back on a network that was signed in to: the Wi-Fi logged you out, the internet isn't down.
     public var portalLoggedOut: Bool? = nil
+    /// The Mac is on a device's own Wi-Fi (a printer's Wi-Fi Direct, a camera's or drone's network) where there is no
+    /// internet by design: no alarm, no outage. The app fills it from the Wi-Fi name and whether anything past the router answered.
+    public var setupNetwork: SetupNetworkMatch? = nil
     public var health: ConnectionHealth {
+        if setupNetwork != nil { return .unknown }
         if captivePortal == true { return .poor }
         if radio.health == .poor || (internet.lossPercent ?? 0) >= 20 { return .poor }
         if radio.health == .degraded || (router?.average ?? 0) > 20 || (internet.average ?? 0) > 120 || (dnsMilliseconds ?? 0) > 150 || (internet.jitter ?? 0) > 30 { return .degraded }
         return internet.average == nil ? .unknown : .good
     }
     public var advice: [String] {
+        // A device's own Wi-Fi has no internet on purpose: that's the whole story.
+        if let setupNetwork { return [setupNetwork.headline] }
         // A sign-in page in the way explains everything else that fails, so it's the only finding.
         if captivePortal == true {
             return [portalLoggedOut == true ? "The Wi-Fi’s sign-in page logged you out. Sign in again; the internet isn’t down."
@@ -103,10 +123,10 @@ public struct SpeedTestResult: Codable, Sendable {
     // Latency/loss checks are conservative Kilobat heuristics, not a call-quality guarantee.
     public var callCautionReasons: [String] {
         var reasons: [String] = []
-        if let value = baseline.average, value > 300 { reasons.append(String(localized: "High latency (\(String(format: "%.0f", value)) ms)")) }
-        if let value = baseline.jitter, value > 30 { reasons.append(String(localized: "Variable ping (\(String(format: "%.0f", value)) ms jitter)")) }
-        if let value = baseline.lossPercent, value > 2 { reasons.append(String(localized: "Missing ping replies (\(String(format: "%.0f", value))%)")) }
-        if let value = addedLatency, value > 100 { reasons.append(String(localized: "Delay under load (+\(String(format: "%.0f", value)) ms)")) }
+        if let value = baseline.average, value > 300 { reasons.append(String(localized: "High latency (\(String(format: "%.0f", locale: Locale.current, value)) ms)")) }
+        if let value = baseline.jitter, value > 30 { reasons.append(String(localized: "Variable ping (\(String(format: "%.0f", locale: Locale.current, value)) ms jitter)")) }
+        if let value = baseline.lossPercent, value > 2 { reasons.append(String(localized: "Missing ping replies (\(String(format: "%.0f", locale: Locale.current, value))%)")) }
+        if let value = addedLatency, value > 100 { reasons.append(String(localized: "Delay under load (+\(String(format: "%.0f", locale: Locale.current, value)) ms)")) }
         return reasons
     }
     private var callCaution: Bool { !callCautionReasons.isEmpty }

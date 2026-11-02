@@ -56,16 +56,16 @@ public struct SupportReport: Codable, Sendable {
     public let mac: String
     /// "Wi-Fi 5 GHz, channel 149, signal −54 dBm" or "Ethernet". Never the network's name.
     public let connection: String
-    public let findings: [String]
+    public var findings: [String]
     public let latency: Latency?
     public let outages: [Outage]
     public let speedTests: [Speed]
     public let planMbps: Double?
     /// The last 30 days of tests on this network against its plan, when a plan is set.
     public let planCheck: PlanSummary?
-    public let check: Check?
+    public var check: Check?
     /// What was left out on purpose, said in the report so the reader knows it isn't missing by accident.
-    public let leftOut: [String]
+    public var leftOut: [String]
     /// The Starlink dish's own outage log, when the report's network is a dish's.
     public var starlink: StarlinkEvidence? = nil
     /// One service much slower than the rest of the internet on this network: the route to it, for the provider.
@@ -179,9 +179,9 @@ public struct SupportReport: Codable, Sendable {
             } else {
                 lines.append(String(localized: "Internet latency was \(ms(internet)) (median) over \(latency.checks) checks, \(ms(latency.internetP95Ms)) at the 95th percentile.", comment: "A latency, a count of health checks and another latency"))
             }
-            if let loss = latency.lossPercent, loss >= 1 { lines.append(String(localized: "On average \(String(format: "%.1f", loss))% of internet pings got no reply.")) }
+            if let loss = latency.lossPercent, loss >= 1 { lines.append(String(localized: "On average \(String(format: "%.1f", locale: Locale.current, loss))% of internet pings got no reply.")) }
             if latency.poorPercent + latency.degradedPercent >= 20 {
-                lines.append(String(localized: "\(String(format: "%.0f", latency.poorPercent + latency.degradedPercent))% of checks were slow or poor.", comment: "A percentage of health checks"))
+                lines.append(String(localized: "\(String(format: "%.0f", locale: Locale.current, latency.poorPercent + latency.degradedPercent))% of checks were slow or poor.", comment: "A percentage of health checks"))
             }
         }
         // A month against the plan says more than a day's tests, so it comes first.
@@ -189,7 +189,7 @@ public struct SupportReport: Codable, Sendable {
         if !speeds.isEmpty {
             let down = median(speeds.map(\.downloadMbps)) ?? 0, up = median(speeds.map(\.uploadMbps)) ?? 0
             if let plan {
-                lines.append(String(localized: "\(speeds.count) speed tests: median \(mbps(down)) down, \(mbps(up)) up, \(String(format: "%.0f", down / plan * 100))% of the \(mbps(plan)) plan.", comment: "A count of speed tests, the median download and upload speeds, and the download as a share of the internet plan’s speed"))
+                lines.append(String(localized: "\(speeds.count) speed tests: median \(mbps(down)) down, \(mbps(up)) up, \(String(format: "%.0f", locale: Locale.current, down / plan * 100))% of the \(mbps(plan)) plan.", comment: "A count of speed tests, the median download and upload speeds, and the download as a share of the internet plan’s speed"))
             } else {
                 lines.append(String(localized: "\(speeds.count) speed tests: median \(mbps(down)) down, \(mbps(up)) up.", comment: "A count of speed tests and the median download and upload speeds"))
             }
@@ -202,6 +202,43 @@ public struct SupportReport: Codable, Sendable {
     // MARK: Redaction
 
     /// Private and link-local addresses become words; public server addresses stay, since they name the server, not you.
+    /// The report without the names of the sites in it, unless the person ticks "Include site names": the host they
+    /// checked and the service with a slow route become "the site checked" and "one service", and the service's server
+    /// address goes. The measurements stay.
+    public func withoutSiteNames() -> SupportReport {
+        let site = String(localized: "the site checked", comment: "Replaces the checked site's name in the provider report, mid-sentence")
+        let service = String(localized: "one service", comment: "Replaces a service's name, such as GitHub, in the provider report, mid-sentence")
+        let server = String(localized: "its server", comment: "Replaces a service's server address in the provider report, mid-sentence")
+        var names: [(String, String)] = []
+        if let host = check?.host, !host.isEmpty { names.append((host, site)) }
+        if let route = serviceRoute {
+            if !route.service.isEmpty { names.append((route.service, service)) }
+            if let address = route.address, !address.isEmpty { names.append((address, server)) }
+        }
+        guard !names.isEmpty else { return self }
+        // Longest first, so a name inside another (github.com in api.github.com) can't leave half of it behind.
+        names.sort { $0.0.count > $1.0.count }
+        func scrub(_ text: String) -> String {
+            // Redirects and certificate errors can name another host, not just the host the person checked.
+            // Paths and query strings can identify the visit too. Remove URLs before renaming hosts, while
+            // keeping standalone public IP measurements in DNS/route results.
+            let urls = text.replacingOccurrences(of: #"\b(?:https?|wss?)://[^\s<>"']+"#, with: site,
+                                                 options: [.regularExpression, .caseInsensitive])
+            let domains = urls.replacingOccurrences(of: #"(?<![\p{L}\p{N}_-])(?:[\p{L}\p{N}][\p{L}\p{N}_-]*\.)+\p{L}[\p{L}\p{N}_-]*(?![\p{L}\p{N}_-])(?::[0-9]+)?(?:/[^\s<>"']*)?"#,
+                                                     with: site, options: [.regularExpression, .caseInsensitive])
+            return names.reduce(domains) { $0.replacingOccurrences(of: $1.0, with: $1.1, options: [.caseInsensitive]) }
+        }
+        var copy = self
+        copy.findings = findings.map(scrub)
+        copy.check = check.map { Check(host: site, ok: $0.ok, verdict: scrub($0.verdict), steps: $0.steps.map { Step(layer: $0.layer, status: $0.status, detail: scrub($0.detail)) }) }
+        copy.serviceRoute = serviceRoute.map {
+            ServiceRoute(service: service, slowMbps: $0.slowMbps, elsewhereMbps: $0.elsewhereMbps, transfers: $0.transfers, since: $0.since,
+                         pattern: $0.pattern.map(scrub), trace: $0.trace.map(scrub), address: nil)
+        }
+        copy.leftOut.append(String(localized: "the names of the sites checked", comment: "Left out of the provider report; items are joined with semicolons"))
+        return copy
+    }
+
     public static func redact(_ text: String) -> String {
         var result = text
         let local = String(localized: "a local address", comment: "Replaces a private IP address in the provider report, mid-sentence")
@@ -227,7 +264,7 @@ public struct SupportReport: Codable, Sendable {
         return [radio.band.map { String(localized: "Wi-Fi \($0)", comment: "Wi-Fi and its band, such as 5 GHz") } ?? String(localized: "Wi-Fi"),
                 radio.channel.map { String(localized: "channel \($0)", comment: "A Wi-Fi channel number, in a list after the band") },
                 radio.rssi.map { String(localized: "signal \($0) dBm", comment: "Wi-Fi signal strength, in a list after the channel") },
-                radio.transmitMbps.map { String(localized: "link \(String(format: "%.0f", $0)) Mbps", comment: "Wi-Fi link rate, in a list after the signal") }]
+                radio.transmitMbps.map { String(localized: "link \(String(format: "%.0f", locale: Locale.current, $0)) Mbps", comment: "Wi-Fi link rate, in a list after the signal") }]
             .compactMap { $0 }.joined(separator: ", ")
     }
 
@@ -255,11 +292,11 @@ public struct SupportReport: Codable, Sendable {
         return sorted[min(sorted.count - 1, Int((Double(sorted.count - 1) * p).rounded()))]
     }
     static func mean(_ values: [Double]) -> Double? { values.isEmpty ? nil : values.reduce(0, +) / Double(values.count) }
-    static func ms(_ value: Double?) -> String { value.map { String(format: "%.0f ms", $0) } ?? "—" }
-    static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", value) }
+    static func ms(_ value: Double?) -> String { value.map { String(format: "%.0f ms", locale: Locale.current, $0) } ?? "—" }
+    static func mbps(_ value: Double) -> String { String(format: value < 10 ? "%.1f Mbps" : "%.0f Mbps", locale: Locale.current, value) }
     static func minutes(_ value: Double) -> String {
         value < 1 ? String(localized: "under a minute", comment: "How long an outage lasted")
-            : value < 90 ? String(localized: "\(String(format: "%.0f", value)) min", comment: "Minutes, abbreviated") : String(localized: "\(String(format: "%.1f", value / 60)) h", comment: "Hours, abbreviated")
+            : value < 90 ? String(localized: "\(String(format: "%.0f", locale: Locale.current, value)) min", comment: "Minutes, abbreviated") : String(localized: "\(String(format: "%.1f", locale: Locale.current, value / 60)) h", comment: "Hours, abbreviated")
     }
     static func time(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated).hour().minute()) }
 }

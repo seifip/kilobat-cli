@@ -25,7 +25,7 @@ enum OverlayCLI {
         if target == CurrentMatch.overlayTarget { print("Pinging the server of the match you're playing once a second; Kilobat looks for it again every 30 seconds.") }
         print("In OBS: Sources › + › Browser, set the URL to it, width 640, height 80. Only this Mac can open it.")
         print("Options: \(overlay.url)?show=ping,jitter,loss,graph&theme=dark|light|clear&size=s|m|l")
-        print("Live speed needs the Kilobat app's overlay (Settings › Network). Ctrl-C to stop.")
+        print("Live speed needs the Kilobat app's overlay (Settings › Streaming). Ctrl-C to stop.")
         while true { try await Task.sleep(for: .seconds(3600)) }
     }
 

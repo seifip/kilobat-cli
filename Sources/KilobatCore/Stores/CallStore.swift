@@ -29,6 +29,8 @@ import Observation
     public private(set) var holding: [String] = []
     @ObservationIgnored private var heldSince: [String: Date] = [:]
     @ObservationIgnored private var blocked: [String] = []
+    /// App IDs this call holds with a timed block, for the rule inspector.
+    public var heldBlocks: [String] { blocked }
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var airDropHeld = false
     @ObservationIgnored private weak var traffic: TrafficStore?
@@ -216,6 +218,9 @@ actor PingStream {
         offset = Date().timeIntervalSince(start)
         do { try process.run(); self.process = process } catch { self.process = nil }
     }
+
+    /// The pings so far, for a live readout; the stream keeps going.
+    func current() -> [CallSamples.Ping] { pings.sorted { $0.at < $1.at } }
 
     func stop() -> [CallSamples.Ping] {
         process?.terminate(); process = nil

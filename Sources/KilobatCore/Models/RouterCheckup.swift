@@ -180,6 +180,8 @@ public struct RouterRestart: Codable, Sendable, Equatable, Identifiable {
         case outage
         /// The person tapped I restarted it.
         case button
+        /// A connected router's own uptime began again: certainly a restart, to the minute.
+        case router
     }
     public enum Outcome: String, Codable, Sendable {
         case fixed, helped
@@ -375,6 +377,22 @@ public struct RouterRecord: Codable, Sendable, Equatable, Identifiable {
     public var draft: RouterHourDraft?
     public var restarts: [RouterRestart] = []
     public var episodes: [RouterEpisode] = []
+    /// When the router booted, from the uptime a connected router reports.
+    public var booted: Date? = nil
+    /// Who made it: the maker registered for its MAC address, or the kind Kilobat recognised on the network.
+    public var maker: String? = nil
+    /// When Kilobat first kept this router's history.
+    public var since: Date? = nil
+    /// When its firmware was last known to be checked: a connected router reporting it, or the person saying so.
+    public var firmwareChecked: Date? = nil
+
+    /// A firmware check is suggested this long after the last one Kilobat knows of.
+    public static let firmwareInterval: TimeInterval = 90 * 86_400
+    /// "Check for a firmware update" for a router Kilobat can name but can't read: none checked in about 3 months.
+    public func firmwareDue(now: Date) -> Bool {
+        guard maker != nil, let last = firmwareChecked ?? since ?? hours.first?.start else { return false }
+        return now.timeIntervalSince(last) >= Self.firmwareInterval
+    }
     public init(network: String, mac: String?, name: String, lastSeen: Date) { self.network = network; self.mac = mac; self.name = name; self.lastSeen = lastSeen }
 
     public var episode: RouterEpisode? { episodes.last.flatMap { $0.end == nil ? $0 : nil } }
@@ -456,10 +474,22 @@ public struct RouterRecord: Codable, Sendable, Equatable, Identifiable {
     /// The person restarted it, or Kilobat saw it come back after an outage. One within two hours of another is the same restart.
     public mutating func restarted(at date: Date, source: RouterRestart.Source, outageSeconds: Double? = nil) {
         if let index = restarts.lastIndex(where: { abs($0.date.timeIntervalSince(date)) < 7200 && $0.outcome == nil }) {
-            if source == .button { restarts[index].source = .button }
+            // The person's word first, then the router's own: either makes a seen outage a restart for certain.
+            if source == .button || (source == .router && restarts[index].source == .outage) { restarts[index].source = source }
             return
         }
         restarts.append(RouterRestart(date: date, source: source, outageSeconds: outageSeconds, episode: episode?.id))
         restarts = Array(restarts.suffix(30))
+    }
+
+    /// The router's own uptime, read from it: a boot more than two minutes after the one known before is a restart
+    /// at that time. The first reading only learns the boot; readings of one boot differ by a second or two.
+    @discardableResult public mutating func reported(uptime: TimeInterval, at date: Date) -> Bool {
+        guard uptime >= 0 else { return false }
+        let boot = date.addingTimeInterval(-uptime)
+        defer { booted = boot }
+        guard let previous = booted, boot.timeIntervalSince(previous) > 120, boot <= date else { return false }
+        restarted(at: boot, source: .router)
+        return true
     }
 }
