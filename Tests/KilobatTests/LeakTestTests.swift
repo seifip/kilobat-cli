@@ -45,7 +45,7 @@ struct LeakTestTests {
         // Without bash.ws only the local check runs, and it says so.
         var offline = clean(); offline.dnsSeen = nil
         let unseen = LeakTest.evaluate(offline)
-        #expect(status(unseen, "dns") == .pass && unseen.checks[0].detail.contains("bash.ws didn’t answer") && !unseen.services.contains("bash.ws"))
+        #expect(status(unseen, "dns") == .warning && unseen.checks[0].detail.contains("bash.ws didn’t answer") && !unseen.services.contains("bash.ws"))
     }
 
     @Test func ipv6AroundTheTunnel() {

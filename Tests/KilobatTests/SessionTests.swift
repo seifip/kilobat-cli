@@ -213,9 +213,9 @@ import Testing
         #expect(sessions.agents["Claude Code"] == nil && sessions.agents["Claude Code|x"]?.state == .waitingForYou)
         sessions.receive(AgentEvent(kind: .failed, agent: "claude", session: "x", message: "server_error", time: start + 90))
         #expect(sessions.history.first?.ended == "Failed: server_error" && sessions.history.first?.state == .failed)
-        // Once hooks report an agent, its traffic alone starts no run.
+        // After the hooked run ends, a later unhooked run can start from traffic.
         sessions.tick(apps: [traffic("process:claude", rate: 500_000)], interval: 2, now: start + 100)
-        #expect(sessions.agents.isEmpty)
+        #expect(sessions.agents["Claude Code"]?.hooks != true && sessions.agents.count == 1)
     }
 
     @Test func eventsRejectOversizeFields() throws {
