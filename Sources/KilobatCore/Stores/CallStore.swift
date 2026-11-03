@@ -35,6 +35,7 @@ import Observation
     @ObservationIgnored private var airDropHeld = false
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
+    @ObservationIgnored private var holdDeadline: Task<Void, Never>?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
     private let file: URL
     private let ledger: URL
@@ -84,10 +85,11 @@ import Observation
 
     private func tick(traffic: TrafficStore, diagnostics: DiagnosticStore) async {
         guard enabled else { return }
+        if !allowed(), !holding.isEmpty || airDropHeld { release() }
         let call = CallDetector.microphoneUsers().flatMap { CallDetector.call(microphone: $0) }
         let now = Date()
         if let live {
-            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); await hold(traffic: traffic, now: now, start: live.start) }
+            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); hold(traffic: traffic, now: now, start: live.start) }
             else if let since = silentSince, now.timeIntervalSince(since) >= 10 { await stop(report: true, end: since, diagnostics: diagnostics) }
             else if silentSince == nil { silentSince = now }
             return
@@ -97,24 +99,40 @@ import Observation
         if candidate?.call != call { candidate = (call, now); return }
         guard let since = candidate?.since, now.timeIntervalSince(since) >= 10 else { return }
         live = (call, since); candidate = nil; silentSince = nil; released = []
+        holdDeadline?.cancel()
+        holdDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, since.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
+            catch { return }
+            guard let self, self.live?.start == since else { return }
+            self.release()
+        }
         let sampler = LineSampler(start: since, starlink: starlink, peers: peers)
         self.sampler = sampler
         await sampler.begin(diagnostics: diagnostics)
-        await hold(traffic: traffic, now: now, start: since)
-        if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active {
-            await diagnostics.lowLatency.enable(seconds: CallMode.limit)
+        guard live?.start == since else { return }
+        hold(traffic: traffic, now: Date(), start: since)
+        if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active, !diagnostics.lowLatency.busy {
+            let remaining = CallMode.limit - Date().timeIntervalSince(since)
+            guard remaining > 0 else { return }
+            await diagnostics.lowLatency.enable(seconds: remaining)
+            guard live?.start == since, callMode, allowed(), Date().timeIntervalSince(since) < CallMode.limit else {
+                if diagnostics.lowLatency.active { diagnostics.lowLatency.release() }
+                return
+            }
             airDropHeld = diagnostics.lowLatency.active
         }
     }
 
     /// Holds every known app that's running and moving data, and lets go of one the person brings to the front.
-    private func hold(traffic: TrafficStore, now: Date, start: Date) async {
-        guard callMode, allowed() else { return }
-        if now.timeIntervalSince(start) > CallMode.limit { release(); return }
+    func hold(traffic: TrafficStore, now: Date, start: Date) {
+        if !allowed() || now.timeIntervalSince(start) >= CallMode.limit {
+            if !holding.isEmpty || airDropHeld { release() }
+            return
+        }
         if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
             released.insert(name); resume(name)
         }
-        guard now.timeIntervalSince(lastHoldScan) >= 10 else { return }
+        guard callMode, now.timeIntervalSince(lastHoldScan) >= 10 else { return }
         lastHoldScan = now
         let front = NSWorkspace.shared.frontmostApplication
         let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
@@ -170,6 +188,7 @@ import Observation
     }
 
     private func stop(report: Bool, end: Date = Date(), diagnostics: DiagnosticStore? = nil) async {
+        holdDeadline?.cancel(); holdDeadline = nil
         guard let live, let sampler else { return }
         self.live = nil; self.sampler = nil; silentSince = nil
         let held = holding

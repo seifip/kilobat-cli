@@ -99,6 +99,39 @@ import Testing
         #expect(CallMode.resume(owner: CallMode.call, ledger: ledger).map(\.pid) == [child.processIdentifier])
     }
 
+    @Test func losingCallModeEntitlementResumesItsOwnedProcess() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("call-entitlement-\(UUID())")
+        let ledger = folder.appendingPathComponent("held.json")
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        let calls = CallStore(directory: folder, ledger: ledger)
+        calls.start(traffic: traffic, diagnostics: DiagnosticStore(), polling: false)
+        calls.allowed = { true }
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        defer {
+            calls.release()
+            kill(child.processIdentifier, SIGCONT)
+            if child.isRunning { child.terminate() }
+            child.waitUntilExit()
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let app = AppTraffic(id: "com.getdropbox.dropbox", name: "Dropbox", processIDs: [child.processIdentifier])
+        traffic.apps = [app]
+        calls.holdBeforeCall(["Dropbox"])
+        #expect(CallMode.held(ledger: ledger).first?.holders == [CallMode.call])
+        #expect(traffic.temporaryRule(app.id)?.allowed == false)
+        calls.allowed = { false }
+        let now = Date()
+        calls.hold(traffic: traffic, now: now, start: now - 60)
+        #expect(calls.holding.isEmpty && CallMode.held(ledger: ledger).isEmpty)
+        #expect(traffic.temporaryRule(app.id) == nil)
+        var info = proc_bsdinfo()
+        _ = proc_pidinfo(child.processIdentifier, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        #expect(info.pbi_status != UInt32(SSTOP))
+    }
+
     @Test func overlayRejectsForeignOriginsAndReboundHosts() {
         #expect(StreamOverlay.localPath("GET /data.json HTTP/1.1\r\nHost: localhost:7171", port: 7171) == "/data.json")
         #expect(StreamOverlay.localPath("GET /data.json HTTP/1.1\r\nHost: localhost:7171\r\nOrigin: https://foreign.example", port: 7171) == nil)
