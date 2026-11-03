@@ -49,13 +49,13 @@ public struct ExitPath: Codable, Sendable, Equatable {
 
     public var connectionSymbol: String? {
         let device = interface ?? ipv6Interface
-        guard let device else { return "network.slash" }
+        guard let device else { return nil }
         return Self.connectionSymbol(port: port ?? connectedPorts?[device], tunnel: tunnel || TrafficRoute.tunnelInterface(Substring(device)))
     }
-    public var routeTitle: String {
+    public var routeTitle: String? {
         guard interface != nil else {
             if let ipv6Interface { return String(localized: "IPv6 internet route · \(connectedPorts?[ipv6Interface] ?? ipv6Interface)") }
-            return String(localized: "No default internet route")
+            return nil
         }
         return String(localized: "Internet route · \(interfaceLabel)")
     }

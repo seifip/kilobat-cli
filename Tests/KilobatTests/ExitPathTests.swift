@@ -26,11 +26,12 @@ struct ExitPathTests {
 
     @Test func ipv6OnlyAndNoRouteHaveHonestConnectionStates() {
         var path = ExitPath(interface: nil)
-        #expect(path.connectionSymbol == "network.slash")
+        #expect(path.connectionSymbol == nil)
+        #expect(path.routeTitle == nil)
         path.ipv6Interface = "en7"
         path.connectedPorts = ["en7": "Bluetooth PAN"]
         #expect(path.connectionSymbol == "personalhotspot")
-        #expect(path.routeTitle.contains("Bluetooth PAN"))
+        #expect(path.routeTitle?.contains("Bluetooth PAN") == true)
     }
 
     @Test func oldSavedPathsDecodeWithoutConnectedPorts() throws {
