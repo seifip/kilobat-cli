@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import KilobatCore
@@ -58,6 +59,44 @@ import Testing
         try await Task.sleep(for:.milliseconds(200))
         traffic.switchNetwork(a)
         #expect(before == .travel && !traffic.metered && traffic.preferences.profile == .unrestricted)
+    }
+
+    @Test func gamingHoldExpiresWithoutTrafficAndPreservesOtherOwners() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("gaming-hold-\(UUID())")
+        let ledger = folder.appendingPathComponent("held.json")
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        let gaming = CloudGamingStore(directory: folder)
+        gaming.processHoldLedger = ledger
+        gaming.processHoldLimit = .milliseconds(50)
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        try child.run()
+        defer {
+            CallMode.resume(ledger: ledger)
+            kill(child.processIdentifier, SIGCONT)
+            if child.isRunning { child.terminate() }
+            child.waitUntilExit()
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let app = AppTraffic(id: "com.getdropbox.dropbox", name: "Dropbox", processIDs: [child.processIdentifier])
+        gaming.hold([app], traffic: traffic)
+        #expect(gaming.holding == ["Dropbox"])
+        #expect(traffic.temporaryRule(app.id)?.allowed == false)
+        _ = CallMode.hold(app.processIDs, app: "Dropbox", owner: CallMode.call, ledger: ledger)
+        traffic.setTemporary(app.id, allowed: true)
+
+        let clock = ContinuousClock()
+        let waitUntil = clock.now.advanced(by: .seconds(5))
+        while !gaming.holding.isEmpty && clock.now < waitUntil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(gaming.holding.isEmpty)
+        #expect(CallMode.held(ledger: ledger).first?.holders == [CallMode.call])
+        #expect(traffic.temporaryRule(app.id)?.allowed == true)
+        gaming.hold([app], traffic: traffic)
+        #expect(gaming.holding.isEmpty)
+        #expect(CallMode.resume(owner: CallMode.call, ledger: ledger).map(\.pid) == [child.processIdentifier])
     }
 
     @Test func overlayRejectsForeignOriginsAndReboundHosts() {
