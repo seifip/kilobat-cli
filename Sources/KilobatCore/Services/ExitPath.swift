@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 /// Where this Mac's traffic leaves: the default route's interface, whether that is a tunnel, the VPN services macOS
 /// lists as connected and, only when asked, the public address one outside service sees. Reading the route and the
@@ -35,6 +36,30 @@ public struct ExitPath: Codable, Sendable, Equatable {
     public var port: String?
     /// The default IPv6 route, when one exists.
     public var ipv6Interface: String?
+    /// Addressed physical interfaces, including secondary USB and Bluetooth links.
+    public var connectedPorts: [String: String]?
+
+    public static func connectionSymbol(port: String?, tunnel: Bool = false) -> String? {
+        if tunnel { return "network.badge.shield.half.filled" }
+        guard let name = port?.lowercased() else { return "network" }
+        if name.contains("iphone") || name.contains("ipad") || name.contains("tether") || name.contains("bluetooth") { return "personalhotspot" }
+        if name.contains("wi-fi") || name.contains("wifi") || name.contains("airport") { return nil }
+        return "network"
+    }
+
+    public var connectionSymbol: String? {
+        let device = interface ?? ipv6Interface
+        guard let device else { return "network.slash" }
+        return Self.connectionSymbol(port: port ?? connectedPorts?[device], tunnel: tunnel || TrafficRoute.tunnelInterface(Substring(device)))
+    }
+    public var routeTitle: String {
+        guard interface != nil else {
+            if let ipv6Interface { return String(localized: "IPv6 internet route · \(connectedPorts?[ipv6Interface] ?? ipv6Interface)") }
+            return String(localized: "No default internet route")
+        }
+        return String(localized: "Internet route · \(interfaceLabel)")
+    }
+
     /// False when the route check failed for a reason other than there being no IPv6 route.
     public var ipv6RouteKnown: Bool?
 
@@ -116,7 +141,19 @@ public struct ExitPath: Codable, Sendable, Equatable {
         let ipv6 = await route6
         path.ipv6Interface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: ipv6.output).first
         path.ipv6RouteKnown = (path.ipv6Interface != nil || (ipv6.status == 1 && ipv6.output.contains("not in table"))) && KillSwitchPolicy.ipv6Covered()
-        if ports, !path.tunnel, let interface = path.interface { path.port = hardwarePorts(await hardware)[interface] }
+        if ports {
+            let names = hardwarePorts(await hardware)
+            if !path.tunnel, let interface = path.interface { path.port = names[interface] }
+            if let store = SCDynamicStoreCreate(nil, "Kilobat connection overview" as CFString, nil, nil) {
+                path.connectedPorts = names.filter { device, _ in
+                    ["IPv4", "IPv6"].contains { family in
+                        let key = "State:/Network/Interface/\(device)/\(family)" as CFString
+                        let state = SCDynamicStoreCopyValue(store, key) as? [String: Any]
+                        return !(state?["Addresses"] as? [String] ?? []).isEmpty
+                    }
+                }
+            }
+        }
         if lookup, path.interface != nil { path.publicAddress = try? await publicAddress() }
         return (path, list)
     }

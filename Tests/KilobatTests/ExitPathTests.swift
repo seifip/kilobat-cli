@@ -4,6 +4,43 @@ import Testing
 
 /// Where traffic leaves (VPN and public IP), speed-test comparisons, route history and the iperf3 reader.
 struct ExitPathTests {
+    @Test func connectionIconsUseTransportNotMeteredCostOrDeviceNumber() {
+        #expect(ExitPath.connectionSymbol(port: "iPhone USB") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Bluetooth PAN") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Android USB tethering") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Wi-Fi") == nil)
+        #expect(ExitPath.connectionSymbol(port: "Thunderbolt Ethernet") == "network")
+        #expect(ExitPath.connectionSymbol(port: nil) == "network")
+        #expect(ExitPath.connectionSymbol(port: "iPhone USB", tunnel: true) != "personalhotspot")
+    }
+
+    @Test func secondaryPhoneDoesNotOverridePrimaryWiFi() {
+        var path = ExitPath(interface: "en0", port: "Wi-Fi")
+        path.connectedPorts = ["en0": "Wi-Fi", "en5": "iPhone USB"]
+        #expect(path.connectionSymbol == nil)
+        path.interface = "en5"; path.port = "iPhone USB"
+        #expect(path.connectionSymbol == "personalhotspot")
+        let data = try? JSONEncoder().encode(path)
+        #expect(data.flatMap { try? JSONDecoder().decode(ExitPath.self, from: $0) } == path)
+    }
+
+    @Test func ipv6OnlyAndNoRouteHaveHonestConnectionStates() {
+        var path = ExitPath(interface: nil)
+        #expect(path.connectionSymbol == "network.slash")
+        path.ipv6Interface = "en7"
+        path.connectedPorts = ["en7": "Bluetooth PAN"]
+        #expect(path.connectionSymbol == "personalhotspot")
+        #expect(path.routeTitle.contains("Bluetooth PAN"))
+    }
+
+    @Test func oldSavedPathsDecodeWithoutConnectedPorts() throws {
+        let path = ExitPath(interface: "en0", port: "Wi-Fi")
+        let data = try JSONEncoder().encode(path)
+        let decoded = try JSONDecoder().decode(ExitPath.self, from: data)
+        #expect(decoded.connectedPorts == nil)
+        #expect(decoded.interface == "en0")
+    }
+
     // MARK: Exit path
 
     @Test func connectedVPNsComeOnlyFromConnectedServices() {
