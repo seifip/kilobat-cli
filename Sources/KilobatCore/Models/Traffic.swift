@@ -147,6 +147,7 @@ public struct SavedPreferences: Codable, Equatable {
     public var connectionRules: [ConnectionRule]? = nil
     public var temporaryRules: [String: TemporaryRule]? = nil
     public var networkProfiles: [String: String]? = nil
+    public var networkBudgetModes: [String: NetworkBudgetMode]? = nil
     public var networkLimits: [String: Double]? = nil
     public var trafficScope: String? = nil
     public var blockedDomains: [String]? = nil
@@ -211,6 +212,23 @@ public struct SavedPreferences: Codable, Equatable {
     public var blockCheckResolver: String? = nil
     /// The resolver fastest DNS falls back to when the one it picked fails, before the network's own; nil is none.
     public var dnsFallback: String? = nil
+    public func budgetMode(for network: String) -> NetworkBudgetMode {
+        if let mode = networkBudgetModes?[network] { return mode }
+        // Older versions saved 5 GB even on networks the user never configured.
+        if networkCycles?[network] != nil || (networkLimits?[network] ?? 5) != 5 { return .block }
+        return .off
+    }
+
+    public mutating func setBudgetMode(_ mode: NetworkBudgetMode, for network: String) {
+        let previous = budgetMode(for: network)
+        networkBudgetModes = (networkBudgetModes ?? [:]).merging([network: mode]) { _, new in new }
+        if previous != .alert, mode == .alert, (networkCycles?[network] ?? BudgetCycle()).thresholds.isEmpty {
+            var cycle = networkCycles?[network] ?? BudgetCycle()
+            cycle.alerts = BudgetCycle.defaultAlerts
+            networkCycles = (networkCycles ?? [:]).merging([network: cycle]) { _, new in new }
+        }
+    }
+
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]

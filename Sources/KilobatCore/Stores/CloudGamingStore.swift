@@ -121,6 +121,9 @@ import Observation
     @ObservationIgnored private var heldBlocks: [TrafficStore.OwnedTemporary] = []
     @ObservationIgnored var processHoldLedger = CallMode.ledgerURL
     @ObservationIgnored var processHoldLimit: Duration = .seconds(CallMode.limit)
+    @ObservationIgnored var waitForHoldDeadline: (ContinuousClock.Instant) async throws -> Void = {
+        try await ContinuousClock().sleep(until: $0)
+    }
     @ObservationIgnored private var holdDeadline: ContinuousClock.Instant?
     @ObservationIgnored private var holdTimer: Task<Void, Never>?
     @ObservationIgnored private var holdGeneration = UUID()
@@ -399,9 +402,10 @@ import Observation
                 let deadline = clock.now.advanced(by: processHoldLimit)
                 holdDeadline = deadline
                 let generation = holdGeneration
+                let wait = waitForHoldDeadline
                 holdTimer = Task { [weak self, weak traffic] in
-                    do { try await clock.sleep(until: deadline) } catch { return }
-                    guard let self, self.holdGeneration == generation else { return }
+                    do { try await wait(deadline) } catch { return }
+                    guard let self, !Task.isCancelled, self.holdGeneration == generation else { return }
                     self.releaseProcessHolds(traffic: traffic)
                 }
             }

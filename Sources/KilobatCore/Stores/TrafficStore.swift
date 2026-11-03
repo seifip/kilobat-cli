@@ -176,6 +176,18 @@ public final class TrafficStore {
 
     public var total: UInt64 { received + sent }
     public var limit: UInt64 { UInt64(preferences.limitGB * 1_000_000_000) }
+    public var budgetMode: NetworkBudgetMode { preferences.budgetMode(for: networkKey) }
+    public var budgetBlocksNewConnections: Bool { budgetMode == .block && limitFraction >= 1 }
+    public var displayedUsage: UInt64 { budgetMode == .off ? total : budgetUsedBytes }
+
+    public func setBudgetMode(_ mode: NetworkBudgetMode) {
+        guard networkKey != "unknown" else { return }
+        var next = preferences
+        next.setBudgetMode(mode, for: networkKey)
+        next.budgetCycle = next.networkCycles?[networkKey]
+        preferences = next
+    }
+
     public var limitFraction: Double { min(1, Double(budgetUsedBytes) / Double(max(1, limit))) }
     public var budgetCycle: BudgetCycle { preferences.budgetCycle ?? BudgetCycle() }
     /// The current cycle on this network; nil for a session budget.

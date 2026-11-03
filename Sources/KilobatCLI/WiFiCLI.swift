@@ -280,7 +280,7 @@ import KilobatCore
     }
     static func networkKeys(_ store: TrafficStore) -> Set<String> {
         Set((store.preferences.networkProfiles ?? [:]).keys).union((store.preferences.networkLimits ?? [:]).keys).union((store.preferences.networkCost ?? [:]).keys)
-            .union(store.networkSessions.keys).subtracting(["unknown"])
+            .union((store.preferences.networkBudgetModes ?? [:]).keys).union(store.networkSessions.keys).subtracting(["unknown"])
     }
     static func network(_ text: String, store: TrafficStore) throws -> String {
         let matches = networkKeys(store).filter { $0 == text || store.networkSessions[$0]?.name.caseInsensitiveCompare(text) == .orderedSame }
@@ -322,11 +322,12 @@ import KilobatCore
         func name(_ key: String) -> String { store.networkSessions[key]?.name ?? "Unknown network" }
         return keys.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }.map { key -> [String: Any] in
             let cost = key == current ? currentCost(store, app: app) : preferences.cost(of: key)
+            let budgetMode = preferences.budgetMode(for: key)
             // macOS only reports the network the Mac is on.
             let metered: [String: Any] = key == current ? cost.fields(os: os)
                 : ["metered": cost == .automatic ? NSNull() : cost == .metered, "osMetered": NSNull(), "meteredSource": cost == .automatic ? NSNull() : "you"]
             return ["key": key, "name": name(key), "profile": preferences.networkProfiles?[key]?.lowercased() ?? NSNull(), "remembered": preferences.networkProfiles?[key] != nil,
-                    "budgetGB": preferences.networkLimits?[key] ?? NSNull(), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0),
+                    "budgetMode": budgetMode.rawValue, "budgetGB": budgetMode == .off ? NSNull() : (preferences.networkLimits?[key] ?? 5), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0),
                     "current": key == current, "cost": preferences.cost(of: key).rawValue].merging(metered) { $1 }
         }
     }

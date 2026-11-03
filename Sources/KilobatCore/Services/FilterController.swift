@@ -70,7 +70,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
             while !Task.isCancelled {
                 guard let self, let store else { return }
                 store.reloadPreferences()
-                self.sync(preferences: store.preferences, budgetReached: store.limitFraction >= 1, quotaReached: store.quotaReached, metered: store.metered)
+                self.sync(preferences: store.preferences, budgetReached: store.budgetBlocksNewConnections, quotaReached: store.quotaReached, metered: store.metered)
                 // Polling is also how the filter knows someone is here to answer, so it only runs while asking.
                 tick += 1
                 if self.active && store.preferences.askNewApps == true && store.preferences.profile != .unrestricted {

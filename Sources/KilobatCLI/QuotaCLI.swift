@@ -10,7 +10,7 @@ import KilobatCore
     }
 
     static func limit(_ args: [String], store: TrafficStore, app: [String: Any]?) throws {
-        var gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, index = 1
+        var gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, mode: NetworkBudgetMode?, index = 1
         func value() throws -> String {
             guard index + 1 < args.count else { throw CLIError("\(args[index]) needs a value. Run kilobat limit --help.") }
             defer { index += 2 }
@@ -18,6 +18,9 @@ import KilobatCore
         }
         while index < args.count {
             switch args[index] {
+            case "--mode":
+                guard let selected = NetworkBudgetMode(rawValue: try value()) else { throw CLIError("--mode takes off, alert or block.") }
+                mode = selected
             case "--cycle": cycle = try value()
             case "--reset-day":
                 guard let day = Int(try value()) else { throw CLIError("--reset-day takes a number: 1–31 for monthly, 1 (Monday) to 7 (Sunday) for weekly.") }
@@ -32,6 +35,7 @@ import KilobatCore
         let network = currentNetwork(store, app: app)
         if args.count == 1 {
             let budget = budgetJSON(store, app: app)
+            guard budget["mode"] as? String != NetworkBudgetMode.off.rawValue else { print("Budget: off"); return }
             let used = (budget["usedBytes"] as? UInt64) ?? 0
             print("Budget: \(store.preferences.limitGB.formatted()) GB · \(store.budgetCycle.summary())")
             if network != nil { print("  " + store.budgetCycle.progress(used: used, limitGB: store.preferences.limitGB)) }
@@ -39,16 +43,24 @@ import KilobatCore
             print(Terminal.dim("  Usage is sampled, so the cap is approximate. Blocking needs the app's network filter."))
             return
         }
-        try applyBudget(store, gb: gb, cycle: cycle, resetDay: resetDay, alerts: alerts, network: network)
+        try applyBudget(store, gb: gb, cycle: cycle, resetDay: resetDay, alerts: alerts, network: network, mode: mode)
+        let selected = network.map { store.preferences.budgetMode(for: $0) } ?? .off
+        guard selected != .off else { print("✓ Budget: off"); return }
         let thresholds = store.budgetCycle.thresholds
         print("✓ Budget: \(store.preferences.limitGB.formatted()) GB · \(store.budgetCycle.summary()) · alerts \(thresholds.isEmpty ? "off" : "at " + thresholds.map { "\($0)%" }.joined(separator: ", "))")
-        print("  With the app's network filter on, new connections stop at the limit. Usage is sampled, so it's approximate.")
+        print("  Mode: \(selected.title).")
     }
 
     /// Shared by `limit` and the set_budget MCP tool. `network` also records the budget for that network,
     /// so the app keeps it after a relaunch.
-    @discardableResult static func applyBudget(_ store: TrafficStore, gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, network: String?) throws -> [String: Any] {
-        var preferences = store.preferences, next = store.budgetCycle
+    @discardableResult static func applyBudget(_ store: TrafficStore, gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, network: String?, mode: NetworkBudgetMode? = nil) throws -> [String: Any] {
+        guard let network else { throw CLIError("Kilobat could not identify the current network.") }
+        var preferences = store.preferences
+        let current = preferences.budgetMode(for: network)
+        let selected = mode ?? (current == .off ? .alert : current)
+        preferences.limitGB = preferences.networkLimits?[network] ?? 5
+        preferences.setBudgetMode(selected, for: network)
+        var next = preferences.networkCycles?[network] ?? BudgetCycle()
         if let gb {
             guard gb.isFinite, (0.1...10_000).contains(gb) else { throw CLIError("The budget must be between 0.1 and 10000 GB.") }
             preferences.limitGB = gb
@@ -76,13 +88,11 @@ import KilobatCore
             }
         }
         preferences.budgetCycle = next == BudgetCycle() ? nil : next
-        if let network {
-            preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([network: preferences.limitGB]) { $1 }
-            if let cycle = preferences.budgetCycle { preferences.networkCycles = (preferences.networkCycles ?? [:]).merging([network: cycle]) { $1 } }
-            else { preferences.networkCycles?[network] = nil }
-        }
+        preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([network: preferences.limitGB]) { $1 }
+        if let cycle = preferences.budgetCycle { preferences.networkCycles = (preferences.networkCycles ?? [:]).merging([network: cycle]) { $1 } }
+        else { preferences.networkCycles?[network] = nil }
         store.preferences = preferences
-        return ["limitGB": preferences.limitGB, "cycle": next.period.rawValue, "resetDay": resetDayJSON(next), "alerts": next.thresholds, "saved": true]
+        return ["mode": selected.rawValue, "limitGB": preferences.limitGB, "cycle": next.period.rawValue, "resetDay": resetDayJSON(next), "alerts": next.thresholds, "saved": true]
     }
 
     static func quota(_ args: [String], store: TrafficStore, app: [String: Any]?) throws {
@@ -166,7 +176,8 @@ import KilobatCore
         let cycle = store.budgetCycle, network = currentNetwork(store, app: app)
         let used = (app?["cycleBytes"] as? NSNumber)?.uint64Value ?? network.map { store.budgetUsed(on: $0, cycle: cycle) } ?? 0
         let resets = cycle.interval(containing: Date())?.end
-        return ["limitGB": store.preferences.limitGB, "cycle": cycle.period.rawValue, "resetDay": resetDayJSON(cycle), "alerts": cycle.thresholds,
+        let mode = network.map { store.preferences.budgetMode(for: $0) } ?? .off
+        return ["mode": mode.rawValue, "limitGB": store.preferences.limitGB, "cycle": cycle.period.rawValue, "resetDay": resetDayJSON(cycle), "alerts": cycle.thresholds,
                 "usedBytes": used, "usedFraction": (Double(used) / max(1, store.preferences.limitGB * 1_000_000_000) * 1000).rounded() / 1000,
                 "resets": resets.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(), "network": network ?? NSNull()]
     }

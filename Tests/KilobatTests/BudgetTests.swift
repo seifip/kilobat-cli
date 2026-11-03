@@ -98,6 +98,29 @@ struct BudgetCycleTests {
         #expect(store.preferences.limitGB == 20 && store.budgetCycle.period == .monthly)
     }
 
+    @Test @MainActor func onlyAnEnabledBlockingBudgetCanStopNewConnections() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TrafficStore(directory: directory, startMonitoring: false)
+        store.networkKey = "phone"
+        store.preferences.networkLimits = ["phone": 5, "other": 2]
+        store.usage = [UsageEntry(date: Date(), received: 6_000_000_000, sent: 0, apps: [:], networkKey: "phone")]
+
+        #expect(store.budgetMode == .off)
+        #expect(store.preferences.budgetMode(for: "other") == .block)
+        store.setBudgetMode(.alert)
+        #expect(store.budgetCycle.thresholds == [80, 100])
+        store.preferences.budgetCycle = BudgetCycle(period: .daily)
+        #expect(store.limitFraction == 1)
+        #expect(!store.budgetBlocksNewConnections)
+        store.setBudgetMode(.block)
+        #expect(store.budgetBlocksNewConnections)
+        store.setBudgetMode(.off)
+        #expect(!store.budgetBlocksNewConnections)
+        #expect(BudgetWatch(directory: directory).check(store).isEmpty)
+        #expect(TrafficStore(directory: directory, startMonitoring: false).preferences.budgetMode(for: "phone") == .off)
+    }
+
     @Test func oldPreferencesStillDecode() throws {
         let json = #"{"profile":"Work","rules":{"Work":{"com.example.App":true}},"limitGB":2,"autoHotspot":true,"defaultAllow":false,"networkLimits":{"phone":2}}"#
         let preferences = try JSONDecoder().decode(SavedPreferences.self, from: Data(json.utf8))

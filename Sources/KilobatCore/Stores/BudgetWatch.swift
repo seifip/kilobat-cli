@@ -48,7 +48,7 @@ import UserNotifications
     public func check(_ store: TrafficStore, budgets: Bool = true, now: Date = Date()) -> [(title: String, body: String)] {
         var alerts: [(String, String)] = []
         let before = ledger
-        if budgets, store.networkKey != "unknown" {
+        if budgets, store.networkKey != "unknown", store.budgetMode != .off {
             let cycle = store.budgetCycle, interval = cycle.interval(containing: now)
             let key = "budget|\(store.networkKey)|" + (interval.map { String(Int($0.start.timeIntervalSince1970)) } ?? store.budgetSession.map { "session-" + $0.uuidString } ?? "session")
             let used = store.budgetUsed(on: store.networkKey, now: now)

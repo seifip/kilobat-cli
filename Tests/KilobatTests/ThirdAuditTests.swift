@@ -185,17 +185,19 @@ private actor DelayedBenchmarkDNS: DNSSystem {
         let peer = h.report().peers.first
         #expect(peer?.reachable == false && peer?.live != nil, "Audit #55")
 
-        var started = false, completed = false, writes = 0
+        var completion: CheckedContinuation<Void, Never>?
+        var completed = false, writes = 0
         let tool = MCPTool(name: "fixture", title: "Fixture", description: "Fixture only", annotations: .init(readOnly: true)) { _, _ in
-            started = true
-            try await Task.sleep(for: .milliseconds(150))
+            await withCheckedContinuation { completion = $0 }
+            try Task.checkCancellation()
             completed = true
             return .text("completed")
         }
         let server = MCPServer(name: "fixture", title: "Fixture", version: "1", instructions: "", tools: [tool], write: { _ in writes += 1 })
         server.receive(Data("[{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"fixture\"}}]".utf8))
-        while !started { await Task.yield() }
+        while completion == nil { await Task.yield() }
         server.receive(Data("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":42}}".utf8))
+        completion?.resume()
         await server.drain()
         #expect(!completed && writes == 0, "Audit #56")
 

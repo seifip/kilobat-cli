@@ -275,7 +275,7 @@ import KilobatCore
     static func policy() async -> ConnectionDoctor.Policy {
         let preferences = TrafficStore(startMonitoring: false).preferences, app = await WiFiCLI.connection()
         // Unrestricted only tracks the budget; it never stops connections.
-        let budgetReached = ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
+        let budgetReached = (app?["budgetMode"] as? String ?? "block") == "block" && ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
         // The app reports the current network's effective cost, which decides whether updaters are paused.
         // While the kill switch blocks, the doctor names it; the filter's own exemptions follow from the policy.
         let killSwitch = app?["killSwitch"] as? [String: Any], blocking = killSwitch?["state"] as? String == "blocking"

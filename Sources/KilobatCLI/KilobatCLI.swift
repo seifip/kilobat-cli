@@ -194,7 +194,7 @@ struct KilobatCLI {
             }
             print("✓ Kilobat app running\((app["ssid"] as? String).map { " · on \($0)" } ?? "")")
             switch app["filteringActive"] as? Bool {
-            case true?: print("✓ Network filter active: rules and budgets are enforced")
+            case true?: print("✓ Network filter active: rules and blocking budgets can stop new connections")
             case false?: print("○ Network filter off: rules are saved but not enforced. Turn it on in Kilobat › Profiles.")
             default: print("○ Filter status unavailable")
             }
@@ -292,14 +292,16 @@ struct KilobatCLI {
         lines.append("  \(blue(pad(TrafficFormat.rate(store.download), 35)))\(violet(TrafficFormat.rate(store.upload)))")
         lines.append("  \(blue(pad(spark(store.downloadHistory), 35)))\(violet(spark(store.uploadHistory)))")
         lines.append("")
-        if let bytes = (app?["sessionBytes"] as? NSNumber)?.uint64Value, let used = (app?["budgetUsed"] as? NSNumber)?.doubleValue {
+        if let bytes = (app?["sessionBytes"] as? NSNumber)?.uint64Value, app?["budgetMode"] as? String == "off" {
+            lines.append("  SESSION  \(TrafficFormat.bytes(bytes)) used")
+        } else if let bytes = (app?["sessionBytes"] as? NSNumber)?.uint64Value, let used = (app?["budgetUsed"] as? NSNumber)?.doubleValue {
             let budget = (app?["budgetGB"] as? NSNumber)?.doubleValue ?? store.preferences.limitGB
             lines.append("  SESSION  \(TrafficFormat.bytes(bytes)) / \(budget.formatted()) GB")
             let progress = Int(min(1, max(0, used)) * 42)
             lines.append("  " + violet(String(repeating: "━", count: progress)) + Terminal.dim(String(repeating: "─", count: 42 - progress)))
         } else {
             lines.append("  SAMPLED  \(TrafficFormat.bytes(store.total)) since this command started")
-            lines.append(Terminal.dim("  Open Kilobat for this network's session use against the \(store.preferences.limitGB.formatted()) GB budget"))
+            lines.append(Terminal.dim("  Open Kilobat to see this network’s session usage"))
         }
         lines.append("")
         lines.append(Terminal.dim("  \(pad("APPLICATION", 29))\(pad(bySession ? "LIVE" : "LIVE ↓", 14))\(pad(bySession ? "SESSION ↓" : "SESSION", 12))RULE"))
@@ -361,6 +363,7 @@ struct KilobatCLI {
     /// What only the running app knows: filter state, Wi-Fi name and this network's budget use.
     static func appFields(_ app: [String: Any]) -> [String: Any] {
         var fields: [String: Any] = ["filteringActive": app["filteringActive"] ?? NSNull(), "ssid": app["ssid"] ?? NSNull()]
+        if let mode = app["budgetMode"] { fields["budgetMode"] = mode }
         if let budget = app["budgetGB"] { fields["sessionBudgetGB"] = budget }
         if let used = app["budgetUsed"] { fields["budgetUsed"] = used }
         if let bytes = app["sessionBytes"] { fields["networkSessionBytes"] = bytes }
@@ -772,6 +775,7 @@ struct KilobatCLI {
       reset <bundle-id>     Remove an app's rule [--profile name]
       rules [--json]        Review a profile's rules [--profile name]
       limit [GB]            Read or set this network's data budget; approximate, as usage is sampled
+        [--mode off|alert|block]  New budgets default to alert
         [--cycle session|daily|weekly|monthly]  When it starts over (session: only when reset)
         [--reset-day N]     Day it starts: 1–31 monthly, 1 (Monday) to 7 weekly
         [--alert 50,80,100]  Notify at these percentages once per cycle, or none

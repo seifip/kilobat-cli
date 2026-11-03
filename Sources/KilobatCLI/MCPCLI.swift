@@ -639,8 +639,9 @@ import KilobatCore
             .json(try object(["released": await releaseHold()]))
         },
         MCPTool(name: "set_budget", title: "Set the data budget",
-                description: "Sets the current network's data budget: `gb` (0.1–10000), when it starts over (`cycle`: session only resets by hand, or daily, weekly, monthly), `reset_day` (1–31 for monthly, 1 Monday to 7 Sunday for weekly) and `alerts`, the percentages that notify once per cycle (\"50,80,100\" or \"none\"). Omitted values stay as they are. With the Kilobat app's filter on, new connections stop once it is used up in the travel and work profiles; unrestricted only tracks it. Usage is sampled, so the cap is approximate." + confirm,
+                description: "Sets the current network's data budget: `gb` (0.1–10000), when it starts over (`cycle`: session only resets by hand, or daily, weekly, monthly), `reset_day` (1–31 for monthly, 1 Monday to 7 Sunday for weekly) and `alerts`, the percentages that notify once per cycle (\"50,80,100\" or \"none\"). Omitted values stay as they are. Set mode to off, alert, or block. New budgets default to alert. Block stops new connections at the limit in travel and work with the network filter on. Usage is sampled, so the cap is approximate." + confirm,
                 inputSchema: schema(["gb": ["type": "number", "minimum": 0.1, "maximum": 10000],
+                                     "mode": ["type": "string", "enum": ["off", "alert", "block"]],
                                      "cycle": ["type": "string", "enum": ["session", "daily", "weekly", "monthly"]],
                                      "reset_day": ["type": "integer", "minimum": 1, "maximum": 31],
                                      "alerts": ["type": "string", "description": "Comma-separated percentages such as 50,80,100, or none."]]),
@@ -651,9 +652,10 @@ import KilobatCore
                 gb = number.doubleValue
             }
             let cycle = arguments["cycle"] as? String, alerts = arguments["alerts"] as? String, day = try integer(arguments, "reset_day", in: 1...31)
-            guard gb != nil || cycle != nil || day != nil || alerts != nil else { throw MCPToolError("Pass gb, cycle, reset_day or alerts.") }
+            let mode = (arguments["mode"] as? String).flatMap(NetworkBudgetMode.init(rawValue:))
+            guard gb != nil || cycle != nil || day != nil || alerts != nil || mode != nil else { throw MCPToolError("Pass gb, cycle, reset_day, alerts or mode.") }
             let store = TrafficStore(startMonitoring: false)
-            do { return .json(try object(try QuotaCLI.applyBudget(store, gb: gb, cycle: cycle, resetDay: day, alerts: alerts, network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection())))) }
+            do { return .json(try object(try QuotaCLI.applyBudget(store, gb: gb, cycle: cycle, resetDay: day, alerts: alerts, network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection()), mode: mode))) }
             catch let error as CLIError { throw MCPToolError(error.message) }
         },
         MCPTool(name: "get_data_pack", title: "Data packs and when they run out",

@@ -1,5 +1,17 @@
 import Foundation
 
+public enum NetworkBudgetMode: String, Codable, CaseIterable, Sendable {
+    case off, alert, block
+
+    public var title: String {
+        switch self {
+        case .off: String(localized: "Off")
+        case .alert: String(localized: "Alert only")
+        case .block: String(localized: "Block new connections")
+        }
+    }
+}
+
 /// When a network's data budget starts over. Session is the original behaviour: only a manual reset.
 public enum BudgetPeriod: String, Codable, CaseIterable, Identifiable, Sendable {
     case session, daily, weekly, monthly

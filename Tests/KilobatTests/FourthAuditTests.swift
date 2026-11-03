@@ -67,7 +67,9 @@ import Testing
         let traffic = TrafficStore(directory: folder, startMonitoring: false)
         let gaming = CloudGamingStore(directory: folder)
         gaming.processHoldLedger = ledger
-        gaming.processHoldLimit = .milliseconds(50)
+        gaming.processHoldLimit = .zero
+        var wake: CheckedContinuation<Void, Never>?
+        gaming.waitForHoldDeadline = { _ in await withCheckedContinuation { wake = $0 } }
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/bin/sleep")
         child.arguments = ["30"]
@@ -86,11 +88,9 @@ import Testing
         _ = CallMode.hold(app.processIDs, app: "Dropbox", owner: CallMode.call, ledger: ledger)
         traffic.setTemporary(app.id, allowed: true)
 
-        let clock = ContinuousClock()
-        let waitUntil = clock.now.advanced(by: .seconds(5))
-        while !gaming.holding.isEmpty && clock.now < waitUntil {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        while wake == nil { await Task.yield() }
+        wake?.resume()
+        while !gaming.holding.isEmpty { await Task.yield() }
         #expect(gaming.holding.isEmpty)
         #expect(CallMode.held(ledger: ledger).first?.holders == [CallMode.call])
         #expect(traffic.temporaryRule(app.id)?.allowed == true)

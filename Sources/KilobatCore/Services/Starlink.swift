@@ -517,6 +517,7 @@ public enum StarlinkPlan: String, CaseIterable, Identifiable, Sendable {
         guard store.setCost(.metered) else { return false }
         guard budget else { return true }
         var preferences = store.preferences
+        if store.budgetMode == .off { preferences.setBudgetMode(.alert, for: store.networkKey) }
         preferences.limitGB = gigabytes
         let cycle = store.budgetCycle
         preferences.budgetCycle = BudgetCycle(period: .monthly, anchor: cycle.period == .monthly ? cycle.anchor : nil, alerts: cycle.alerts)
