@@ -157,6 +157,7 @@ struct BudgetAlertTests {
         let now = Date(), recent = max(now.addingTimeInterval(-60), Calendar.current.startOfDay(for: now))
         store.usage = [UsageEntry(date: recent, received: 900_000_000, sent: 0, apps: ["Dropbox": 300_000_000], networkKey: "phone")]
         store.networkKey = "phone"; store.networkName = "Phone"
+        store.setBudgetMode(.alert)
         store.preferences.limitGB = 1
         store.preferences.budgetCycle = BudgetCycle(period: .daily)
         store.preferences.quotas = [AppQuota(name: "Dropbox", apps: ["com.getdropbox.dropbox"], bytes: 200_000_000)]

@@ -18,6 +18,7 @@ import Testing
         #expect(protection.index?.match(host: "new.example", in: [.known]) != nil)
         let traffic = TrafficStore(directory:folder.appendingPathComponent("traffic"),startMonitoring:false)
         traffic.networkKey="A"; traffic.networkName="A"; traffic.preferences.limitGB=0.1
+        traffic.setBudgetMode(.alert)
         traffic.preferences.budgetCycle=BudgetCycle(period:.session,alerts:[80])
         let alerts=BudgetWatch(directory:folder.appendingPathComponent("traffic"))
         traffic.received=90_000_000; let first=alerts.check(traffic,now:now)
