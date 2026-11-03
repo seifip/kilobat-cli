@@ -48,6 +48,16 @@ struct ExplainerTests {
         #expect(explainer.host("") == nil)
     }
 
+    @Test func codexAndItsKnownHostsHaveDescriptions() {
+        #expect(explainer.process(name: "codex")?.slug == "codex")
+        #expect(explainer.host("chatgpt.com")?.slug == "chatgpt-com")
+        #expect(explainer.host("api.openai.com")?.slug == "api-openai-com")
+        #expect(explainer.host("developers.openai.com")?.slug == "developers-openai-com")
+        #expect(explainer.host("mcp.cloudflare.com")?.slug == "mcp-cloudflare-com")
+        #expect(explainer.host("mcp.vercel.com")?.slug == "mcp-vercel-com")
+        #expect(explainer.host("fake-chatgpt.com") == nil)
+    }
+
     @Test func processesMatchByPathThenIdentifierThenName() {
         #expect(explainer.process(path: "/usr/libexec/nsurlsessiond")?.slug == "nsurlsessiond")
         #expect(explainer.process(identifier: "com.apple.cloudd")?.slug == "cloudd")
