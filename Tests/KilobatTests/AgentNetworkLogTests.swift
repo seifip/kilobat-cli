@@ -304,6 +304,9 @@ struct AgentHostFlagTests {
         #expect(entry.reviewCount == 2)
         #expect(Set(entry.hosts.filter(\.needsReview).map(\.host)) == ["upload.example.org", "send.trycloudflare.com"])
         #expect(entry.flaggedCount > entry.reviewCount)
+        let review = AgentNetworkLog.markdown(entry, onlyReview: true)
+        #expect(review.contains("upload.example.org") && review.contains("send.trycloudflare.com"))
+        #expect(!review.contains("first-seen.example.org") && !review.contains("read.trycloudflare.com"))
     }
 
     @Test func aHostIsNewOnlyTheFirstTime() {

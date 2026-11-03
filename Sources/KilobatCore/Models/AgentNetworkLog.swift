@@ -290,12 +290,15 @@ public enum AgentNetworkLog {
     }
 
     /// The session as a Markdown table, for an issue, a review or a chat.
-    public static func markdown(_ entry: AgentLogEntry, onlyFlagged: Bool = false) -> String {
-        let hosts = onlyFlagged ? entry.hosts.filter(\.flagged) : entry.hosts
+    public static func markdown(_ entry: AgentLogEntry, onlyFlagged: Bool = false, onlyReview: Bool = false) -> String {
+        let hosts = entry.hosts.filter { onlyReview ? $0.needsReview : !onlyFlagged || $0.flagged }
         let when = entry.start.formatted(date: .abbreviated, time: .shortened) + " – " + (entry.end.map { $0.formatted(date: .omitted, time: .shortened) } ?? String(localized: "running"))
         var lines = ["## " + entry.title, "",
                      "\(when) · \(entry.hostCount == 1 ? String(localized: "1 host") : String(localized: "\(entry.hostCount) hosts")) · ↑ \(TrafficFormat.bytes(entry.sent)) ↓ \(TrafficFormat.bytes(entry.received))", ""]
-        if hosts.isEmpty { lines.append(onlyFlagged ? String(localized: "Nothing flagged.") : String(localized: "No connections recorded.")) }
+        if hosts.isEmpty {
+            if onlyReview { lines.append(String(localized: "Nothing to review in this session.")) }
+            else { lines.append(onlyFlagged ? String(localized: "Nothing flagged.") : String(localized: "No connections recorded.")) }
+        }
         else {
             lines += ["| " + [String(localized: "Process"), String(localized: "Host"), String(localized: "Port"), String(localized: "Sent"), String(localized: "Received"), String(localized: "Connections"), String(localized: "Notes")].joined(separator: " | ") + " |",
                       "|---|---|---|--:|--:|--:|---|"]
