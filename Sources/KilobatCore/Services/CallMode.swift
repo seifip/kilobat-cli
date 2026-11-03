@@ -75,14 +75,17 @@ public enum CallMode {
             if let index = held.firstIndex(where: { $0.pid == pid }) {
                 if held[index].started == started {
                     guard !held[index].holders.contains(owner) else { continue }
-                    held[index].owners = held[index].holders + [owner]; save(held, ledger)
+                    let previous = held[index]
+                    held[index].owners = previous.holders + [owner]
+                    guard save(held, ledger) else { held[index] = previous; continue }
                     now.append(held[index]); continue
                 }
                 // The PID was reused by a process nobody stopped; the old line is stale.
-                held.remove(at: index); save(held, ledger)
+                held.remove(at: index)
             }
             let entry = Held(pid: pid, started: started, app: app, owners: [owner])
-            held.append(entry); save(held, ledger)
+            held.append(entry)
+            guard save(held, ledger) else { held.removeLast(); continue }
             if kill(pid, SIGSTOP) == 0 { now.append(entry) } else { held.removeAll { $0.pid == pid }; save(held, ledger) }
         }
         return now
@@ -114,9 +117,16 @@ public enum CallMode {
     public static func held(ledger: URL = ledgerURL) -> [Held] { load(ledger) }
 
     static func load(_ url: URL) -> [Held] { (try? JSONDecoder().decode([Held].self, from: Data(contentsOf: url))) ?? [] }
-    static func save(_ held: [Held], _ url: URL) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if held.isEmpty { try? FileManager.default.removeItem(at: url) } else { try? JSONEncoder().encode(held).write(to: url, options: .atomic) }
+    @discardableResult static func save(_ held: [Held], _ url: URL) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if held.isEmpty {
+                if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            } else {
+                try JSONEncoder().encode(held).write(to: url, options: .atomic)
+            }
+            return true
+        } catch { return false }
     }
 
     static func owned(_ pid: Int32) -> Bool {

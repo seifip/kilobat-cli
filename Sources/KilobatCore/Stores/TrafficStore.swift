@@ -228,9 +228,26 @@ public final class TrafficStore {
         preferences.rules[profile, default: [:]][id] = allowed
     }
     public func setTemporary(_ id: String, allowed: Bool, minutes: Int = 15, in profile: NetworkProfile? = nil) {
+        writeTemporary(id, allowed: allowed, minutes: minutes, profile: profile ?? preferences.profile)
+    }
+    private func writeTemporary(_ id: String, allowed: Bool, minutes: Int, profile: NetworkProfile, ownership: UUID? = nil) {
+        let ruleKey = profile.rawValue + "|" + id
         if preferences.temporaryRules == nil { preferences.temporaryRules = [:] }
-        let ruleKey = (profile ?? preferences.profile).rawValue + "|" + id
-        preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60))
+        preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60), ownership: ownership)
+    }
+    struct OwnedTemporary {
+        let id: String
+        let profile: NetworkProfile
+        let ownership: UUID
+    }
+    func holdTemporary(_ id: String, minutes: Int) -> OwnedTemporary {
+        let hold = OwnedTemporary(id: id, profile: preferences.profile, ownership: UUID())
+        writeTemporary(id, allowed: false, minutes: minutes, profile: hold.profile, ownership: hold.ownership)
+        return hold
+    }
+    func clearTemporary(_ hold: OwnedTemporary) {
+        let key = hold.profile.rawValue + "|" + hold.id
+        if preferences.temporaryRules?[key]?.ownership == hold.ownership { preferences.temporaryRules?.removeValue(forKey: key) }
     }
     /// The app's temporary rule in the current profile, while it lasts.
     public func temporaryRule(_ id: String) -> TemporaryRule? {
@@ -251,7 +268,7 @@ public final class TrafficStore {
         return removed
     }
     public func switchNetwork(_ snapshot: DiagnosticSnapshot) {
-        guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; return }
+        guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified; return }
         flush()
         if networkKey != "unknown" {
             networkSessions[networkKey] = session
@@ -259,21 +276,22 @@ public final class TrafficStore {
             if preferences.networkLimits == nil { preferences.networkLimits = [:] }
             preferences.networkLimits?[networkKey] = oldLimit
             rememberCycle()
-        } else if recordHistory, usage.last?.networkKey == snapshot.networkKey {
+        } else if recordHistory, snapshot.networkIdentified, usage.last?.networkKey == snapshot.networkKey {
             // After a relaunch the saved budget still describes the network the Mac was last on.
             preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([snapshot.networkKey: preferences.limitGB]) { $1 }
             preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: snapshot.networkKey)
         }
         networkKey = snapshot.networkKey; networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified
-        let saved = networkSessions[networkKey]
+        let saved = networkIdentified ? networkSessions[networkKey] : nil
         received = saved?.received ?? 0; sent = saved?.sent ?? 0; local = saved?.local ?? 0; unattributed = saved?.unattributed ?? 0; tunnel = 0
         apps = []; if readCounters != nil { wifiNames = InterfaceCounters.wifiInterfaces() }
         rebaseline()
         // Both at once, or the copy kept per network would pick up the old cycle under the new key.
         var budget = preferences
-        budget.limitGB = budget.networkLimits?[networkKey] ?? 5; budget.budgetCycle = budget.networkCycles?[networkKey]
+        budget.limitGB = networkIdentified ? budget.networkLimits?[networkKey] ?? 5 : 5
+        budget.budgetCycle = networkIdentified ? budget.networkCycles?[networkKey] : nil
         preferences = budget
-        if let profile = preferences.networkProfiles?[networkKey], let value = NetworkProfile(rawValue: profile) { preferences.profile = value }
+        if networkIdentified, let profile = preferences.networkProfiles?[networkKey], let value = NetworkProfile(rawValue: profile) { preferences.profile = value }
         persist(networkSessions, as: "network-sessions.json")
         costChanged()
     }
@@ -281,6 +299,7 @@ public final class TrafficStore {
         NetworkSession(name: networkName, received: received, sent: sent, identified: networkIdentified ? nil : false, local: local, unattributed: unattributed)
     }
     public func rememberNetwork() {
+        guard networkIdentified else { return }
         if preferences.networkProfiles == nil { preferences.networkProfiles = [:] }
         if preferences.networkLimits == nil { preferences.networkLimits = [:] }
         let profile = preferences.profile.rawValue, limit = preferences.limitGB
@@ -405,7 +424,8 @@ public final class TrafficStore {
             // and the live rates, but adds nothing to the Internet total or history a second time.
             let carrier = ProxyRouting.shared.isCarrier(process.pid)
             if carrier { index[id]?.carrier = true }
-            all += flow.total; local += flow.local; physicalLocal += flow.physicalLocal; tunnel += flow.tunnel
+            if !carrier { all += flow.total; local += flow.local; tunnel += flow.tunnel }
+            physicalLocal += flow.physicalLocal
             if !carrier { internet += flow.internet }
             // History counts helpers and services under the app that owns them, as the app list does; local bytes apart.
             let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
@@ -442,7 +462,8 @@ public final class TrafficStore {
         guard let counters else {
             // A missed reading is caught up by the next one; only several in a row mean the counters are gone.
             counterFailures += 1
-            if counterFailures == 5 { interfaces.reset() }
+            if counterFailures < 5 { localCarry += physicalLocal }
+            if counterFailures == 5 { interfaces.reset(); localCarry = ByteCount() }
             if counterFailures < 5 { pendingAttributed += attributed.total }
             return counterFailures < 5 ? ByteCount() : attributed
         }

@@ -7,12 +7,18 @@ public extension DiagnosticSnapshot {
     /// A wired link names the network by its service and gateway, the same whether Wi-Fi is joined alongside or not.
     var networkKey: String {
         let wifi = wiredInterface == nil ? radio : nil
-        let identity = [wifi?.ssid ?? "SSID unavailable", gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"].joined(separator: "|")
+        guard networkIdentified else { return "unknown" }
+        var components = [wifi?.ssid ?? "SSID unavailable", physicalGateway ?? gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"]
+        if let wiredInterface { components += [wiredInterface, gatewayMAC ?? ""] }
+        let identity = components.joined(separator: "|")
         return SHA256.hash(data: Data(identity.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
     var networkName: String { (wiredInterface == nil ? radio.ssid : nil) ?? networkService ?? String(localized: "Unknown network") }
     /// Wi-Fi without its name (macOS hides it without Location) looks the same as any network behind the same router address.
-    var networkIdentified: Bool { gateway != nil && (wiredInterface != nil || radio.interface == nil || radio.ssid != nil) }
+    var networkIdentified: Bool {
+        if wiredInterface != nil { return gatewayMAC != nil && (physicalGateway ?? gateway) != nil }
+        return radio.ssid != nil && (tunneledRoute != true || physicalGateway != nil) && (physicalGateway ?? gateway) != nil
+    }
 }
 public struct NetworkEvent: Codable, Identifiable, Sendable {
     public var id = UUID()
@@ -126,7 +132,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
                 notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }
         }
-        let slow = sample.setupNetwork == nil && ((sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.radio.health == .poor)
+        let slow = sample.setupNetwork == nil && ((sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.activeRadioHealth == .poor)
         degraded = slow ? degraded + 1 : 0
         if degraded == 3 { notify(String(localized: "Connection quality dropped"), String(localized: "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).")) }
         events = Array(events.suffix(500)); save(events, "events.json")
