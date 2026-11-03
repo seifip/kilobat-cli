@@ -156,7 +156,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         })
         let center = NSWorkspace.shared.notificationCenter
         notifications.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.journal.suspend(); self?.sleeping = true; self?.speedTask?.cancel() }
+            Task { @MainActor in self?.journal.suspend(); self?.portal.interruptObservation(); self?.sleeping = true; self?.speedTask?.cancel() }
         })
         notifications.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.sleeping = false; await self?.diagnose() }
@@ -229,7 +229,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             }
         }
     }
-    public func stop() { journal.suspend(); scheduleTask?.cancel(); speech.stopSpeaking(at: .immediate); radioTask?.cancel(); diagnosticTask?.cancel(); speedTask?.cancel(); radioTask = nil; diagnosticTask = nil }
+    public func stop() { journal.suspend(); portal.interruptObservation(); scheduleTask?.cancel(); speech.stopSpeaking(at: .immediate); radioTask?.cancel(); diagnosticTask?.cancel(); speedTask?.cancel(); radioTask = nil; diagnosticTask = nil }
     public func diagnose() async {
         guard !diagnosing, !sleeping else { return }
         diagnosing = true
@@ -321,8 +321,12 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         catch { self.error = error.localizedDescription }
     }
     /// `streams` overrides the Single or Parallel choice; `scheduled` marks a test Kilobat started on its own.
-    public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false) {
+    public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false, planCheck: Bool = false) {
         guard !speedRunning else { return }
+        if planCheck {
+            guard let key = snapshot?.networkKey, key != "unknown",
+                  journal.reservePlanCheck(network: key, maximumBytes: maximumBytes) else { return }
+        }
         speedRunning = true
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
         speedDownHistory = []; speedUpHistory = []; speedStarted = Date(); speedBytes = 0
@@ -342,7 +346,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                     }
                 }, progress: { [weak self] text in Task { @MainActor in self?.speedProgress = text } })
                 self.lastSpeed = result
-                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled)
+                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled, reservedAttempt: planCheck ? true : nil)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = String(localized: "Test complete.")
             } catch is CancellationError { self.speedProgress = String(localized: "Test cancelled.") }

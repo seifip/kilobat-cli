@@ -75,7 +75,7 @@ public enum LANScan {
         var seen: Set<String> = []
         return rows.compactMap { row in
             guard row.interface == interface, let mac = MACAddress.normalized(row.mac), MACAddress.unicast(mac), !own.contains(mac),
-                  !row.address.hasSuffix(".255"), seen.insert(mac).inserted else { return nil }
+                  seen.insert(mac).inserted else { return nil }
             return DeviceSighting(mac: mac, address: row.address)
         }
     }

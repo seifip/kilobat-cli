@@ -33,7 +33,7 @@ import UserNotifications
     @ObservationIgnored private var last: [String: (sent: UInt64, local: UInt64)] = [:]
     @ObservationIgnored private var lastTick: Date?
     /// App IDs whose temporary block is this store's, so only those are cleared.
-    @ObservationIgnored private var blocked: [String: Set<String>] = [:]
+    @ObservationIgnored private var blocked: [String: [TrafficStore.OwnedTemporary]] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
     /// True while the Mac is on a data pack set to hold big uploads: each one that can be held is, until an unmetered network.
     @ObservationIgnored public var autoHold: () -> Bool = { false }
@@ -52,7 +52,7 @@ import UserNotifications
     /// The hold behind each app ID this store blocks with a timed rule, for the rule inspector.
     public var heldApps: [String: UploadHold] {
         var held: [String: UploadHold] = [:]
-        for hold in holds { for id in blocked[hold.key] ?? [] { held[id] = hold } }
+        for hold in holds { for rule in blocked[hold.key] ?? [] { held[rule.id] = hold } }
         return held
     }
 
@@ -200,7 +200,7 @@ import UserNotifications
     /// Lets a held upload go now. Returns false when nothing by that name is held.
     @discardableResult public func resume(_ key: String) -> Bool {
         let wanted = key.lowercased()
-        guard let hold = holds.first(where: { $0.key.lowercased() == wanted || $0.name.lowercased() == wanted || (blocked[$0.key] ?? []).contains { $0.lowercased() == wanted } }) else { return false }
+        guard let hold = holds.first(where: { $0.key.lowercased() == wanted || $0.name.lowercased() == wanted || (blocked[$0.key] ?? []).contains { $0.id.lowercased() == wanted } }) else { return false }
         release(hold, reason: .manual)
         publish()
         return true
@@ -238,18 +238,19 @@ import UserNotifications
     /// is temporary and renewed here, so after a crash it lapses on its own within `SendLater.blockMinutes`.
     private func refuse(_ hold: UploadHold, members: [AppTraffic], traffic: TrafficStore) {
         for app in members {
-            let mine = blocked[hold.key, default: []].contains(app.id)
+            let profile = traffic.preferences.profile
+            let owned = blocked[hold.key]?.first { $0.id == app.id && $0.profile == profile }
             if let rule = traffic.temporaryRule(app.id) {
-                guard mine, !rule.allowed, rule.expires.timeIntervalSinceNow < Double(SendLater.blockMinutes * 60) / 3 else { continue }
+                guard owned?.ownership == rule.ownership, owned != nil, rule.expires.timeIntervalSinceNow < Double(SendLater.blockMinutes * 60) / 3 else { continue }
             }
-            traffic.setTemporary(app.id, allowed: false, minutes: SendLater.blockMinutes)
-            blocked[hold.key, default: []].insert(app.id)
+            blocked[hold.key, default: []].removeAll { $0.id == app.id && $0.profile == profile }
+            blocked[hold.key, default: []].append(traffic.holdTemporary(app.id, minutes: SendLater.blockMinutes))
         }
     }
 
     private func release(_ hold: UploadHold, reason: UploadResume) {
         if hold.method == .suspend { CallMode.resume(app: hold.key, owner: SendLater.owner, ledger: ledger) }
-        for id in blocked[hold.key] ?? [] { traffic?.clearTemporary(id) }
+        for rule in blocked[hold.key] ?? [] { traffic?.clearTemporary(rule) }
         blocked[hold.key] = nil
         holds.removeAll { $0.key == hold.key }
         uploads.removeAll { $0.key == hold.key }

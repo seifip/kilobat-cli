@@ -57,7 +57,7 @@ import KilobatCore
         let defaults = KilobatCLI.appDefaults, tests = NetworkJournal().speedTests
         let plans = PlanSpeeds.all(defaults)
         var candidates: [(key: String, plan: Double, source: String)] = plans.map { ($0.key, $0.value, "network") }
-        if candidates.isEmpty, let plan = PlanSpeeds.plan(for: nil, defaults), let newest = tests.last(where: { $0.networkKey != "unknown" }) {
+        if candidates.isEmpty, let newest = tests.last(where: { $0.networkKey != "unknown" }), let plan = PlanSpeeds.plan(for: newest.networkKey, defaults) {
             candidates = [(newest.networkKey, plan, "default")]
         }
         let networks = candidates.compactMap { candidate -> Network? in

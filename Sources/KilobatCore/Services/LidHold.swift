@@ -128,6 +128,12 @@ public final class LidKeeper: @unchecked Sendable {
     }
 
     public func hold(_ request: LidLease, now: Date = Date()) -> LidHoldStatus {
+        if self.lease == nil, FileManager.default.fileExists(atPath: markerURL.path) {
+            if let marker { restore(marker, reason: "restoring sleep before another hold", now: now) }
+            guard !FileManager.default.fileExists(atPath: markerURL.path) else {
+                return record("couldn’t restore the power settings", now: now)
+            }
+        }
         disconnected = nil
         let start = since ?? now, lease = LidPolicy.clamp(request, since: start)
         // A hold that would end at once never starts.
@@ -162,7 +168,10 @@ public final class LidKeeper: @unchecked Sendable {
 
     /// Runs the failsafes. The helper calls this every few seconds.
     @discardableResult public func check(now: Date = Date()) -> LidHoldStatus {
-        guard let lease, let since else { return status }
+        guard let lease, let since else {
+            if let marker { restore(marker, reason: released?.reason ?? "restoring sleep", now: now) }
+            return status
+        }
         if let reason = LidPolicy.stop(lease, since: since, power: system.power(), now: now, disconnected: disconnected) { return release(reason, now: now) }
         return status
     }

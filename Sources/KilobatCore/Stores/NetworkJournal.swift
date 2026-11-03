@@ -7,29 +7,43 @@ public extension DiagnosticSnapshot {
     /// A wired link names the network by its service and gateway, the same whether Wi-Fi is joined alongside or not.
     var networkKey: String {
         let wifi = wiredInterface == nil ? radio : nil
-        let identity = [wifi?.ssid ?? "SSID unavailable", gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"].joined(separator: "|")
+        guard networkIdentified else { return "unknown" }
+        var components = [wifi?.ssid ?? "SSID unavailable", physicalGateway ?? gateway ?? "no gateway", wifi?.interface ?? networkService ?? "unknown"]
+        if let wiredInterface { components += [wiredInterface, gatewayMAC ?? ""] }
+        let identity = components.joined(separator: "|")
         return SHA256.hash(data: Data(identity.utf8)).prefix(12).map { String(format: "%02x", $0) }.joined()
     }
     var networkName: String { (wiredInterface == nil ? radio.ssid : nil) ?? networkService ?? String(localized: "Unknown network") }
     /// Wi-Fi without its name (macOS hides it without Location) looks the same as any network behind the same router address.
-    var networkIdentified: Bool { gateway != nil && (wiredInterface != nil || radio.interface == nil || radio.ssid != nil) }
+    var networkIdentified: Bool {
+        if wiredInterface != nil { return gatewayMAC != nil && (physicalGateway ?? gateway) != nil }
+        return radio.ssid != nil && (tunneledRoute != true || physicalGateway != nil) && (physicalGateway ?? gateway) != nil
+    }
 }
 public struct NetworkEvent: Codable, Identifiable, Sendable {
     public var id = UUID()
     public let start: Date
     public var end: Date?
     public let network: String
+    public var networkKey: String? = nil
     public let kind: String
     public var detail: String
     /// For an outage: Kilobat's checks while it lasted and how many of them the router answered, which says whether
     /// it broke beyond the router. Nil on outages recorded before Kilobat kept them.
     public var routerChecks: Int? = nil
     public var routerAnswered: Int? = nil
+
+    /// Preserve the existing CLI/MCP event shape; the stable identity is only for local correlation.
+    public var withoutNetworkKey: NetworkEvent {
+        var copy = self
+        copy.networkKey = nil
+        return copy
+    }
 }
 public extension NetworkEvent {
-    init(start: Date, end: Date?, network: String, kind: String, detail: String, routerChecks: Int?, routerAnswered: Int?) {
+    init(start: Date, end: Date?, network: String, kind: String, detail: String, routerChecks: Int?, routerAnswered: Int?, networkKey: String? = nil) {
         self.start = start; self.end = end; self.network = network; self.kind = kind; self.detail = detail
-        self.routerChecks = routerChecks; self.routerAnswered = routerAnswered
+        self.networkKey = networkKey; self.routerChecks = routerChecks; self.routerAnswered = routerAnswered
     }
 }
 public struct SavedSpeedTest: Codable, Identifiable, Sendable {
@@ -37,6 +51,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public let networkKey: String
     public let networkName: String
     public var networkChanged: Bool? = nil
+    public var reservedAttempt: Bool? = nil
     public let result: SpeedTestResult
     /// Started by Kilobat on a schedule (a plan check or Scheduled speed tests), not by you. Nil for tests you ran.
     public var scheduled: Bool? = nil
@@ -48,6 +63,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public var speedTests: [SavedSpeedTest] = []
     public var alerts = false { didSet { UserDefaults.standard.set(alerts, forKey: "networkAlerts") } }
     public private(set) var targetStatus = "Checking independent targets"
+    public private(set) var planAttempts: [PlanCheck.Attempt] = []
     private var failures = 0
     private var degraded = 0
     private var successes = 0
@@ -64,6 +80,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")
         try? FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
         samples = read("health-samples.json") ?? []; events = read("events.json") ?? []; speedTests = read("speed-tests.json") ?? []
+        planAttempts = read("plan-attempts.json") ?? []
         alerts = UserDefaults.standard.bool(forKey: "networkAlerts")
         // A previous process may have stopped mid-incident. Do not count unobserved time.
         for i in events.indices where events[i].end == nil { events[i].end = events[i].start; events[i].detail += " · " + String(localized: "monitoring interrupted") }
@@ -88,14 +105,14 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         let sameNetwork = lastNetwork == sample.networkKey
         if !sameNetwork {
             finish(at: lastDate ?? date, reason: String(localized: "Network changed"))
-            if lastNetwork != nil { events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Network changed", detail: String(localized: "New network baseline"))) }
+            if lastNetwork != nil { events.append(NetworkEvent(start: date, end: date, network: sample.networkName, networkKey: sample.networkKey, kind: "Network changed", detail: String(localized: "New network baseline"))) }
             lastNetwork = sample.networkKey; failures = 0; failureStart = nil; degraded = 0
         }
         if samples.last.map({ date.timeIntervalSince($0.date) >= 60 }) ?? true {
             samples.append(sample); samples = Array(samples.suffix(1440)); save(samples, "health-samples.json")
         }
         if sameNetwork, let previous = lastBSSID, let current = sample.radio.bssid, previous != current {
-            events.append(NetworkEvent(start: date, end: date, network: sample.networkName, kind: "Wi-Fi roam", detail: String(localized: "Access point changed from \(previous) to \(current)")))
+            events.append(NetworkEvent(start: date, end: date, network: sample.networkName, networkKey: sample.networkKey, kind: "Wi-Fi roam", detail: String(localized: "Access point changed from \(previous) to \(current)")))
         }
         lastBSSID = sample.radio.bssid
         lastDate = date
@@ -114,19 +131,19 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
             } else { pendingChecks += 1; pendingAnswered += answered ? 1 : 0 }
             if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.setupNetwork != nil {
                 // A printer's, camera's or drone's own Wi-Fi: no internet by design, so logged once and never counted or alerted.
-                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Device Wi-Fi",
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, networkKey: sample.networkKey, kind: "Device Wi-Fi",
                                            detail: sample.setupNetwork!.headline))
             } else if failures == 3 && !events.contains(where: { $0.end == nil }) && sample.captivePortal == true {
                 // The Wi-Fi's sign-in page, not an outage: logged, not counted against the provider, no alert (PortalWatch has its own).
-                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Wi-Fi sign-in",
+                events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, networkKey: sample.networkKey, kind: "Wi-Fi sign-in",
                                            detail: sample.portalLoggedOut == true ? String(localized: "The Wi-Fi’s sign-in page logged this Mac out.") : String(localized: "The Wi-Fi’s sign-in page is waiting for you to sign in.")))
             } else if failures == 3 && !events.contains(where: { $0.end == nil }) {
                 events.append(NetworkEvent(start: failureStart ?? date, end: nil, network: sample.networkName, kind: "Unreachable", detail: String(localized: "Both independent ping targets and HTTPS fallback failed. This is reachability evidence, not proof of ISP failure."),
-                                           routerChecks: pendingChecks, routerAnswered: pendingAnswered))
+                                           routerChecks: pendingChecks, routerAnswered: pendingAnswered, networkKey: sample.networkKey))
                 notify(String(localized: "Connection unreachable"), String(localized: "Three consecutive checks failed on \(sample.networkName)."))
             }
         }
-        let slow = sample.setupNetwork == nil && ((sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.radio.health == .poor)
+        let slow = sample.setupNetwork == nil && ((sample.internet.average ?? 0) > 150 || (sample.internet.lossPercent ?? 0) >= 5 || sample.activeRadioHealth == .poor)
         degraded = slow ? degraded + 1 : 0
         if degraded == 3 { notify(String(localized: "Connection quality dropped"), String(localized: "Sustained latency, packet loss or weak Wi-Fi signal on \(sample.networkName).")) }
         events = Array(events.suffix(500)); save(events, "events.json")
@@ -136,10 +153,20 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         events.append(NetworkEvent(start: date, end: date, network: network, kind: kind, detail: detail))
         events = Array(events.suffix(500)); save(events, "events.json")
     }
-    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false, scheduled: Bool = false) {
-        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, result: test, scheduled: scheduled ? true : nil))
+    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false, scheduled: Bool = false, reservedAttempt: Bool? = nil) {
+        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, reservedAttempt: reservedAttempt, result: test, scheduled: scheduled ? true : nil))
         speedTests = Array(speedTests.suffix(200)); save(speedTests, "speed-tests.json")
     }
+    /// Reserve the full transfer allowance before starting. A failure or cancellation may have spent it.
+    public func reservePlanCheck(network: String, maximumBytes: Int, now: Date = Date()) -> Bool {
+        let attempts = planAttempts.filter { now.timeIntervalSince($0.date) < 7 * 86_400 }
+            + [PlanCheck.Attempt(network: network, date: now, reservedBytes: maximumBytes)]
+        save(attempts, "plan-attempts.json")
+        guard persistenceError == nil else { return false }
+        planAttempts = attempts
+        return true
+    }
+
     /// The newest test that ran start to finish on this network, for the This place card.
     public func latestSpeedTest(onNetwork key: String?) -> SpeedTestResult? {
         guard let key, key != "unknown" else { return nil }

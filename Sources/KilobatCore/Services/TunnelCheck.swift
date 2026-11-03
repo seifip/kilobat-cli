@@ -31,10 +31,15 @@ public struct TunnelCheck: Codable, Sendable, Equatable {
         async let v6 = CommandRunner.run("/sbin/route", ["-n", "get", "-inet6", "default"])
         let (path, env, dnsOutput, v6Output) = await (exitPath, environment, dns.output, v6.output)
         let resolver = firstResolver(dnsOutput)
+        var dnsInterface = resolver.interface
+        if dnsInterface == nil, let server = resolver.server, AddressRange.parse(server) != nil {
+            let route = await CommandRunner.run("/sbin/route", ["-n", "get", server.contains(":") ? "-inet6" : "-inet", server], timeout: 3)
+            dnsInterface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: route.output).first
+        }
         let ipv6 = v6Output.contains("interface:") ? DiagnosticProbe.matches("interface:\\s+([^\\s]+)", in: v6Output).first : nil
         var proxyNow = env
         await refreshClients(&proxyNow)
-        return make(exit: path, proxy: proxyNow, dnsServer: resolver.server, dnsInterface: resolver.interface, ipv6Interface: ipv6, filterActive: filterActive)
+        return make(exit: path, proxy: proxyNow, dnsServer: resolver.server, dnsInterface: dnsInterface, ipv6Interface: ipv6, filterActive: filterActive)
     }
 
     /// Fills in each running client's live mode and TUN from its API, which can differ from its config file.
@@ -59,7 +64,7 @@ public struct TunnelCheck: Codable, Sendable, Equatable {
             findings.append(Finding(id: "deadProxy", level: .problem, title: String(localized: "The system proxy isn’t running"), detail: detail))
         }
         let vpnName = exit.vpnName ?? String(localized: "the VPN", comment: "Stands in for a VPN’s name mid-sentence")
-        if tunnel, physical(dnsInterface), let server = dnsServer, TrafficRoute.isPrivate(server) {
+        if tunnel, physical(dnsInterface), let server = dnsServer {
             findings.append(Finding(id: "dnsOutsideVPN", level: .warning, title: String(localized: "DNS skips the VPN"),
                                     detail: String(localized: "Traffic goes through \(vpnName), but name lookups go to \(server) on \(dnsInterface!), your local network. That network can see which sites you look up. Turn on the VPN app’s own DNS option, or its leak protection.", comment: "A VPN name, a DNS server address and an interface such as en0")))
         }

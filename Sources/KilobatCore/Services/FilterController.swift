@@ -21,7 +21,10 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     private var eventPolling: Task<Void, Never>?
     private var configuration: [String: Any] = [:]
     private var activationRequest: OSSystemExtensionRequest?
-    private var removal: (request: OSSystemExtensionRequest, done: CheckedContinuation<Bool, Never>)?
+    public enum RemovalResult: Sendable { case removed, restartRequired, failed }
+    private var removal: (request: OSSystemExtensionRequest, done: CheckedContinuation<RemovalResult, Error>)?
+    private var explicitActivation = false
+    private var attemptedUpgrade: String?
     private var lastPolicy: Data?
     private var pendingPolicy: [String: Any]?
     /// The last inputs `sync` saw, so a kill-switch change goes to the filter at once rather than on the next tick.
@@ -78,7 +81,10 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         }
     }
 
-    public func refresh() {
+    public func refresh() { refresh(allowUpgrade: true) }
+
+    private var upgradeDiscovery: OSSystemExtensionRequest?
+    private func refresh(allowUpgrade: Bool) {
         guard bundled else { return }
         manager.loadFromPreferences { [weak self] error in
             Task { @MainActor in
@@ -87,12 +93,14 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
                 self.enabled = self.manager.isEnabled
                 let request = OSSystemExtensionRequest.propertiesRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
                 request.delegate = self
+                if allowUpgrade { self.upgradeDiscovery = request }
                 OSSystemExtensionManager.shared.submitRequest(request)
             }
         }
     }
 
     public func activate(preferences: SavedPreferences, budgetReached: Bool, quotaReached: [String] = [], metered: Bool) {
+        guard !busy else { return }
         guard bundled else { message = String(localized: "This build has no signed network extension. Use a provisioned build to enable filtering."); return }
         lastInputs = (preferences, budgetReached, quotaReached, metered)
         configuration = policy(preferences, budgetReached: budgetReached, quotaReached: quotaReached, metered: metered)
@@ -100,6 +108,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         message = String(localized: "Approve Kilobat in System Settings → General → Login Items & Extensions → Network Extensions.")
         let request = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
         request.delegate = self
+        explicitActivation = true
         activationRequest = request
         OSSystemExtensionManager.shared.submitRequest(request)
     }
@@ -114,30 +123,47 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         configuration = next
         save(enabled: true)
     }
-    public func disable() { guard bundled else { return }; save(enabled: false) }
+    public func disable() { guard bundled, !busy else { return }; save(enabled: false) }
 
     /// Takes the filter out completely: its configuration, then the system extension itself. Turning it off
-    /// leaves both installed, and a leftover default-deny policy would outlive the app. Returns whether macOS
-    /// removed the extension now; it may finish after a restart.
-    public func remove() async -> Bool {
-        guard bundled, removal == nil else { return false }
+    /// leaves both installed, and a leftover default-deny policy would outlive the app.
+    public func remove() async -> RemovalResult {
+        guard bundled, !busy else { return .failed }
         busy = true
-        let manager = manager
-        _ = await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            // NetworkExtension may answer on its own queue, so these must not be main-actor closures.
-            manager.loadFromPreferences { @Sendable _ in manager.removeFromPreferences { @Sendable _ in done.resume() } }
+        defer { busy = false; pendingPolicy = nil }
+        do {
+            let manager = manager
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+                manager.loadFromPreferences { @Sendable error in
+                    if let error { done.resume(throwing: error) } else { done.resume() }
+                }
+            }
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
+                manager.removeFromPreferences { @Sendable error in
+                    if let error { done.resume(throwing: error) } else { done.resume() }
+                }
+            }
+            enabled = false; lastPolicy = nil
+            let result: RemovalResult = try await withCheckedThrowingContinuation { done in
+                let request = OSSystemExtensionRequest.deactivationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
+                request.delegate = self
+                removal = (request, done)
+                OSSystemExtensionManager.shared.submitRequest(request)
+            }
+            switch result {
+            case .removed:
+                extensionEnabled = false
+                message = String(localized: "Network filter removed.")
+            case .restartRequired:
+                message = String(localized: "The network filter is turned off and will be removed after a restart.")
+            case .failed: break
+            }
+            return result
+        } catch {
+            message = error.localizedDescription
+            refresh(allowUpgrade: false)
+            return .failed
         }
-        enabled = false; lastPolicy = nil
-        let removed = await withCheckedContinuation { (done: CheckedContinuation<Bool, Never>) in
-            let request = OSSystemExtensionRequest.deactivationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
-            request.delegate = self
-            removal = (request, done)
-            OSSystemExtensionManager.shared.submitRequest(request)
-        }
-        busy = false
-        extensionEnabled = false
-        message = removed ? String(localized: "Network filter removed.") : String(localized: "The network filter is turned off and will be removed after a restart.")
-        return removed
     }
 
     /// Answers an approval: releases the held connections and saves the rule in the current profile.
@@ -205,23 +231,39 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     }
     public func request(_ request: OSSystemExtensionRequest, actionForReplacingExtension existing: OSSystemExtensionProperties, withExtension replacement: OSSystemExtensionProperties) -> OSSystemExtensionRequest.ReplacementAction { .replace }
     public func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
-        if let removal, removal.request === request { self.removal = nil; removal.done.resume(returning: false); return }
-        busy = false; message = error.localizedDescription; activationRequest = nil
+        if let removal, removal.request === request { self.removal = nil; removal.done.resume(throwing: error); return }
+        guard request === activationRequest else { message = error.localizedDescription; return }
+        activationRequest = nil; explicitActivation = false
+        fail(error)
     }
     public func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
-        if let removal, removal.request === request { self.removal = nil; removal.done.resume(returning: result == .completed); return }
+        if let removal, removal.request === request { self.removal = nil; switch result {
+            case .completed: removal.done.resume(returning: .removed)
+            case .willCompleteAfterReboot: removal.done.resume(returning: .restartRequired)
+            @unknown default: removal.done.resume(throwing: CocoaError(.featureUnsupported))
+            }; return }
         guard request === activationRequest else { return }
         activationRequest = nil
-        if result == .completed { extensionEnabled = true; save(enabled: true) }
+        let shouldEnable = explicitActivation
+        explicitActivation = false
+        if result == .completed {
+            extensionEnabled = true
+            if shouldEnable { save(enabled: true) }
+            else { busy = false; pendingPolicy = nil }
+        }
         else { busy = false; message = String(localized: "Restart your Mac to finish installing the network extension.") }
     }
     public func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
         let ours = properties.filter { $0.bundleIdentifier == Self.identifier && $0.isEnabled }
         extensionEnabled = !ours.isEmpty
         // An app update ships a newer filter, but macOS keeps running the old one until asked to replace it.
-        guard extensionEnabled, activationRequest == nil, let bundled = Self.bundledVersion, !ours.contains(where: { $0.bundleVersion == bundled }) else { return }
+        guard request === upgradeDiscovery else { return }
+        upgradeDiscovery = nil
+        guard extensionEnabled, !busy, activationRequest == nil, let bundled = Self.bundledVersion, attemptedUpgrade != bundled, !ours.contains(where: { $0.bundleVersion == bundled }) else { return }
+        attemptedUpgrade = bundled
         let update = OSSystemExtensionRequest.activationRequest(forExtensionWithIdentifier: Self.identifier, queue: .main)
         update.delegate = self
+        busy = true
         activationRequest = update
         OSSystemExtensionManager.shared.submitRequest(update)
     }

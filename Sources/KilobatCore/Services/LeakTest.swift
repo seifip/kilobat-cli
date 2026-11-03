@@ -58,6 +58,7 @@ public struct LeakTest: Codable, Sendable, Equatable {
         public var exitAddress: String?
         /// Where IPv6 leaves: the interface of the IPv6 default route, nil without one.
         public var ipv6Interface: String?
+        public var ipv6RouteAbsent = false
         /// The public IPv6 address from api6.ipify.org, asked only when IPv6 leaves outside the tunnel.
         public var ipv6Address: String?
         /// Wi-Fi or Ethernet, such as en0, and its port name.
@@ -67,6 +68,7 @@ public struct LeakTest: Codable, Sendable, Equatable {
         public var udpDefault: String?
         public var udpPhysical: String?
         public var udpAsked = false
+        public var udpInterfaces: [String] = []
         public init(exit: ExitPath) { self.exit = exit }
     }
 
@@ -79,12 +81,14 @@ public struct LeakTest: Codable, Sendable, Equatable {
     public let checks: [Check]
     /// The outside services this run asked, as hosts.
     public let services: [String]
-    public var passed: Bool { !checks.contains { $0.status == .fail } }
+    public var passed: Bool { vpnState == "full" && checks.count == 3 && checks.allSatisfy { $0.status == .pass } }
 
     public var summary: String {
         let failed = checks.filter { $0.status == .fail }.map(\.title)
         if checks.allSatisfy({ $0.status == .skipped }) { return checks.first?.detail ?? "" }
-        return failed.isEmpty ? String(localized: "No leaks found: DNS, IPv6 and UDP stay in the VPN.") : String(localized: "Leaks: \(failed.formatted(.list(type: .and))).", comment: "Leak test summary; the argument lists check names such as DNS and IPv6")
+        if passed { return String(localized: "No leaks found in the DNS, IPv6 and UDP checks.") }
+        if failed.isEmpty { return String(localized: "Leak check incomplete. Some traffic paths could not be verified.") }
+        return String(localized: "Leaks: \(failed.formatted(.list(type: .and))).", comment: "Leak test summary; the argument lists check names such as DNS and IPv6")
     }
 
     /// What WebRTC in a browser can still do, worded the same everywhere.
@@ -127,12 +131,12 @@ public struct LeakTest: Codable, Sendable, Equatable {
         let vpn = seen.exit.vpnName ?? String(localized: "the VPN", comment: "Stands in for a VPN’s name mid-sentence")
         // Lookups that don't match a split-DNS domain go to the default resolvers; any reached outside the tunnel leaks.
         let outside = seen.resolvers.filter { $0.domain == nil }.flatMap(\.servers).compactMap { server -> (String, String)? in
-            guard let route = seen.resolverRoutes[server], physical(route) else { return nil }
+            guard let route = seen.resolverRoutes[server], route != seen.exit.interface, route != "lo0" else { return nil }
             return (server, route)
         }
         let exitASN = seen.exitSeen?.asn
         let foreign = (seen.dnsSeen ?? []).filter { resolver in
-            guard let asn = resolver.asn else { return false }
+            guard let asn = resolver.asn, let exitASN else { return false }
             return asn != exitASN && !publicDNS.contains(asn)
         }
         let answered = (seen.dnsSeen ?? []).map(\.label).joined(separator: "; ")
@@ -148,15 +152,25 @@ public struct LeakTest: Codable, Sendable, Equatable {
                          detail: String(localized: "A resolver on another network, \(resolver.label), answered lookups. It isn’t \(vpn)’s and isn’t a public DNS service, so it is likely your internet provider’s.", comment: "A resolver's address, network and country; a VPN name") + " " + witness,
                          fix: app.dnsFix)
         }
+        let servers = seen.resolvers.filter { $0.domain == nil }.flatMap(\.servers)
+        guard !servers.isEmpty, servers.allSatisfy({ seen.resolverRoutes[$0] == seen.exit.interface }),
+              let answers = seen.dnsSeen, !answers.isEmpty,
+              answers.allSatisfy({ answer in answer.asn.map { $0 == exitASN || publicDNS.contains($0) } == true }) else {
+            return Check(id: "dns", status: .warning, title: title("dns"),
+                         detail: String(localized: "The resolver routes or outside DNS observations could not be verified.") + " " + witness)
+        }
         return Check(id: "dns", status: .pass, title: title("dns"), detail: String(localized: "Lookups go through \(vpn).", comment: "A VPN name") + " " + witness)
     }
 
     static func ipv6(_ seen: Observations, app: VPNApp) -> Check {
         let vpn = seen.exit.vpnName ?? String(localized: "the VPN", comment: "Stands in for a VPN’s name mid-sentence")
         guard let interface = seen.ipv6Interface else {
-            return Check(id: "ipv6", status: .pass, title: title("ipv6"), detail: String(localized: "This Mac has no IPv6 route, so nothing leaves over IPv6."))
+            if seen.ipv6RouteAbsent {
+                return Check(id: "ipv6", status: .pass, title: title("ipv6"), detail: String(localized: "No route to the public IPv6 test address was found."))
+            }
+            return Check(id: "ipv6", status: .warning, title: title("ipv6"), detail: String(localized: "The IPv6 route could not be checked."))
         }
-        guard physical(interface) else {
+        if interface == seen.exit.interface {
             return Check(id: "ipv6", status: .pass, title: title("ipv6"), detail: String(localized: "IPv6 goes through \(vpn) too (\(interface)).", comment: "A VPN name and an interface such as utun4"))
         }
         let port = seen.physicalPort ?? String(localized: "Wi-Fi")
@@ -181,22 +195,18 @@ public struct LeakTest: Codable, Sendable, Equatable {
         guard let mapped = seen.udpDefault else {
             return Check(id: "udp", status: .skipped, title: title("udp"), detail: String(localized: "The STUN server didn’t answer, so UDP couldn’t be checked. Some networks block it."))
         }
-        if let exit = seen.exitAddress, !sameNetwork(host(mapped), exit) {
-            return Check(id: "udp", status: .fail, title: title("udp"),
-                         detail: String(localized: "UDP leaves as \(host(mapped)), not as \(vpn)’s exit \(exit), so calls and WebRTC take a different way out.", comment: "A public address, a VPN name and its exit address"), fix: fix)
+        guard host(mapped) == seen.exitAddress, !seen.udpInterfaces.isEmpty else {
+            return Check(id: "udp", status: .warning, title: title("udp"),
+                         detail: String(localized: "UDP used \(host(mapped)). Its VPN exit or the direct interface probes could not be verified."), fix: fix)
         }
+        let interfaces = seen.udpInterfaces.joined(separator: ", ")
         return Check(id: "udp", status: .pass, title: title("udp"),
-                     detail: String(localized: "UDP goes out through \(vpn), and can’t leave around it.", comment: "A VPN name") + " " + browserNote)
+                     detail: String(localized: "UDP matched the VPN’s exit. Direct STUN probes on \(interfaces) got no reply.") + " " + browserNote)
     }
 
     /// An address without its port.
     static func host(_ mapped: String) -> String { mapped.split(separator: ":").first.map(String.init) ?? mapped }
-    /// The same address, or the same /16: providers and carriers often send UDP and HTTPS from neighbouring addresses.
-    static func sameNetwork(_ a: String, _ b: String) -> Bool {
-        if a == b { return true }
-        let x = a.split(separator: "."), y = b.split(separator: ".")
-        return x.count == 4 && y.count == 4 && x.prefix(2) == y.prefix(2)
-    }
+
 
     // MARK: Reading
 
@@ -280,20 +290,22 @@ public struct LeakTest: Codable, Sendable, Equatable {
     }
 
     /// The Wi-Fi or Ethernet interface with an IPv4 address that isn't link-local: what the VPN runs over.
-    public static func physicalInterface() -> String? {
+    public static func physicalInterface() -> String? { physicalInterfaces().first }
+
+    static func physicalInterfaces() -> [String] {
         var list: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        guard getifaddrs(&list) == 0, let first = list else { return [] }
         defer { freeifaddrs(list) }
         var names: [String] = [], entry: UnsafeMutablePointer<ifaddrs>? = first
         while let current = entry {
             let name = String(cString: current.pointee.ifa_name)
-            if name.hasPrefix("en"), current.pointee.ifa_flags & UInt32(IFF_UP) != 0, let address = current.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) {
+            if physical(name), current.pointee.ifa_flags & UInt32(IFF_UP) != 0, let address = current.pointee.ifa_addr, address.pointee.sa_family == UInt8(AF_INET) {
                 let ipv4 = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr.s_addr.bigEndian }
                 if ipv4 >> 16 != 0xA9FE { names.append(name) }
             }
             entry = current.pointee.ifa_next
         }
-        return names.sorted { $0.count == $1.count ? $0 < $1 : $0.count < $1.count }.first
+        return Set(names).sorted()
     }
 
     /// Runs every check: about ten seconds, most of it waiting on bash.ws.
@@ -302,28 +314,64 @@ public struct LeakTest: Codable, Sendable, Equatable {
         var seen = Observations(exit: exit)
         guard exit.vpn == .full else { return evaluate(seen) }
         async let dnsOutput = CommandRunner.run("/usr/sbin/scutil", ["--dns"], timeout: 3)
-        async let v6 = CommandRunner.run("/sbin/route", ["-n", "get", "-inet6", "default"], timeout: 3)
+        async let v6 = CommandRunner.run("/sbin/route", ["-n", "get", "-inet6", "2606:4700:4700::1111"], timeout: 3)
         async let exitAddress = try? ExitPath.publicAddress()
         async let service = dnsService()
         async let ports = CommandRunner.run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 3)
-        seen.resolvers = resolvers(await dnsOutput.output)
-        for server in Set(seen.resolvers.filter { $0.domain == nil }.flatMap(\.servers)) where AddressRange.parse(server)?.count == 4 {
-            if let route = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await CommandRunner.run("/sbin/route", ["-n", "get", server], timeout: 3).output).first {
-                seen.resolverRoutes[server] = route
+        let dns = await dnsOutput
+        if dns.status == 0 { seen.resolvers = resolvers(dns.output) }
+        let servers = Set(seen.resolvers.filter { $0.domain == nil }.flatMap(\.servers))
+        seen.resolverRoutes = await withTaskGroup(of: (String, String?).self, returning: [String: String].self) { group in
+            for server in servers {
+                guard let args = resolverRouteArguments(server) else { continue }
+                group.addTask {
+                    let result = await CommandRunner.run("/sbin/route", args, timeout: 3)
+                    return (server, routeInterface(result))
+                }
             }
+            var routes: [String: String] = [:]
+            for await (server, route) in group { routes[server] = route }
+            return routes
         }
-        let v6Output = await v6.output
-        seen.ipv6Interface = v6Output.contains("interface:") ? DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: v6Output).first : nil
-        seen.physical = physicalInterface()
+        let v6Route = await v6
+        seen.ipv6Interface = routeInterface(v6Route)
+        seen.ipv6RouteAbsent = v6Route.status == 1 && v6Route.output.contains("not in table")
         let hardware = ExitPath.hardwarePorts(await ports.output)
-        seen.physicalPort = seen.physical.flatMap { hardware[$0] }
-        if physical(seen.ipv6Interface) { seen.ipv6Address = await ipv6Address() }
-        let interface = seen.physical
-        let udp = await Task.detached { (stunAny(), interface.flatMap { stunAny(interface: $0) }) }.value
-        seen.udpAsked = true; seen.udpDefault = udp.0; seen.udpPhysical = udp.1
+        seen.physicalPort = seen.ipv6Interface.flatMap { hardware[$0] }
+        if let ipv6 = seen.ipv6Interface, ipv6 != exit.interface { seen.ipv6Address = await ipv6Address() }
+        let interfaces = physicalInterfaces()
+        let udp = await probeUDP(interfaces: interfaces) { stunAny(interface: $0) }
+        seen.udpAsked = true; seen.udpDefault = udp.normal; seen.physical = udp.bypass?.interface
+        seen.udpPhysical = udp.bypass?.mapped; seen.udpInterfaces = interfaces
         seen.exitAddress = await exitAddress?.address
         if let answer = await service { seen.exitSeen = answer.0; seen.dnsSeen = answer.1 }
         return evaluate(seen)
+    }
+
+    static func probeUDP(interfaces: [String], send: @Sendable @escaping (String?) -> String?) async
+        -> (normal: String?, bypass: (interface: String, mapped: String)?) {
+        await withTaskGroup(of: (String?, String?).self) { group in
+            group.addTask { (nil, send(nil)) }
+            for interface in interfaces { group.addTask { (interface, send(interface)) } }
+            var normal: String?, bypass: (String, String)?
+            for await (interface, mapped) in group {
+                if let interface {
+                    if let mapped, bypass.map({ interface < $0.0 }) ?? true { bypass = (interface, mapped) }
+                } else { normal = mapped }
+            }
+            return (normal, bypass)
+        }
+    }
+
+    static func resolverRouteArguments(_ server: String) -> [String]? {
+        guard let host = server.split(separator: "%", maxSplits: 1).first,
+              let address = AddressRange.parse(String(host)) else { return nil }
+        return ["-n", "get", address.count == 4 ? "-inet" : "-inet6", server]
+    }
+
+    private static func routeInterface(_ result: CommandResult) -> String? {
+        guard result.status == 0 else { return nil }
+        return DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: result.output).first
     }
 
     private static func session() -> URLSession {

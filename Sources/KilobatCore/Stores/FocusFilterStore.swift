@@ -51,6 +51,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
         let front = NSWorkspace.shared.frontmostApplication
         return CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
     }
+    @ObservationIgnored public var frontmost: () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
     @ObservationIgnored public var skipped: () -> Set<String> = { Set(UserDefaults.standard.stringArray(forKey: "callModeSkipped") ?? []) }
     /// Apps the person brought to the front during this Focus; they stay running until the next one.
     @ObservationIgnored private var released: Set<String> = []
@@ -129,19 +130,20 @@ public struct FocusChanges: Codable, Equatable, Sendable {
     /// as soon as one is, since a Focus can last a whole evening.
     public func rescan() {
         guard var current = state, current.filter.holdApps else { return }
-        let skip = skipped(), gaming = gameInFront()
+        if let front = frontmost(), let name = CallMode.name(of: front) { released.insert(name) }
+        let skip = skipped().union(released), gaming = gameInFront()
         let free = current.holding.filter { skip.contains($0) || (gaming && CallMode.launchers.contains($0)) }
         for name in free { CallMode.resume(app: name, owner: CallMode.focus, ledger: ledger) }
         current.holding.removeAll { free.contains($0) }
         var pids: [String: [Int32]] = [:], downloading: Set<String> = []
         for (id, ids, download) in processes() {
-            guard let name = CallMode.name(of: id), !skip.contains(name), !released.contains(name), !current.holding.contains(name) else { continue }
+            guard let name = CallMode.name(of: id), !skip.contains(name) else { continue }
             pids[name, default: []] += ids
             if let download, download >= CallAnalysis.downloadLoad / 2 { downloading.insert(name) }
         }
         for name in CallMode.launchers where gaming || !downloading.contains(name) { pids[name] = nil }
         for (name, ids) in pids.sorted(by: { $0.key < $1.key }) where !CallMode.hold(ids, app: name, owner: CallMode.focus, ledger: ledger).isEmpty {
-            current.holding.append(name)
+            if !current.holding.contains(name) { current.holding.append(name) }
         }
         state = current
         save()
@@ -149,7 +151,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
 
     /// The person brought an app to the front: it runs for the rest of this Focus.
     public func letGo(_ bundleID: String) {
-        guard let name = CallMode.name(of: bundleID), var current = state, current.holding.contains(name) else { return }
+        guard let name = CallMode.name(of: bundleID), var current = state else { return }
         CallMode.resume(app: name, owner: CallMode.focus, ledger: ledger)
         released.insert(name); current.holding.removeAll { $0 == name }
         state = current; save()

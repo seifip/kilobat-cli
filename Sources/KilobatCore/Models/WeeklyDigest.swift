@@ -172,6 +172,8 @@ public struct DigestInput {
     public var speedTests: [SavedSpeedTest] = []
     /// Plan speeds by network key.
     public var plans: [String: Double] = [:]
+    var scopedStarlink: StarlinkJournal?
+
     public init() {}
 
     /// What Kilobat saved on this Mac, read from Application Support and the app's settings: the app and the CLI tell
@@ -185,7 +187,9 @@ public struct DigestInput {
         input.samples = read("health-samples.json") ?? []
         input.speedTests = read("speed-tests.json") ?? []
         input.sleeps = read("sleeps.json") ?? []
-        input.starlink = StarlinkJournal.load(directory: folder).outages
+        let dish = StarlinkJournal.load(directory: folder)
+        input.scopedStarlink = dish
+        input.starlink = dish.outages(on: dish.network)
         input.calls = CallStore.load(directory: folder)
         input.remote = RemoteSessionStore.load(directory: folder)
         input.usage = read("usage.json") ?? []
@@ -665,9 +669,15 @@ extension WeeklyDigest {
         func credit() -> Fact? {
             guard pro, let settings = input.credit, settings.provider != nil || settings.country != nil else { return nil }
             let month = CreditTally.month(of: week.end.addingTimeInterval(-1), calendar: calendar)
-            let tally = CreditTally.make(events: input.events, samples: input.samples, starlink: input.starlink, sleeps: input.sleeps,
-                                         network: settings.networkName, from: month.start, to: month.end, now: now)
-            let report = CreditReport.make(settings: settings, tally: tally)
+            let report: CreditReport
+            if let dish = input.scopedStarlink {
+                report = CreditReport.make(settings: settings, events: input.events, samples: input.samples, dish: dish,
+                                           sleeps: input.sleeps, interval: month, now: now)
+            } else {
+                let tally = CreditTally.make(events: input.events, samples: input.samples, starlink: input.starlink, sleeps: input.sleeps,
+                                             network: settings.networkName, from: month.start, to: month.end, now: now)
+                report = CreditReport.make(settings: settings, tally: tally)
+            }
             guard report.estimate.qualifies, report.estimate.qualifying.contains(where: { week.contains($0) }) else { return nil }
             let amount = report.estimate.amount.flatMap { amount in report.estimate.currency.map { CreditText.money(amount, $0) } }
             let line = amount.map { String(localized: "Your outages may qualify for about \($0) from \(report.providerName)", comment: "Weekly digest; an amount and a provider") }

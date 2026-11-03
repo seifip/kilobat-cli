@@ -224,8 +224,6 @@ public enum AgentCatalog {
     private var pids: [String: Int32] = [:]
     /// Each hooked run's last event, which tells a session nobody has prompted yet from a stalled one.
     private var lastKinds: [String: AgentEvent.Kind] = [:]
-    /// Agents whose hooks report their runs; their traffic no longer starts runs of its own.
-    private var hooked: Set<String> = []
     /// Each process's CPU time at the last tick, and each run's CPU seconds per tick over the quiet window.
     private var cpuTimes: [Int32: UInt64] = [:]
     private var cpuWindows: [String: [(Date, Double)]] = [:]
@@ -386,7 +384,6 @@ public enum AgentCatalog {
         guard event.valid else { return }
         let agent = AgentCatalog.name(event.agent) ?? event.agent, now = event.time
         let key = Self.key(agent, session: event.session, cwd: event.cwd)
-        hooked.insert(agent)
         // A run first seen in traffic becomes the hooked one.
         if agents[key] == nil, key != agent, let run = agents[agent], run.hooks != true { agents[agent] = nil; agents[key] = run }
         // Only a start or a new turn begins a run; waiting or done after it ended changes nothing.
@@ -413,11 +410,10 @@ public enum AgentCatalog {
             change(key, to: .waitingForYou, detail: event.message, now: now)
         case .done:
             // The turn is over, but subagents or background shells it started may still be at work.
-            if let busy = busyTasks[key], busy > 0 {
-                finishing[key] = now
-                agents[key]?.state = .working
-                agents[key]?.note = Self.background(busy)
-            } else { finishAgent(key, reason: "Finished", now: now) }
+            // Wait for a fresh process/traffic sample, even when no previous poll saw children.
+            finishing[key] = now
+            agents[key]?.state = .working
+            if let busy = busyTasks[key], busy > 0 { agents[key]?.note = Self.background(busy) }
         case .failed: finishAgent(key, reason: "Failed" + (event.message.map { ": " + $0 } ?? ""), now: now)
         }
         if agents[key] != nil { lastKinds[key] = event.kind }
@@ -442,7 +438,7 @@ public enum AgentCatalog {
             if runs.isEmpty {
                 // Without hooks, the agent's traffic is the run.
                 let alive = entries.contains { $0.processIDs.contains(where: probe.alive) }
-                if !hooked.contains(agent), alive, entries.reduce(0, { $0 + $1.rate }) >= Self.agentActiveRate {
+                if alive, entries.reduce(0, { $0 + $1.rate }) >= Self.agentActiveRate {
                     var run = WorkSession(kind: .agent, title: agent, start: now, batteryStart: power.batteryPercent, peakThermal: power.thermal, lastActive: now, state: .working)
                     if let pid = entries.first(where: { $0.id.hasPrefix("process:") })?.processIDs.first, let path = probe.path(pid) { run.describe(AgentInstall.describe(path)) }
                     agents[agent] = run; started.insert(agent)
@@ -502,8 +498,12 @@ public enum AgentCatalog {
             if let since = finishing[key] {
                 let busy = busyTasks[key] ?? 0
                 if busy > 0 { finishing[key] = now; agents[key]?.note = Self.background(busy) }
+                else if let root = pids[key], probe.family(probe.children(root)).contains(where: { times[$0] != nil && usage[$0] == nil }) {
+                    // A new child only has a CPU baseline this tick. Sample it again before deciding.
+                    finishing[key] = now
+                }
                 // A few quiet seconds, so a task pausing between steps doesn't end the run.
-                else if now.timeIntervalSince(since) >= 10 || pids[key].map(probe.alive) == false { finishAgent(key, reason: "Finished", now: since) }
+                else if now.timeIntervalSince(since) >= 10 { finishAgent(key, reason: "Finished", now: since) }
                 continue
             }
             let silent = now.timeIntervalSince(max(run.lastActive, run.lastEvent ?? run.start)), idle = silent >= quiet && !cpuBusy
@@ -756,9 +756,19 @@ public enum AgentCatalog {
             let content = UNMutableNotificationContent(); content.title = title; content.body = body
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
-        guard let url = URL(string: webhook.trimmingCharacters(in: .whitespaces)), url.scheme == "https", url.host != nil else { return }
+        guard let request = Self.webhookRequest(webhook, title: title, body: body, session: session) else { return }
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    /// "ntfy+https" opts a self-hosted topic into the same format as ntfy.sh.
+    nonisolated static func webhookRequest(_ destination: String, title: String, body: String, session: WorkSession? = nil) -> URLRequest? {
+        guard var components = URLComponents(string: destination.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.host != nil else { return nil }
+        let explicitNtfy = components.scheme?.lowercased() == "ntfy+https"
+        if explicitNtfy { components.scheme = "https" }
+        guard let url = components.url, url.scheme?.lowercased() == "https" else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10); request.httpMethod = "POST"
-        if url.host?.hasSuffix("ntfy.sh") == true || url.path.split(separator: "/").count == 1 {
+        if explicitNtfy || url.host?.lowercased() == "ntfy.sh" {
             // ntfy: plain text with the title in a header.
             request.setValue(title, forHTTPHeaderField: "Title"); request.setValue("bat", forHTTPHeaderField: "Tags")
             request.httpBody = Data(body.utf8)
@@ -768,7 +778,7 @@ public enum AgentCatalog {
             if let session, let data = try? JSONEncoder().encode(session), let json = try? JSONSerialization.jsonObject(with: data) { payload["session"] = json }
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         }
-        URLSession.shared.dataTask(with: request).resume()
+        return request
     }
 
     private func sampleDestinations(apps: [AppTraffic]) async {
