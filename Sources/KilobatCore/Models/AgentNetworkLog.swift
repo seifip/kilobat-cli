@@ -125,6 +125,10 @@ public struct AgentHostSummary: Codable, Equatable, Identifiable, Sendable {
     public var blockedBy: String? = nil
     public var id: String { process + "|" + host + "|" + port + "|" + transport }
     public var flagged: Bool { !flags.isEmpty }
+    public var needsReview: Bool {
+        flags.contains(.blocked) || flags.contains(.largeUpload)
+            || (sent > 0 && flags.contains(.shareOrTunnel))
+    }
     public var notes: String {
         flags.map { flag in
             switch flag {
@@ -158,6 +162,8 @@ public struct AgentLogEntry: Codable, Equatable, Identifiable, Sendable {
     public var flaggedCount: Int
     /// By process, then by bytes sent.
     public var hosts: [AgentHostSummary]
+
+    public var reviewCount: Int { Set(hosts.filter(\.needsReview).map { $0.host.lowercased() }).count }
 
     public var title: String { agent + (project.map { " · " + $0 } ?? "") }
     /// "Claude Code · 14 hosts · 2.1 MB up".

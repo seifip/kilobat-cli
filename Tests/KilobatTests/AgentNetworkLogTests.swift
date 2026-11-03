@@ -291,6 +291,21 @@ struct AgentHostFlagTests {
         #expect(report[0].hosts.first { $0.host == "abc.trycloudflare.com" }?.notes == "first time, tunnel")
     }
 
+    @Test func reviewCountSkipsRoutineHostsAndDeduplicatesUploads() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let entry = AgentNetworkLog.report([session("codex", start: start, [
+            record("node", nil, address: "198.51.100.200"),
+            record("curl", "first-seen.example.org"),
+            record("curl", "read.trycloudflare.com", sent: 0),
+            record("node", "upload.example.org", sent: 6_000_000),
+            record("curl", "upload.example.org", sent: 6_000_000),
+            record("curl", "send.trycloudflare.com", sent: 4_000)
+        ])])[0]
+        #expect(entry.reviewCount == 2)
+        #expect(Set(entry.hosts.filter(\.needsReview).map(\.host)) == ["upload.example.org", "send.trycloudflare.com"])
+        #expect(entry.flaggedCount > entry.reviewCount)
+    }
+
     @Test func aHostIsNewOnlyTheFirstTime() {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         let report = AgentNetworkLog.report([session("codex", start: start, [record("codex", "example.org")]),
