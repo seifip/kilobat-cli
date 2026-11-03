@@ -39,6 +39,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
     public private(set) var state: FocusChanges?
     /// The Focus asked for something that needs Pro, and only the rest was applied.
     public private(set) var refused: FocusFilter?
+    public private(set) var persistenceError: String?
     /// Whether Pro features may be used: the app answers with the license.
     @ObservationIgnored public var allowed: () -> Bool = { false }
     /// The store whose preferences the Focus changes: the live one, or one that writes them for the app to read.
@@ -78,7 +79,6 @@ public struct FocusChanges: Codable, Equatable, Sendable {
     /// Applies what the Focus asks, from where things stand: switching between two Focuses keeps the profile from
     /// before the first, and an empty filter puts everything back. Returns false when part of it needed Pro.
     @discardableResult public func apply(_ wanted: FocusFilter, now: Date = Date()) -> Bool {
-        applied = true
         let pro = allowed()
         let filter = pro ? wanted : wanted.free
         refused = filter == wanted ? nil : wanted
@@ -101,15 +101,20 @@ public struct FocusChanges: Codable, Equatable, Sendable {
             next.filter = filter
             // What's about to change is written down first, and forgotten only after it's put back, so a crash in
             // between still restores it at the next launch.
-            if !filter.isEmpty { state = next; save() }
-            if preferences != store.preferences { store.preferences = preferences }
+            if !filter.isEmpty {
+                guard save(next) else { return false }
+                state = next
+            }
+            if preferences != store.preferences || store.preferencesSaveError != nil { store.preferences = preferences }
+            if let error = store.preferencesSaveError { persistenceError = error; return false }
         }
         next.filter = filter
         if !filter.holdApps { CallMode.resume(owner: CallMode.focus, ledger: ledger); next.holding = [] }
         state = filter.isEmpty ? nil : next
         if filter.isEmpty { released = [] }
-        if filter.holdApps { rescan() } else { save() }
-        return refused == nil
+        if filter.holdApps { rescan() } else { save(state) }
+        applied = true
+        return refused == nil && persistenceError == nil
     }
 
     /// At launch: the Focus filter macOS has on now, or nil when none is. A Focus applied since launch wins.
@@ -146,7 +151,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
             if !current.holding.contains(name) { current.holding.append(name) }
         }
         state = current
-        save()
+        save(state)
     }
 
     /// The person brought an app to the front: it runs for the rest of this Focus.
@@ -154,7 +159,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
         guard let name = CallMode.name(of: bundleID), var current = state else { return }
         CallMode.resume(app: name, owner: CallMode.focus, ledger: ledger)
         released.insert(name); current.holding.removeAll { $0 == name }
-        state = current; save()
+        state = current; save(state)
     }
 
     /// Picks up apps opened during the Focus, and lets go of one the person switches to.
@@ -174,6 +179,7 @@ public struct FocusChanges: Codable, Equatable, Sendable {
 
     /// One line for Settings, such as “Focus: Work is holding Dropbox”; nil while no Focus asks anything.
     public var summary: String? {
+        if let persistenceError { return persistenceError }
         guard let state else { return refused.map { _ in String(localized: "Focus: this filter needs Kilobat Pro", comment: "Settings line when a Focus filter asked for a Pro feature without Pro") } }
         let head = state.filter.profile.map { String(localized: "Focus: \($0.title)", comment: "Settings line: a Focus switched Kilobat to this profile") }
             ?? String(localized: "Focus", comment: "Settings line: a Focus filter is on and kept the profile")
@@ -192,9 +198,23 @@ public struct FocusChanges: Codable, Equatable, Sendable {
         NSWorkspace.shared.runningApplications.compactMap { app in app.bundleIdentifier.map { ($0, [app.processIdentifier], nil) } }
     }
 
-    private func save() {
-        guard let state else { try? FileManager.default.removeItem(at: file); return }
-        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(state).write(to: file, options: .atomic)
+    @discardableResult private func save(_ changes: FocusChanges?) -> Bool {
+        let manager = FileManager.default
+        do {
+            if let changes {
+                try manager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try JSONEncoder().encode(changes).write(to: file, options: .atomic)
+            } else if manager.fileExists(atPath: file.path) {
+                guard try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try manager.removeItem(at: file)
+            }
+            persistenceError = nil
+            return true
+        } catch {
+            persistenceError = String(localized: "Could not save Focus recovery data: \(error.localizedDescription)")
+            return false
+        }
     }
 }

@@ -139,4 +139,229 @@ import Testing
         #expect(StreamOverlay.localPath("GET /data.json HTTP/1.1\r\nHost: rebound.example:7171", port: 7171) == nil)
         #expect(StreamOverlay.localPath("GET /data.json HTTP/1.1\r\nHost: localhost:7171\r\nSec-Fetch-Site: cross-site", port: 7171) == nil)
     }
+
+    @Test func callHoldPicksUpNewHelpers() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let ledger = folder.appendingPathComponent("held.json")
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        let calls = CallStore(directory: folder, ledger: ledger)
+        let oldMode = UserDefaults.standard.object(forKey: "callMode")
+        calls.callMode = true
+        calls.allowed = { true }
+        var children: [Process] = []
+        defer {
+            calls.release()
+            UserDefaults.standard.set(oldMode, forKey: "callMode")
+            for child in children {
+                if child.isRunning { kill(child.processIdentifier, SIGCONT); child.terminate() }
+                child.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let start = Date()
+        for offset in [0.0, 11.0] {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            child.arguments = ["60"]
+            try child.run()
+            children.append(child)
+            traffic.apps = [AppTraffic(id: "com.getdropbox.dropbox", name: "Dropbox", processIDs: children.map(\.processIdentifier))]
+            calls.hold(traffic: traffic, now: start + offset, start: start)
+        }
+        #expect(calls.holding == ["Dropbox"])
+        #expect(Set(CallMode.held(ledger: ledger).map(\.pid)) == Set(children.map(\.processIdentifier)))
+    }
+
+    @Test func routerDisconnectCanRetryAfterFailedPersistence() throws {
+        let manager = FileManager.default
+        let folder = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer {
+            try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            try? manager.removeItem(at: folder)
+        }
+        let connection = RouterConnection(kind: .openwrt, network: "home", networkName: "Home",
+                                          url: "http://192.168.1.1", entered: "192.168.1.1")
+        var book = HomeUsageStore.Book()
+        book.routers = [connection]
+        try JSONEncoder().encode(book).write(to: folder.appendingPathComponent(HomeUsageStore.bookFile))
+        let secrets = MemoryRouterSecrets([connection.id: "fixture"])
+        let store = HomeUsageStore(directory: folder, secrets: secrets)
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        store.disconnect(network: "home")
+        #expect(store.connection(for: "home")?.id == connection.id)
+        #expect(secrets.secret(for: connection.id) == "fixture")
+
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        store.disconnect(network: "home")
+        #expect(store.connection(for: "home") == nil)
+        #expect(HomeUsageStore.load(directory: folder).book.routers.isEmpty)
+        #expect(secrets.secret(for: connection.id) == nil)
+    }
+
+    @Test func stoppingPingWhileResolvingDoesNotLaunchProcess() async {
+        let (entered, signalEntry) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        let stream = PingStream(target: "router", start: Date()) { _ in
+            signalEntry.yield(())
+            for await _ in resume { break }
+            return "127.0.0.1"
+        }
+        let start = Task { await stream.start() }
+        for await _ in entered { break }
+        _ = await stream.stop()
+        signalResume.yield(())
+        await start.value
+        #expect(await !stream.isRunning)
+        _ = await stream.stop()
+    }
+
+
+    @Test func streamPreflightDiscardsResultsAfterNetworkRoundTrip() async {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        traffic.networkKey = "home"
+        let stream = StreamStore(directory: folder)
+        let diagnostics = DiagnosticStore()
+        stream.start(traffic: traffic, diagnostics: diagnostics, polling: false)
+        stream.metered = { traffic.networkKey == "hotspot" }
+
+        let (entered, signalEntry) = AsyncStream<Bool>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        stream.runReadiness = { bitrate, source, measure, _, metered, busy in
+            signalEntry.yield(measure)
+            for await _ in resume { break }
+            return StreamReadiness(bitrate: bitrate, bitrateSource: source, upload: nil, uploadSource: .none,
+                                   uploadDate: nil, latency: nil, jitter: nil, lossPercent: nil, metered: metered, busy: busy)
+        }
+        let check = Task { await stream.runCheck(bitrate: 6000) }
+        while !stream.checking { await Task.yield() }
+        traffic.networkKey = "hotspot"
+        var iterator = entered.makeAsyncIterator()
+        #expect(await iterator.next() == false)
+        traffic.networkKey = "home"
+        traffic.networkKey = "hotspot"
+        signalResume.yield(())
+        await check.value
+        #expect(stream.check == nil)
+    }
+
+    @Test func queuedSmartHomeCheckCannotPublishOnAnotherNetwork() async {
+        let diagnostics = DiagnosticStore()
+        func snapshot(_ name: String) -> DiagnosticSnapshot {
+            DiagnosticSnapshot(date: Date(), radio: RadioSample(ssid: name, interface: "en0", rssi: -55, noise: -95,
+                               transmitMbps: 400, channel: 149, band: "5 GHz"), gateway: "192.168.1.1",
+                               router: PingResult(host: "192.168.1.1", samples: [3], lossPercent: 0),
+                               internet: PingResult(host: "1.1.1.1", samples: [20], lossPercent: 0), dnsMilliseconds: 20,
+                               dnsServers: [], captivePortal: false, networkService: "Wi-Fi")
+        }
+        diagnostics.snapshot = snapshot("A")
+        let networkA = diagnostics.snapshot?.networkKey
+        let watch = SmartHomeWatch()
+        let (entered, signalEntry) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        var probes = 0
+        watch.probe = { _ in
+            probes += 1
+            if probes == 1 {
+                signalEntry.yield(())
+                for await _ in resume { break }
+            }
+            return SmartHomeReport(date: Date(), headline: "Fixture", threadNetworks: [], idleBorderRouters: [],
+                                   matter: .build(operational: [], commissionable: []), homeKit: .build([]), checks: [], findings: [],
+                                   localNetwork: "unknown", routerGuide: nil)
+        }
+        let first = Task { await watch.check(network: networkA, diagnostics: diagnostics) }
+        for await _ in entered { break }
+        let queued = Task { await watch.check(network: networkA, diagnostics: diagnostics) }
+        await Task.yield()
+        diagnostics.snapshot = snapshot("B")
+        signalResume.yield(())
+        await first.value
+        await queued.value
+        #expect(probes == 1)
+        #expect(watch.report == nil)
+    }
+
+    @Test func serviceTraceDoesNotSurviveNetworkRoundTrip() async throws {
+        let watch = ServiceSpeedWatch(directory: nil)
+        let now = Date()
+        var log = ServiceSpeedLog()
+        log.add(ServiceTransfer(date: now, seconds: 10, bytes: 10_000_000, mbps: 8, otherMbps: 0, address: "192.0.2.1"),
+                key: "github", network: "A", name: "A", now: now)
+        watch.preview(log, network: "A", speedTests: [], now: now)
+        func visit(_ key: String) {
+            watch.consume(TrafficSnapshot(timestamp: now, processes: []), network: key, name: key, vpn: false)
+        }
+        visit("A")
+        let (entered, signalEntry) = AsyncStream<Void>.makeStream()
+        let (resume, signalResume) = AsyncStream<Void>.makeStream()
+        watch.trace = { _ in
+            signalEntry.yield(())
+            for await _ in resume { break }
+            return "stale trace"
+        }
+        let trace = try #require(watch.traceRoute(to: "192.0.2.1", key: "github", network: "A"))
+        for await _ in entered { break }
+        visit("B")
+        visit("A")
+        signalResume.yield(())
+        await trace.value
+        #expect(watch.log.networks["A"]?.traces?["github"] == nil)
+        watch.trace = { _ in "current trace" }
+        let retry = try #require(watch.traceRoute(to: "192.0.2.1", key: "github", network: "A"))
+        await retry.value
+        #expect(watch.log.networks["A"]?.traces?["github"] != nil)
+    }
+
+
+    @Test func focusCannotChangePreferencesWithoutRecoveryRecord() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let recovery = folder.appendingPathComponent("focus.json")
+        let ledger = folder.appendingPathComponent("held.json")
+        try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        traffic.preferences.profile = .unrestricted
+        let focus = FocusFilterStore(directory: folder, ledger: ledger)
+        focus.allowed = { true }; focus.traffic = { traffic }
+        let filter = FocusFilter(profile: .travel, pauseUpdaters: true)
+        #expect(!focus.apply(filter))
+        #expect(focus.persistenceError != nil && focus.state == nil)
+        #expect(traffic.preferences.profile == .unrestricted)
+        #expect(traffic.preferences.focusPausesUpdaters == nil)
+
+        try FileManager.default.removeItem(at: recovery)
+        #expect(focus.apply(filter))
+        let reloaded = TrafficStore(directory: folder, startMonitoring: false)
+        #expect(reloaded.preferences.profile == .travel)
+        let restarted = FocusFilterStore(directory: folder, ledger: ledger)
+        restarted.allowed = { true }; restarted.traffic = { reloaded }
+        restarted.reconcile(nil)
+        #expect(reloaded.preferences.profile == .unrestricted && reloaded.preferences.focusPausesUpdaters == nil)
+    }
+
+    @Test func identicalPreferenceRetryPersistsAfterFailedWrite() throws {
+        let manager = FileManager.default
+        let folder = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let traffic = TrafficStore(directory: folder, startMonitoring: false)
+        defer {
+            try? manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            try? manager.removeItem(at: folder)
+        }
+        traffic.preferences.profile = .travel
+        try manager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        traffic.setAllowed("fixture.app", false)
+        #expect(traffic.error != nil)
+        traffic.reloadPreferences()
+        #expect(traffic.preferences.rules[NetworkProfile.travel.rawValue]?["fixture.app"] == false)
+
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        traffic.setAllowed("fixture.app", false)
+        #expect(traffic.error == nil)
+        let reloaded = TrafficStore(directory: folder, startMonitoring: false)
+        #expect(reloaded.preferences.rules[NetworkProfile.travel.rawValue]?["fixture.app"] == false)
+    }
+
 }

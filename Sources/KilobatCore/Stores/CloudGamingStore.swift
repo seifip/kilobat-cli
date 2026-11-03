@@ -393,10 +393,10 @@ import Observation
         }
         let skipped = Set(UserDefaults.standard.stringArray(forKey: "callModeSkipped") ?? [])
         for app in apps {
-            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name), !holding.contains(name) else { continue }
+            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name) else { continue }
             // A launcher is held only while it downloads: nothing runs a local game during a cloud session.
             if CallMode.launchers.contains(name), app.downloadRate < CallAnalysis.downloadLoad / 2 { continue }
-            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.cloudGaming, ledger: processHoldLedger).isEmpty else { continue }
+            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.cloudGaming, ledger: processHoldLedger).isEmpty, !holding.contains(name) else { continue }
             holding.append(name)
             if holdDeadline == nil {
                 let deadline = clock.now.advanced(by: processHoldLimit)

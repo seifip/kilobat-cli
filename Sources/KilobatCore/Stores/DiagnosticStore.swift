@@ -53,7 +53,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var watchesDNS = true
     /// This Mac's network ports' byte total at the previous check, for telling quiet checks from busy ones.
     private var lastPortBytes: (bytes: UInt64, date: Date)?
-    public var snapshot: DiagnosticSnapshot?
+    @ObservationIgnored private(set) var networkRevision = 0
+    public var snapshot: DiagnosticSnapshot? {
+        didSet { if snapshot?.networkKey != oldValue?.networkKey { networkRevision &+= 1 } }
+    }
     public let survey = SurveyJournal()
     /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
     public let knownDevices = DeviceRegistry()

@@ -17,10 +17,11 @@ public final class TrafficStore {
     public var networkKind = String(localized: "Connecting")
     public var ready = false
     private var actionError: String?
+    private(set) var preferencesSaveError: String?
     private(set) var monitoringError: String?
     func monitoringFailed(_ message: String) { monitoringError = message }
     public var error: String? {
-        get { actionError ?? monitoringError }
+        get { preferencesSaveError ?? actionError ?? monitoringError }
         set { actionError = newValue; if newValue == nil { monitoringError = nil } }
     }
     public var search = ""
@@ -28,7 +29,10 @@ public final class TrafficStore {
     public var selectedApp: String?
     public var preferences: SavedPreferences {
         didSet {
-            guard preferences != oldValue else { return }
+            guard preferences != oldValue else {
+                if !reloading, preferencesSaveError != nil { savePreferences() }
+                return
+            }
             // The budget always describes the current network; keeping its copy current means a relaunch,
             // which starts on no network, can't lose a plan set since the last switch.
             if recordHistory, networkKey != "unknown", preferences.limitGB != oldValue.limitGB || preferences.budgetCycle != oldValue.budgetCycle {
@@ -40,7 +44,10 @@ public final class TrafficStore {
         }
     }
     public var usage: [UsageEntry] = []
-    public var networkKey = "unknown"
+    @ObservationIgnored private(set) var networkRevision = 0
+    public var networkKey = "unknown" {
+        didSet { if networkKey != oldValue { networkRevision &+= 1 } }
+    }
     public var networkName = "Current session"
     public var networkSessions: [String: NetworkSession] = [:]
     /// When the Mac slept, so a gap in the history can say so. A sleep that ends in a shutdown has no wake and isn't kept.
@@ -535,13 +542,20 @@ public final class TrafficStore {
               let saved = try? JSONDecoder().decode(SavedPreferences.self, from: data) else { return }
         let scopeChanged = preferences.trafficScope != saved.trafficScope
         lastPreferencesData = data
+        preferencesSaveError = nil
         reloading = true; preferences = saved; reloading = false
         if preferences != saved { savePreferences() }
         if scopeChanged { setScope(saved.trafficScope ?? "external") }
     }
     public func savePreferences() {
-        persist(preferences, as: "preferences.json")
-        lastPreferencesData = try? Data(contentsOf: directory.appendingPathComponent("preferences.json"))
+        do {
+            let data = try JSONEncoder().encode(preferences)
+            try data.write(to: directory.appendingPathComponent("preferences.json"), options: .atomic)
+            lastPreferencesData = data
+            preferencesSaveError = nil
+        } catch {
+            preferencesSaveError = String(localized: "Could not save local data: \(error.localizedDescription)")
+        }
     }
     public func shutdown() { flush(); monitor.stop() }
     /// Samples older than a day merge into hourly buckets per network, and older than 30 days into daily ones,

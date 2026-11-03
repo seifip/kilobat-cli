@@ -140,11 +140,11 @@ import Foundation
         homeUsage?.need(.call, false, consumer: consumer)
         starlink?.watch(for: consumer, active: false); lastDish = nil
         samples.internet = await internet?.stop() ?? []; samples.router = await router?.stop() ?? []
-        guard !mixedNetworks else { return CallSamples() }
+        guard !mixedNetworks else { return unscopedSamples() }
         guard report else { return samples }
         // The dish's own log has each outage to the second, with its cause.
         if starlink?.present == true, diagnostics?.snapshot?.networkKey == networkKey, let history = await Starlink.history() {
-            if diagnostics?.snapshot?.networkKey != networkKey { mixedNetworks = true; return CallSamples() }
+            if diagnostics?.snapshot?.networkKey != networkKey { mixedNetworks = true; return unscopedSamples() }
             samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: start) }
         }
         // Devices that joined around it, so a freeze the router blames on another device can name it.
@@ -158,4 +158,12 @@ import Foundation
         }
         return samples
     }
+    /// Internet probes still describe the session when it changes networks. The original router and
+    /// network-specific evidence cannot explain the entire session.
+    private func unscopedSamples() -> CallSamples {
+        var result = CallSamples()
+        result.internet = samples.internet
+        return result
+    }
+
 }

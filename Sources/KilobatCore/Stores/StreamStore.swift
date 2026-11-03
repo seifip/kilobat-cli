@@ -66,6 +66,7 @@ import Observation
     @ObservationIgnored public var uplink: (String) -> (mbps: Double, date: Date)? = { _ in nil }
     /// Whether the network is metered; the check never measures on one unless asked.
     @ObservationIgnored public var metered: () -> Bool = { true }
+    @ObservationIgnored var runReadiness = StreamCheck.run
     /// Reads the password; the app reads the Keychain, tests and screenshots don't.
     @ObservationIgnored public var password: (UInt16) -> String? = { OBSPassword.read(port: $0) }
 
@@ -79,9 +80,9 @@ import Observation
     @ObservationIgnored private var lastAttempt = Date.distantPast
     @ObservationIgnored private var lastPoll = Date.distantPast
     @ObservationIgnored private var stateChanged = false
-    @ObservationIgnored private var blocked: [String] = []
+    @ObservationIgnored private var blocked: [String: TrafficStore.OwnedTemporary] = [:]
     /// App IDs held with a timed block while going live, for the rule inspector.
-    public var heldBlocks: [String] { blocked }
+    public var heldBlocks: [String] { blocked.values.map(\.id).sorted() }
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var holdDeadline: Task<Void, Never>?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
@@ -119,9 +120,10 @@ import Observation
     private let previewing = false
     #endif
 
-    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore) {
+    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore, polling: Bool = true) {
         guard loop == nil else { return }
         self.traffic = traffic; self.diagnostics = diagnostics
+        guard polling else { return }
         passwordSaved = password(port) != nil
         loop = Task { [weak self] in
             while !Task.isCancelled {
@@ -260,11 +262,13 @@ import Observation
         let held = holding
         release()
         let end = Date()
-        let worth = report && end.timeIntervalSince(live.start) >= Self.shortest && seconds.count >= 10
+        let finishedSeconds = seconds
+        seconds = []
+        let worth = report && end.timeIntervalSince(live.start) >= Self.shortest && finishedSeconds.count >= 10
         var samples = StreamSamples()
         samples.line = await sampler.finish(report: worth, end: end, diagnostics: diagnostics)
-        guard worth else { seconds = []; return }
-        samples.obs = seconds; seconds = []
+        guard worth else { return }
+        samples.obs = finishedSeconds
         samples.bitrate = live.bitrate
         let network = sampler.reportNetwork
         if let key = network?.0, let uplink = uplink(key) { samples.uplink = uplink.mbps; samples.uplinkDate = uplink.date }
@@ -290,6 +294,7 @@ import Observation
         if Date().timeIntervalSince(live.start) >= CallMode.limit { release(); return }
         if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
             released.insert(name); CallMode.resume(app: name, owner: CallMode.stream); holding.removeAll { $0 == name }
+            if let rule = blocked.removeValue(forKey: name) { traffic.clearTemporary(rule) }
         }
         guard now.timeIntervalSince(lastHoldScan) >= 10 else { return }
         lastHoldScan = now
@@ -297,19 +302,19 @@ import Observation
         let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
         let skipped = Set(UserDefaults.standard.stringArray(forKey: "callModeSkipped") ?? [])
         for app in traffic.apps {
-            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name), !holding.contains(name) else { continue }
+            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name) else { continue }
             if CallMode.launchers.contains(name), gaming || app.downloadRate < CallAnalysis.downloadLoad / 2 { continue }
-            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.stream).isEmpty else { continue }
+            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.stream).isEmpty, !holding.contains(name) else { continue }
             holding.append(name)
-            if traffic.temporaryRule(app.id) == nil { traffic.setTemporary(app.id, allowed: false, minutes: Int(CallMode.limit / 60)); blocked.append(app.id) }
+            if traffic.temporaryRule(app.id) == nil { blocked[name] = traffic.holdTemporary(app.id, minutes: Int(CallMode.limit / 60)) }
         }
     }
 
     /// Resumes what Call mode for streams holds, but not what a call or a Focus filter holds too.
     public func release() {
         CallMode.resume(owner: CallMode.stream)
-        for id in blocked { traffic?.clearTemporary(id) }
-        blocked = []; holding = []
+        for rule in blocked.values { traffic?.clearTemporary(rule) }
+        blocked = [:]; holding = []
     }
 
     // MARK: Go live
@@ -319,15 +324,19 @@ import Observation
         guard !checking else { return }
         checking = true
         defer { checking = false }
-        let metered = metered()
         var bitrate = given, source: String? = given == nil ? nil : "given"
         if bitrate == nil, let live = live?.bitrate { bitrate = live; source = "obs" }
         if bitrate == nil, let client, let value = await client.bitrate() { bitrate = value; source = "obs" }
         if bitrate == nil, let last = reports.last(where: { $0.bitrate != nil })?.bitrate { bitrate = last; source = "lastStream" }
         let busy = await busyApps()
-        let key = diagnostics?.snapshot?.networkKey
-        check = await StreamCheck.run(bitrate: bitrate, bitrateSource: source, measure: measure ?? !metered, history: key.flatMap(uplink),
-                                      metered: metered, busy: busy)
+        let key = traffic?.networkKey ?? diagnostics?.snapshot?.networkKey
+        let revision = traffic?.networkRevision ?? diagnostics?.networkRevision
+        let metered = metered()
+        guard !Task.isCancelled else { return }
+        let result = await runReadiness(bitrate, source, measure ?? !metered, key.flatMap(uplink), metered, busy)
+        guard !Task.isCancelled, revision == (traffic?.networkRevision ?? diagnostics?.networkRevision),
+              key == (traffic?.networkKey ?? diagnostics?.snapshot?.networkKey) else { return }
+        check = result
     }
 
     /// Apps other than OBS moving enough to drop frames, seen in two of three looks a second apart.

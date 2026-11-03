@@ -247,9 +247,11 @@ public struct RouterDraft: Sendable, Equatable {
 
     public func disconnect(network: String? = nil) {
         guard let key = network ?? self.network()?.key, let connection = connection(for: key) else { return }
+        var remaining = book
+        remaining.routers.removeAll { $0.id == connection.id }
+        guard saveBook(remaining) else { return }
+        book = remaining
         secrets.remove(connection.id)
-        book.routers.removeAll { $0.id == connection.id }
-        saveBook()
         if reader?.id == connection.id || phaseConnection == connection.id { reader = nil; clearMeasurements(); phaseConnection = nil; phase = .idle }
     }
 
@@ -474,12 +476,12 @@ public struct RouterDraft: Sendable, Equatable {
 
     // MARK: Files
 
-    @discardableResult private func saveBook() -> Bool {
+    @discardableResult private func saveBook(_ candidate: Book? = nil) -> Bool {
         guard let folder else { return true }
         do {
             let url = folder.appendingPathComponent(Self.bookFile)
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(book).write(to: url, options: .atomic)
+            try encoder.encode(candidate ?? book).write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             persistenceError = nil
             return true

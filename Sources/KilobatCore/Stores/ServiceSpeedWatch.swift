@@ -133,16 +133,17 @@ import Observation
     }
 
     /// One route trace per slow service a day, kept with the finding.
-    private func traceRoute(to address: String, key: String, network: String) {
+    @discardableResult func traceRoute(to address: String, key: String, network: String) -> Task<Void, Never>? {
         let id = network + "|" + key
-        guard let trace, !tracing.contains(id) else { return }
+        guard let trace, enabled, self.network?.key == network, !tracing.contains(id) else { return nil }
+        let generation = networkGeneration
         tracing.insert(id)
-        Task { [weak self] in
-            guard let output = await trace(address) else { self?.tracing.remove(id); return }
-            guard let self else { return }
+        return Task { [weak self] in
+            defer { self?.tracing.remove(id) }
+            guard self?.networkGeneration == generation, let output = await trace(address), let self,
+                  self.networkGeneration == generation, self.enabled else { return }
             self.log.setTrace(ServiceRouteTrace(date: Date(), address: address, output: output), key: key, network: network)
             self.save()
-            self.tracing.remove(id)
             self.refresh()
         }
     }

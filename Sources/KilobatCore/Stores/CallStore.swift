@@ -144,7 +144,7 @@ import Observation
     }
 
     private func hold(_ app: AppTraffic, name: String, traffic: TrafficStore, now: Date) {
-        guard !holding.contains(name), !CallMode.hold(app.processIDs, app: name, ledger: ledger).isEmpty else { return }
+        guard !CallMode.hold(app.processIDs, app: name, ledger: ledger).isEmpty, !holding.contains(name) else { return }
         holding.append(name); heldSince[name] = now
         // New connections are refused too, for whatever the suspended processes hand off to a helper.
         if traffic.temporaryRule(app.id) == nil { blocked[name] = traffic.holdTemporary(app.id, minutes: Int(CallMode.limit / 60)) }
@@ -220,14 +220,22 @@ import Observation
 /// `ping` once a second for as long as a call lasts; a reply later than a second counts as lost, as the call feels it.
 actor PingStream {
     private let target: String, start: Date
+    private let resolve: @Sendable (String) async throws -> String
     private var process: Process?
+    private var started = false
+    private var stopped = false
+    var isRunning: Bool { process?.isRunning == true }
     private var pings: [CallSamples.Ping] = []
     /// Seconds from the call's start to the first ping; each ping's time comes from its sequence number, since a lost one is only reported later.
     private var offset = 0.0
-    init(target: String, start: Date) { self.target = target; self.start = start }
+    init(target: String, start: Date, resolve: @escaping @Sendable (String) async throws -> String = StutterTest.host(for:)) {
+        self.target = target; self.start = start; self.resolve = resolve
+    }
 
     func start() async {
-        guard let host = try? await StutterTest.host(for: target) else { return }
+        guard !started, !stopped else { return }
+        started = true
+        guard let host = try? await resolve(target), !stopped else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ping")
         process.arguments = ["-n", "-i", "1", "-W", "1000", host]
@@ -246,11 +254,15 @@ actor PingStream {
     func current() -> [CallSamples.Ping] { pings.sorted { $0.at < $1.at } }
 
     func stop() -> [CallSamples.Ping] {
-        process?.terminate(); process = nil
+        stopped = true
+        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        if isRunning { process?.terminate() }
+        process = nil
         return pings.sorted { $0.at < $1.at }
     }
 
     private func ingest(_ text: String) {
+        guard !stopped else { return }
         for line in text.split(separator: "\n").map(String.init) {
             guard let seq = DiagnosticProbe.matches("icmp_seq[= ]([0-9]+)", in: line).first.flatMap(Double.init) else { continue }
             if line.contains("Request timeout") { pings.append(.init(at: offset + seq, ms: nil)) }
