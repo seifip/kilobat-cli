@@ -56,15 +56,53 @@ public final class StreamOverlay: @unchecked Sendable {
 
     private func serve(_ connection: NWConnection) {
         connection.start(queue: queue)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, _ in
-            guard let self, let data, let request = String(data: data, encoding: .utf8) else { connection.cancel(); return }
-            let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+        queue.asyncAfter(deadline: .now() + 5) { connection.cancel() }
+        receiveHeaders(connection, buffered: Data())
+    }
+
+    private func receiveHeaders(_ connection: NWConnection, buffered: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192 - buffered.count) { [weak self] data, _, ended, error in
+            guard let self, let data, error == nil else { connection.cancel(); return }
+            let bytes = buffered + data
+            guard let end = bytes.range(of: Data("\r\n\r\n".utf8)) else {
+                if ended || bytes.count >= 8192 || data.isEmpty { connection.cancel() }
+                else { self.receiveHeaders(connection, buffered: bytes) }
+                return
+            }
+            let request = String(decoding: bytes[..<end.lowerBound], as: UTF8.self)
             Task {
-                let (status, type, body) = await self.respond(to: path)
-                let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n"
+                let status: String, type: String, body: Data
+                if let path = Self.localPath(request, port: self.port) {
+                    (status, type, body) = await self.respond(to: path)
+                } else {
+                    (status, type, body) = ("403 Forbidden", "text/plain", Data())
+                }
+                let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
                 connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
             }
         }
+    }
+
+    static func localPath(_ header: String, port: UInt16) -> String? {
+        let lines = header.components(separatedBy: "\r\n")
+        let request = lines[0].split(separator: " ")
+        guard request.count == 3, request[0] == "GET", request[1].hasPrefix("/"), !request[1].hasPrefix("//") else { return nil }
+        var hosts: [String] = [], origins: [String] = []
+        for line in lines.dropFirst() {
+            let field = line.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard field.count == 2 else { return nil }
+            let value = field[1].trimmingCharacters(in: .whitespaces).lowercased()
+            switch field[0].lowercased() {
+            case "host": hosts.append(value)
+            case "origin": origins.append(value)
+            case "sec-fetch-site" where value == "cross-site": return nil
+            default: break
+            }
+        }
+        let allowed = ["localhost:\(port)", "127.0.0.1:\(port)"]
+        guard hosts.count == 1, allowed.contains(hosts[0]), origins.count <= 1,
+              origins.allSatisfy({ $0 == "http://" + hosts[0] }) else { return nil }
+        return String(request[1])
     }
 
     private func respond(to path: String) async -> (String, String, Data) {

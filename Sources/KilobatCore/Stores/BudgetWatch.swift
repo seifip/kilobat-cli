@@ -50,7 +50,7 @@ import UserNotifications
         let before = ledger
         if budgets, store.networkKey != "unknown" {
             let cycle = store.budgetCycle, interval = cycle.interval(containing: now)
-            let key = "budget|\(store.networkKey)|" + (interval.map { String(Int($0.start.timeIntervalSince1970)) } ?? "session")
+            let key = "budget|\(store.networkKey)|" + (interval.map { String(Int($0.start.timeIntervalSince1970)) } ?? store.budgetSession.map { "session-" + $0.uuidString } ?? "session")
             let used = store.budgetUsed(on: store.networkKey, now: now)
             let fraction = Double(used) / Double(max(1, store.limit))
             if let threshold = ledger.crossed(cycle.thresholds, fraction: fraction, key: key, now: now).max() {

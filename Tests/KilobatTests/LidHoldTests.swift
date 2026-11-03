@@ -238,7 +238,9 @@ struct AwakeOptionsTests {
         sessions.lidBatteryFloor = 30; sessions.lidOnlyOnAC = true
         #expect(recorder.last?.batteryFloor == 30 && recorder.last?.onlyOnAC == true)
         sessions.receive(event(.done, start + 60))
-        // Attaching the recorder, allowing, the floor, power only, done.
+        #expect(sessions.lidRequest != nil)
+        sessions.tick(apps: [], interval: 2, now: start + 72)
+        // Attaching the recorder, allowing, the floor, power only, quiescence after done.
         #expect(sessions.lidRequest == nil && recorder.requests.count == 5 && recorder.last == nil)
     }
 
@@ -279,6 +281,7 @@ struct AwakeOptionsTests {
             if now > start + 3600 { #expect(sessions.lidRequest == nil) }
         }
         sessions.receive(event(.done, now))
+        sessions.tick(apps: [], interval: 2, now: now + 12)
         sessions.receive(AgentEvent(kind: .working, agent: "claude", session: "s2", cwd: "/Users/me/kilobat", pid: getpid(), time: now + 60))
         #expect(sessions.lidRequest?.until == now + 60 + 3600)
     }

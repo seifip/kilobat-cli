@@ -458,7 +458,7 @@ struct FastestDNSTests {
         for offset in [0.0, 60, 120] { await watch.observe(context(lookupWorked: offset == 0), now: now.addingTimeInterval(offset)) }
         #expect(watch.applied?.onFallback == true)
         var restored: [String] = []
-        watch.quit { service in restored.append(service); system.servers = []; return true }
+        watch.quit { service, _ in restored.append(service); system.servers = []; return true }
         #expect(restored == ["Wi-Fi"] && watch.applied == nil && system.servers.isEmpty && watch.switches.last?.reason == .quit)
     }
 

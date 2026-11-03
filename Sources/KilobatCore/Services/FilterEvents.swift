@@ -152,3 +152,80 @@ public struct PendingApproval: Codable, Identifiable, Sendable, Equatable {
     /// Hands the filter a new Protection index (`ProtectionIndex`); it checks the file, keeps it on its own disk and maps it.
     func installProtection(_ index: Data, reply: @escaping (Bool) -> Void)
 }
+
+/// Connections from apps without a rule, held while the user decides. Held connections give up after
+/// a minute so nothing hangs forever; the app stays in the queue until someone answers.
+final class ApprovalQueue<Flow>: @unchecked Sendable {
+    private struct Entry { var approval: PendingApproval; var flows: [(Flow, Date)] }
+    private let lock = NSLock()
+    private struct Key: Hashable { let uid: UInt32; let app: String }
+    private var entries: [Key: Entry] = [:]
+    private var decided: [Key: (Bool, Date)] = [:]
+    private var lastAsked: [UInt32: Date] = [:]
+    private var timer: DispatchSourceTimer?
+    var resume: (Flow, Bool) -> Void = { _, _ in }
+
+    /// Someone polled recently, so there is a person to ask.
+    func listening(for uid: UInt32) -> Bool { lock.withLock { Date().timeIntervalSince(lastAsked[uid] ?? .distantPast) < 15 } }
+
+    /// A decision made moments ago, before the saved rule reaches the filter.
+    func recentDecision(_ app: String, uid: UInt32) -> Bool? {
+        lock.withLock { decided[Key(uid: uid, app: app)].flatMap { Date().timeIntervalSince($0.1) < 30 ? $0.0 : nil } }
+    }
+
+    func hold(_ flow: Flow, approval: PendingApproval) {
+        lock.lock(); defer { lock.unlock() }
+        let key = Key(uid: approval.uid, app: approval.app)
+        var entry = entries[key] ?? Entry(approval: approval, flows: [])
+        if entries[key] != nil {
+            entry.approval.requests += 1; entry.approval.last = Date()
+            for destination in approval.destinations where !entry.approval.destinations.contains(destination) && entry.approval.destinations.count < 20 {
+                entry.approval.destinations.append(destination)
+            }
+        }
+        entry.flows.append((flow, Date()))
+        entry.approval.waiting = entry.flows.count
+        entries[key] = entry
+        startTimer()
+    }
+
+    func encoded(for uid: UInt32) -> Data {
+        lock.lock(); defer { lock.unlock() }
+        lastAsked[uid] = Date()
+        let visible = entries.values.map(\.approval).filter { $0.uid == uid }.sorted { $0.first < $1.first }
+        return (try? JSONEncoder().encode(visible)) ?? Data("[]".utf8)
+    }
+
+    func decide(_ app: String, allowed: Bool, uid: UInt32) -> Bool {
+        lock.lock()
+        let key = Key(uid: uid, app: app)
+        guard let entry = entries.removeValue(forKey: key) else { lock.unlock(); return false }
+        decided[key] = (allowed, Date())
+        lock.unlock()
+        for (flow, _) in entry.flows { resume(flow, allowed) }
+        return true
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + 5, repeating: 5)
+        timer.setEventHandler { [weak self] in self?.expire() }
+        timer.resume(); self.timer = timer
+    }
+
+    private func expire(now: Date = Date()) {
+        lock.lock()
+        var expired: [Flow] = []
+        for (app, entry) in entries {
+            let (old, kept) = (entry.flows.filter { now.timeIntervalSince($0.1) >= 60 }, entry.flows.filter { now.timeIntervalSince($0.1) < 60 })
+            expired += old.map(\.0)
+            // Forget apps nobody answered for half an hour; they are asked again on their next connection.
+            if kept.isEmpty && now.timeIntervalSince(entry.approval.last) > 1_800 { entries[app] = nil; continue }
+            entries[app]?.flows = kept; entries[app]?.approval.waiting = kept.count
+        }
+        decided = decided.filter { now.timeIntervalSince($0.value.1) < 30 }
+        lock.unlock()
+        for flow in expired { resume(flow, false) }
+    }
+}

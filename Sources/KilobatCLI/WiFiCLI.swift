@@ -390,14 +390,12 @@ import KilobatCore
         let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
         let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
         // The dish's own log, when this network is a Starlink dish's; a live reading adds what the app hasn't saved yet.
-        var dish = StarlinkJournal.load()
-        let status = dish.network == journal.samples.last?.networkKey ? await Starlink.status() : nil
-        if status != nil, let history = await Starlink.history() { dish.merge(history.outages); dish.lastSeen = Date() }
+        let dish = StarlinkJournal.load()
         // A slow route to one service, from what the app measured on this network.
         let services = journal.samples.last.map { ServiceSpeedReport(log: ServiceSpeedWatch.load(), network: $0.networkKey, speedTests: journal.speedTests) }
         let report = SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
-                                        hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
-                                        starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours), serviceSpeed: services)
+                                        hours: hours, planMbps: plan, plans: PlanSpeeds.settings(KilobatCLI.appDefaults), check: check,
+                                        starlink: dish.evidence(network: journal.samples.last?.networkKey, hours: hours), serviceSpeed: services)
         return includeSites ? report : report.withoutSiteNames()
     }
 

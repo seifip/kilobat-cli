@@ -79,6 +79,7 @@ public struct DataPackCorrection: Codable, Equatable, Sendable {
     public var at: Date
     public var leftBytes: UInt64
     public var macBytes: UInt64
+    var after: Date { Date(timeIntervalSinceReferenceDate: at.timeIntervalSinceReferenceDate.nextUp) }
     public init(at: Date, leftBytes: UInt64, macBytes: UInt64) { self.at = at; self.leftBytes = leftBytes; self.macBytes = macBytes }
 }
 
@@ -201,7 +202,7 @@ public enum DataPacks {
 
     /// The pack that counts on a network at `date`: of the packs that match it and are running then, the one that started last.
     public static func owner(of key: String, name: String?, at date: Date, in packs: [DataPack], calendar: Calendar = .current) -> DataPack? {
-        packs.filter { $0.counts(at: date, calendar: calendar) && $0.networks.matches(key: key, name: name) }.max { $0.start < $1.start }
+        packs.filter { $0.active(at: date) && $0.networks.matches(key: key, name: name) }.max { $0.start < $1.start }
     }
 
     /// What this Mac used on `pack` from `from` (by default its start) to `to`: each usage entry counts for the one pack
@@ -233,8 +234,9 @@ public enum DataPacks {
         let mac = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending, to: now, calendar: calendar)
         let used: UInt64
         if let correction = pack.correction {
-            let since = mac > correction.macBytes ? mac - correction.macBytes : 0
-            used = min(pack.bytes, (pack.bytes > correction.leftBytes ? pack.bytes - correction.leftBytes : 0) + since)
+            let since = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending,
+                                 from: correction.after, to: now, calendar: calendar)
+            used = pack.bytes - min(pack.bytes, correction.leftBytes - min(correction.leftBytes, since))
         } else {
             used = min(pack.bytes, mac)
         }

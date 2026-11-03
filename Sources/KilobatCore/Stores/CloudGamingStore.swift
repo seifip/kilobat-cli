@@ -326,7 +326,7 @@ import Observation
         guard worth else { return }
         let length = end.timeIntervalSince(session.start)
         samples.seconds = samples.seconds.filter { $0.at <= length }
-        let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        let network = session.sampler.reportNetwork
         var card = CloudGamingAnalysis.report(service: session.service, browser: session.browser, start: session.start, end: end, network: network,
                                               metered: metered(), samples: samples)
         card.held = held.isEmpty ? nil : held
@@ -348,15 +348,20 @@ import Observation
         guard let traffic, let diagnostics, let session, !pausing else { return }
         pausing = true; error = nil
         defer { pausing = false }
-        if !airDropPaused, !diagnostics.lowLatency.active, session.awdlActive || live?.issues.contains(where: { $0.kind == .airDrop }) == true {
+        if !airDropPaused, !diagnostics.lowLatency.active, !diagnostics.lowLatency.busy, session.awdlActive || live?.issues.contains(where: { $0.kind == .airDrop }) == true {
             let app: (pid: Int32, name: String)? = session.browser == nil
                 ? NSWorkspace.shared.runningApplications.first { CloudGamingService.app(id: $0.bundleIdentifier ?? "", name: $0.localizedName ?? "", path: $0.bundleURL?.path)?.id == session.service.id }
                     .map { ($0.processIdentifier, $0.localizedName ?? session.service.name) } : nil
             await diagnostics.lowLatency.enable(seconds: CallMode.limit, app: app)
+            guard self.session === session else {
+                if diagnostics.lowLatency.active { diagnostics.lowLatency.release() }
+                return
+            }
             airDropPaused = diagnostics.lowLatency.active
             if !airDropPaused { error = diagnostics.lowLatency.error }
             if airDropPaused { session.awdlActive = false }
         }
+        guard self.session === session else { return }
         let movers = traffic.apps.filter { CallMode.name(of: $0.id) != nil && ($0.uploadRate >= CallAnalysis.uploadLoad / 4 || $0.downloadRate >= CallAnalysis.downloadLoad / 4) }
         if !movers.isEmpty {
             if allowed() { hold(movers, traffic: traffic) }

@@ -146,6 +146,9 @@ import Testing
         #expect(sessions.agents["Claude Code|a1"]?.state == .waitingForYou && ended == nil)
         sessions.receive(AgentEvent(kind: .working, agent: "claude", session: "a1", time: now))
         sessions.receive(AgentEvent(kind: .done, agent: "claude", session: "a1", time: now + 30))
+        #expect(sessions.agents.count == 1)
+        sessions.tick(apps: [], interval: 2, now: now + 32)
+        sessions.tick(apps: [], interval: 2, now: now + 42)
         #expect(sessions.agents.isEmpty)
         #expect(ended?.ended == "Finished" && ended?.state == .done && ended?.hooks == true && ended?.session == "a1")
         #expect(ended?.end == now + 30 && ended?.received == 720_000 * 40)
@@ -164,6 +167,8 @@ import Testing
         sessions.keepAwakeWhileWaiting = true
         #expect(sessions.holdingAwake)
         sessions.receive(AgentEvent(kind: .done, agent: "codex", cwd: "/tmp/api", time: start + 9))
+        #expect(sessions.holdingAwake)
+        sessions.tick(apps: [], interval: 2, now: start + 20)
         #expect(!sessions.holdingAwake)
     }
 
@@ -179,6 +184,7 @@ import Testing
         #expect(sessions.agents["Claude Code|one"]?.received == 540_000 && sessions.agents["Claude Code|one"]?.sharedTraffic == true)
         #expect(sessions.agents["Claude Code|two"]?.received == 0)
         sessions.receive(AgentEvent(kind: .done, agent: "claude", session: "one", time: start + 120))
+        sessions.tick(apps: [], interval: 2, now: start + 131)
         #expect(sessions.agents.count == 1 && sessions.history.first?.project == "kilobat")
     }
 
@@ -207,9 +213,9 @@ import Testing
         #expect(sessions.agents["Claude Code"] == nil && sessions.agents["Claude Code|x"]?.state == .waitingForYou)
         sessions.receive(AgentEvent(kind: .failed, agent: "claude", session: "x", message: "server_error", time: start + 90))
         #expect(sessions.history.first?.ended == "Failed: server_error" && sessions.history.first?.state == .failed)
-        // Once hooks report an agent, its traffic alone starts no run.
+        // After the hooked run ends, a later unhooked run can start from traffic.
         sessions.tick(apps: [traffic("process:claude", rate: 500_000)], interval: 2, now: start + 100)
-        #expect(sessions.agents.isEmpty)
+        #expect(sessions.agents["Claude Code"]?.hooks != true && sessions.agents.count == 1)
     }
 
     @Test func eventsRejectOversizeFields() throws {

@@ -24,6 +24,10 @@ public struct FilterPolicy: Sendable {
     /// Threat and tracker blocking and the agent guard; like the kill switch, threats apply in every profile.
     public var protection = ProtectionSettings()
 
+    public var inspectsHostnames: Bool {
+        protection.active || (!unrestricted && (!blockedEntries.isEmpty || connectionRules.contains { !$0.allowed }))
+    }
+
     public init() {}
 
     /// From the extension's vendor configuration (see `FilterController.policy`).
@@ -201,7 +205,7 @@ public struct FilterPolicy: Sendable {
         }
         let keys = [app] + ProcessRuleKey.keys("process:" + flow.process)
         // Explicit rules win over the budget, quotas and paused updaters, so "allow for N minutes" still works.
-        if let rule = keys.lazy.compactMap({ temporary[$0] }).first, rule.expires > now, apply(rule.allowed ? .allow : .block, .temporaryRule(rule)) { return decided! }
+        if let rule = keys.lazy.compactMap({ temporary[$0] }).first(where: { $0.expires > now }), apply(rule.allowed ? .allow : .block, .temporaryRule(rule)) { return decided! }
         if budgetReached, apply(.block, .budget) { return decided! }
         if let key = keys.first(where: quotaReached.contains), apply(.block, .quota(key)) { return decided! }
         if updatersPaused, let helper = UpdaterHelpers.helper(app, process: flow.process) ?? UpdaterHelpers.helper(flow.via),

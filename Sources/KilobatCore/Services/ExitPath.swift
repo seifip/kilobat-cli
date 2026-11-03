@@ -33,6 +33,10 @@ public struct ExitPath: Codable, Sendable, Equatable {
     public var publicAddress: PublicAddress?
     /// macOS's name for the interface's hardware port, such as Wi-Fi or Thunderbolt Ethernet; nil for tunnels.
     public var port: String?
+    /// The default IPv6 route, when one exists.
+    public var ipv6Interface: String?
+    /// False when the route check failed for a reason other than there being no IPv6 route.
+    public var ipv6RouteKnown: Bool?
 
     public init(date: Date = Date(), interface: String?, tunnel: Bool? = nil, connected: [String] = [], publicAddress: PublicAddress? = nil, port: String? = nil) {
         self.date = date; self.interface = interface; self.port = port
@@ -40,7 +44,12 @@ public struct ExitPath: Codable, Sendable, Equatable {
         self.connected = connected; self.publicAddress = publicAddress
     }
 
-    public var vpn: VPN { tunnel ? .full : connected.isEmpty ? .off : .partial }
+    public var vpn: VPN {
+        if tunnel {
+            return ipv6RouteKnown == false || ipv6Interface.map({ !TrafficRoute.tunnelInterface(Substring($0)) }) == true ? .partial : .full
+        }
+        return connected.isEmpty && ipv6Interface.map({ TrafficRoute.tunnelInterface(Substring($0)) }) != true ? .off : .partial
+    }
     /// The VPN's name when macOS lists exactly one connected; with several, which one carries the route isn't known.
     public var vpnName: String? { connected.count == 1 ? connected[0] : nil }
 
@@ -99,10 +108,14 @@ public struct ExitPath: Codable, Sendable, Equatable {
     /// `ports` names the hardware port, which costs a third command.
     public static func read(lookup: Bool = false, ports: Bool = true) async -> (path: ExitPath, services: String) {
         async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3)
+        async let route6 = CommandRunner.run("/sbin/route", ["-n", "get", "-inet6", "default"], timeout: 3)
         async let services = CommandRunner.run("/usr/sbin/scutil", ["--nc", "list"], timeout: 3)
         async let hardware = ports ? CommandRunner.run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 3).output : ""
         let list = await services.output
         var path = ExitPath(interface: DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first, connected: connectedVPNs(list))
+        let ipv6 = await route6
+        path.ipv6Interface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: ipv6.output).first
+        path.ipv6RouteKnown = (path.ipv6Interface != nil || (ipv6.status == 1 && ipv6.output.contains("not in table"))) && KillSwitchPolicy.ipv6Covered()
         if ports, !path.tunnel, let interface = path.interface { path.port = hardwarePorts(await hardware)[interface] }
         if lookup, path.interface != nil { path.publicAddress = try? await publicAddress() }
         return (path, list)

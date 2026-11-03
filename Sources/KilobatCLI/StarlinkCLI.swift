@@ -28,11 +28,14 @@ import KilobatCore
     static func read(hours: Int) async -> Reading {
         var journal = StarlinkJournal.load()
         guard let status = await Starlink.status() else {
-            return Reading(status: nil, history: nil, map: nil, outages: journal.outages.filter { $0.end >= Date().addingTimeInterval(-Double(hours) * 3600) })
+            return Reading(status: nil, history: nil, map: nil, outages: [])
         }
         async let history = Starlink.history()
         async let map = Starlink.obstructionMap()
         let (recent, sky) = await (history, map)
+        let sample = NetworkJournal().samples.last
+        let key = sample.flatMap { Date().timeIntervalSince($0.date) < 60 ? $0.networkKey : nil }
+        journal.select(network: key, dishID: status.id)
         journal.merge((recent?.outages ?? []) + (status.outage.map { [$0] } ?? []))
         let since = Date().addingTimeInterval(-Double(hours) * 3600)
         return Reading(status: status, history: recent, map: sky, outages: journal.outages.filter { $0.end >= since })
@@ -49,7 +52,7 @@ import KilobatCore
         }
         result["outageSeconds"] = ["setup": WiFiCLI.tenths(evidence.setupSeconds), "network": WiFiCLI.tenths(evidence.networkSeconds), "dish": WiFiCLI.tenths(evidence.dishSeconds)]
         guard let status = reading.status else {
-            result["message"] = "No Starlink dish answered at 192.168.100.1. Outages are from the log the Kilobat app keeps."
+            result["message"] = "No Starlink dish answered at 192.168.100.1."
             return result
         }
         result["status"] = [

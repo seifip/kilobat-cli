@@ -16,7 +16,13 @@ public final class TrafficStore {
     public var osExpensive = false
     public var networkKind = String(localized: "Connecting")
     public var ready = false
-    public var error: String?
+    private var actionError: String?
+    private(set) var monitoringError: String?
+    func monitoringFailed(_ message: String) { monitoringError = message }
+    public var error: String? {
+        get { actionError ?? monitoringError }
+        set { actionError = newValue; if newValue == nil { monitoringError = nil } }
+    }
     public var search = ""
     public var filter = "All apps"
     public var selectedApp: String?
@@ -80,6 +86,7 @@ public final class TrafficStore {
     private var lastPreferencesData: Data?
     private var reloading = false
     private var lastMetered: Bool?
+    private(set) var budgetSession: UUID?
     private let directory: URL
 
     /// `recordHistory: false` makes a read-only sampling store: it never records usage or changes preferences.
@@ -89,7 +96,7 @@ public final class TrafficStore {
         try? FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
         preferences = StoredJSON.read(self.directory.appendingPathComponent("preferences.json")) ?? SavedPreferences()
         lastPreferencesData = try? Data(contentsOf: self.directory.appendingPathComponent("preferences.json"))
-        usage = Self.compact(StoredJSON.read(self.directory.appendingPathComponent("usage.json")) ?? [])
+        usage = Self.compact(StoredJSON.read(self.directory.appendingPathComponent("usage.json")) ?? [], packs: preferences.dataPacks ?? [])
         networkSessions = StoredJSON.read(self.directory.appendingPathComponent("network-sessions.json")) ?? [:]
         sleeps = StoredJSON.read(self.directory.appendingPathComponent("sleeps.json")) ?? []
         if startMonitoring {
@@ -228,9 +235,26 @@ public final class TrafficStore {
         preferences.rules[profile, default: [:]][id] = allowed
     }
     public func setTemporary(_ id: String, allowed: Bool, minutes: Int = 15, in profile: NetworkProfile? = nil) {
+        writeTemporary(id, allowed: allowed, minutes: minutes, profile: profile ?? preferences.profile)
+    }
+    private func writeTemporary(_ id: String, allowed: Bool, minutes: Int, profile: NetworkProfile, ownership: UUID? = nil) {
+        let ruleKey = profile.rawValue + "|" + id
         if preferences.temporaryRules == nil { preferences.temporaryRules = [:] }
-        let ruleKey = (profile ?? preferences.profile).rawValue + "|" + id
-        preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60))
+        preferences.temporaryRules?[ruleKey] = TemporaryRule(allowed: allowed, expires: Date().addingTimeInterval(Double(minutes) * 60), ownership: ownership)
+    }
+    struct OwnedTemporary {
+        let id: String
+        let profile: NetworkProfile
+        let ownership: UUID
+    }
+    func holdTemporary(_ id: String, minutes: Int) -> OwnedTemporary {
+        let hold = OwnedTemporary(id: id, profile: preferences.profile, ownership: UUID())
+        writeTemporary(id, allowed: false, minutes: minutes, profile: hold.profile, ownership: hold.ownership)
+        return hold
+    }
+    func clearTemporary(_ hold: OwnedTemporary) {
+        let key = hold.profile.rawValue + "|" + hold.id
+        if preferences.temporaryRules?[key]?.ownership == hold.ownership { preferences.temporaryRules?.removeValue(forKey: key) }
     }
     /// The app's temporary rule in the current profile, while it lasts.
     public func temporaryRule(_ id: String) -> TemporaryRule? {
@@ -251,7 +275,11 @@ public final class TrafficStore {
         return removed
     }
     public func switchNetwork(_ snapshot: DiagnosticSnapshot) {
-        guard networkKey != snapshot.networkKey else { networkName = snapshot.networkName; return }
+        guard networkKey != snapshot.networkKey else {
+            networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified
+            costChanged()
+            return
+        }
         flush()
         if networkKey != "unknown" {
             networkSessions[networkKey] = session
@@ -259,28 +287,31 @@ public final class TrafficStore {
             if preferences.networkLimits == nil { preferences.networkLimits = [:] }
             preferences.networkLimits?[networkKey] = oldLimit
             rememberCycle()
-        } else if recordHistory, usage.last?.networkKey == snapshot.networkKey {
+        } else if recordHistory, snapshot.networkIdentified, usage.last?.networkKey == snapshot.networkKey {
             // After a relaunch the saved budget still describes the network the Mac was last on.
             preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([snapshot.networkKey: preferences.limitGB]) { $1 }
             preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: snapshot.networkKey)
         }
         networkKey = snapshot.networkKey; networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified
-        let saved = networkSessions[networkKey]
+        let saved = networkIdentified ? networkSessions[networkKey] : nil
+        budgetSession = saved?.budgetSession
         received = saved?.received ?? 0; sent = saved?.sent ?? 0; local = saved?.local ?? 0; unattributed = saved?.unattributed ?? 0; tunnel = 0
         apps = []; if readCounters != nil { wifiNames = InterfaceCounters.wifiInterfaces() }
         rebaseline()
         // Both at once, or the copy kept per network would pick up the old cycle under the new key.
         var budget = preferences
-        budget.limitGB = budget.networkLimits?[networkKey] ?? 5; budget.budgetCycle = budget.networkCycles?[networkKey]
+        budget.limitGB = networkIdentified ? budget.networkLimits?[networkKey] ?? 5 : 5
+        budget.budgetCycle = networkIdentified ? budget.networkCycles?[networkKey] : nil
         preferences = budget
-        if let profile = preferences.networkProfiles?[networkKey], let value = NetworkProfile(rawValue: profile) { preferences.profile = value }
+        if networkIdentified, let profile = preferences.networkProfiles?[networkKey], let value = NetworkProfile(rawValue: profile) { preferences.profile = value }
         persist(networkSessions, as: "network-sessions.json")
         costChanged()
     }
     private var session: NetworkSession {
-        NetworkSession(name: networkName, received: received, sent: sent, identified: networkIdentified ? nil : false, local: local, unattributed: unattributed)
+        NetworkSession(name: networkName, received: received, sent: sent, identified: networkIdentified ? nil : false, local: local, unattributed: unattributed, budgetSession: budgetSession)
     }
     public func rememberNetwork() {
+        guard networkIdentified else { return }
         if preferences.networkProfiles == nil { preferences.networkProfiles = [:] }
         if preferences.networkLimits == nil { preferences.networkLimits = [:] }
         let profile = preferences.profile.rawValue, limit = preferences.limitGB
@@ -310,7 +341,7 @@ public final class TrafficStore {
         monitor.start(scope: scope, onSample: { [weak self] snapshot in
             Task { @MainActor in guard let self, self.sampleGeneration == generation else { return }; self.consume(snapshot) }
         }, onError: { [weak self] error in
-            Task { @MainActor in guard let self, self.sampleGeneration == generation else { return }; self.error = error }
+            Task { @MainActor in guard let self, self.sampleGeneration == generation else { return }; self.monitoringFailed(error) }
         })
     }
     public func setAllAllowed(_ allowed: Bool) {
@@ -319,7 +350,8 @@ public final class TrafficStore {
     public func resetSession() {
         flush()
         received = 0; sent = 0; local = 0; unattributed = 0; tunnel = 0
-        networkSessions[networkKey] = NetworkSession(name: networkName, identified: networkIdentified ? nil : false)
+        budgetSession = UUID()
+        networkSessions[networkKey] = session
         persist(networkSessions, as: "network-sessions.json")
         for index in apps.indices { apps[index].received = 0; apps[index].sent = 0; apps[index].local = 0; apps[index].tunnel = 0 }
     }
@@ -349,8 +381,10 @@ public final class TrafficStore {
     @ObservationIgnored private var snapshotObservers: [(TrafficSnapshot) -> Void] = []
     public func observeSnapshots(_ observer: @escaping (TrafficSnapshot) -> Void) { snapshotObservers.append(observer) }
     public func consume(_ snapshot: TrafficSnapshot) {
+        monitoringError = nil
         let generation = sampleGeneration
         reloadPreferences()
+        if metered != lastMetered { costChanged() }
         guard generation == sampleGeneration else { return }
         for observer in snapshotObservers { observer(snapshot) }
         let counters = readCounters?()
@@ -405,7 +439,8 @@ public final class TrafficStore {
             // and the live rates, but adds nothing to the Internet total or history a second time.
             let carrier = ProxyRouting.shared.isCarrier(process.pid)
             if carrier { index[id]?.carrier = true }
-            all += flow.total; local += flow.local; physicalLocal += flow.physicalLocal; tunnel += flow.tunnel
+            if !carrier { all += flow.total; local += flow.local; tunnel += flow.tunnel }
+            physicalLocal += flow.physicalLocal
             if !carrier { internet += flow.internet }
             // History counts helpers and services under the app that owns them, as the app list does; local bytes apart.
             let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
@@ -442,7 +477,8 @@ public final class TrafficStore {
         guard let counters else {
             // A missed reading is caught up by the next one; only several in a row mean the counters are gone.
             counterFailures += 1
-            if counterFailures == 5 { interfaces.reset() }
+            if counterFailures < 5 { localCarry += physicalLocal }
+            if counterFailures == 5 { interfaces.reset(); localCarry = ByteCount() }
             if counterFailures < 5 { pendingAttributed += attributed.total }
             return counterFailures < 5 ? ByteCount() : attributed
         }
@@ -464,15 +500,17 @@ public final class TrafficStore {
     public var unattributedBytes: UInt64 { unattributed + pendingUnattributed }
     /// Internet bytes on this network not saved to history yet.
     var pendingBytes: UInt64 { pendingReceived + pendingSent }
-    public func flush() {
+    public func flush() { flush(at: Date()) }
+
+    func flush(at date: Date) {
         guard recordHistory, pendingReceived + pendingSent + pendingLocal > 0 else { return }
         let gap = pendingUnattributed
         unattributed += gap
-        usage.append(UsageEntry(date: Date(), received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent,
+        usage.append(UsageEntry(date: date, received: pendingReceived, sent: pendingSent, apps: pendingApps, networkKey: networkKey, appsSent: pendingAppsSent,
                                 localBytes: pendingLocal, appsLocal: pendingAppsLocal.isEmpty ? nil : pendingAppsLocal, unattributed: countsInterfaces ? gap : nil,
                                 metered: metered ? true : nil))
         let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
-        usage = Self.compact(usage.filter { $0.date >= cutoff })
+        usage = Self.compact(usage.filter { $0.date >= cutoff }, packs: dataPacks)
         persist(usage, as: "usage.json")
         networkSessions[networkKey] = session
         persist(networkSessions, as: "network-sessions.json")
@@ -496,11 +534,18 @@ public final class TrafficStore {
     public func shutdown() { flush(); monitor.stop() }
     /// Samples older than a day merge into hourly buckets per network, and older than 30 days into daily ones,
     /// so a year of history stays small enough to rewrite on every flush. Entries keep the same shape for existing readers.
-    static func compact(_ usage: [UsageEntry], now: Date = Date(), calendar: Calendar = .current) -> [UsageEntry] {
+    static func compact(_ usage: [UsageEntry], now: Date = Date(), calendar: Calendar = .current, packs: [DataPack] = []) -> [UsageEntry] {
         let recent = now.addingTimeInterval(-86_400), old = now.addingTimeInterval(-30 * 86_400)
         var buckets: [String: [UsageEntry]] = [:]
         var kept: [UsageEntry] = []
-        func bucket(_ date: Date) -> Date? { calendar.dateInterval(of: date < old ? .day : .hour, for: date)?.start }
+        // Keep pack accounting boundaries when folding hour and day rows.
+        let boundaries = Set(packs.flatMap { pack in
+            [pack.countsFrom(calendar: calendar), pack.finish] + (pack.correction.map { [$0.after] } ?? [])
+        }).sorted()
+        func bucket(_ date: Date) -> Date? {
+            guard let start = calendar.dateInterval(of: date < old ? .day : .hour, for: date)?.start else { return nil }
+            return boundaries.last { start < $0 && $0 <= date } ?? start
+        }
         // Fields history from before 1.3 lacks stay missing rather than turning into zeros.
         func sum(_ values: [UInt64?]) -> UInt64? { values.contains { $0 != nil } ? values.reduce(0) { $0 + ($1 ?? 0) } : nil }
         for entry in usage {

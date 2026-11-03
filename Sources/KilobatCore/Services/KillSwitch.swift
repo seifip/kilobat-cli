@@ -80,8 +80,6 @@ public struct KillSwitchPolicy: Sendable, Equatable {
         if let name = names.first(where: { Self.vpnApp($0, configured: vpnApps) }) { return .vpnApp(name) }
         if Self.vpnProcesses.contains(flow.process) { return .vpnApp(flow.process) }
         if let name = names.first(where: Self.appleNetworking), appleSigned() { return .appleNetworking(name) }
-        // DHCP keeps the Mac on the Wi-Fi so the VPN has something to connect over.
-        if flow.port == "67" || flow.port == "68" { return .localNetwork }
         if allowLAN, Self.isLocal(host: flow.host, address: flow.address) { return .localNetwork }
         return nil
     }
@@ -143,6 +141,102 @@ public struct KillSwitchPolicy: Sendable, Equatable {
             if !id.hasPrefix("com.apple."), !apps.contains(String(id)) { apps.append(String(id)) }
         }
         return apps
+    }
+
+    /// An up interface is insufficient if the tunnel's routes disappeared. A tunnel can carry IPv4
+    /// with one default route or with both halves of the address space overriding a physical default.
+    public static func ipv4Covered(tunnel: String) -> Bool {
+        let tunnelIndex = if_nametoindex(tunnel)
+        guard tunnelIndex != 0 else { return false }
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP2, 0]
+        let count = UInt32(mib.count)
+        var size = 0
+        guard sysctl(&mib, count, nil, &size, nil, 0) == 0, size > 0 else { return false }
+        var table = Data(count: size)
+        guard table.withUnsafeMutableBytes({ sysctl(&mib, count, $0.baseAddress, &size, nil, 0) }) == 0 else { return false }
+        return table.withUnsafeBytes { bytes in
+            var offset = 0
+            var routes: [(destination: UInt32, mask: UInt32, interface: UInt32)] = []
+            let headerSize = MemoryLayout<rt_msghdr2>.size
+            while offset + headerSize <= size {
+                let header = bytes.loadUnaligned(fromByteOffset: offset, as: rt_msghdr2.self)
+                let end = offset + Int(header.rtm_msglen)
+                var cursor = offset + headerSize
+                guard end > cursor, end <= size else { return false }
+                offset = end
+                guard header.rtm_flags & (RTF_UP | RTF_IFSCOPE | RTF_REJECT | RTF_BLACKHOLE) == RTF_UP,
+                      header.rtm_addrs & RTA_DST != 0 else { continue }
+                var destination: UInt32?, mask: UInt32?
+                for field in 0..<Int(RTAX_MAX) where header.rtm_addrs & (1 << field) != 0 {
+                    guard cursor + 2 <= end else { return false }
+                    let length = Int(bytes[cursor])
+                    guard cursor + length <= end else { return false }
+                    if field == Int(RTAX_DST), length >= 8, bytes[cursor + 1] == UInt8(AF_INET) {
+                        destination = bytes.loadUnaligned(fromByteOffset: cursor + 4, as: UInt32.self).bigEndian
+                    }
+                    if field == Int(RTAX_NETMASK) {
+                        var value: UInt32 = 0
+                        for i in 0..<4 {
+                            value <<= 8
+                            if 4 + i < length { value |= UInt32(bytes[cursor + 4 + i]) }
+                        }
+                        mask = value
+                    }
+                    cursor += max(4, (length + 3) & ~3)
+                }
+                if let destination, let mask {
+                    routes.append((destination, mask, UInt32(header.rtm_index)))
+                }
+            }
+            return offset == size && ipv4Covered(routes: routes, tunnel: tunnelIndex)
+        }
+    }
+
+    static func ipv4Covered(routes: [(destination: UInt32, mask: UInt32, interface: UInt32)], tunnel: UInt32) -> Bool {
+        let half: UInt32 = 0x8000_0000
+        let defaults = routes.filter { $0.destination == 0 && $0.mask == 0 }
+        return [UInt32(0), half].allSatisfy { destination in
+            let halves = routes.filter { $0.destination == destination && $0.mask == half }
+            let covering = halves.isEmpty ? defaults : halves
+            return !covering.isEmpty && covering.allSatisfy { $0.interface == tunnel }
+        }
+    }
+
+    /// Fail closed if the kernel has an unscoped IPv6 default outside a tunnel, or if
+    /// the route table cannot be read. An interface may stay up while its routes change.
+    public static func ipv6Covered() -> Bool {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET6, NET_RT_DUMP2, 0]
+        let mibCount = UInt32(mib.count)
+        var size = 0
+        guard sysctl(&mib, mibCount, nil, &size, nil, 0) == 0 else { return false }
+        if size == 0 { return true }
+        var table = Data(count: size)
+        guard table.withUnsafeMutableBytes({ sysctl(&mib, mibCount, $0.baseAddress, &size, nil, 0) }) == 0 else { return false }
+        return table.withUnsafeBytes { bytes in
+            var offset = 0
+            let headerSize = MemoryLayout<rt_msghdr2>.size
+            while offset + headerSize <= size {
+                let header = bytes.loadUnaligned(fromByteOffset: offset, as: rt_msghdr2.self)
+                let end = offset + Int(header.rtm_msglen)
+                let destination = offset + headerSize
+                guard end > destination, end <= size else { return false }
+                if header.rtm_flags & (RTF_UP | RTF_IFSCOPE) == RTF_UP,
+                   header.rtm_addrs & RTA_DST != 0,
+                   destination + MemoryLayout<sockaddr_in6>.size <= end,
+                   bytes[destination + 1] == UInt8(AF_INET6) {
+                    let address = bytes.loadUnaligned(fromByteOffset: destination, as: sockaddr_in6.self)
+                    var ip = address.sin6_addr
+                    if withUnsafeBytes(of: &ip, { $0.allSatisfy { $0 == 0 } }) {
+                        var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+                        guard if_indextoname(UInt32(header.rtm_index), &name) != nil else { return false }
+                        let interface = String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                        if !["utun", "ipsec", "ppp", "tun", "tap"].contains(where: interface.hasPrefix) { return false }
+                    }
+                }
+                offset = end
+            }
+            return offset == size
+        }
     }
 
     /// Whether an interface exists and is up, from the kernel's interface list.

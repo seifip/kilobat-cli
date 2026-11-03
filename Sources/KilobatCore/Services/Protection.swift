@@ -446,6 +446,8 @@ public enum FlowSniffer {
         case address
         /// The hello isn't complete yet: wait for this many bytes in all.
         case needMore(Int)
+        /// A recognized header cannot fit in the bounded inspection buffer.
+        case tooLarge
         /// Neither TLS nor HTTP.
         case unknown
     }
@@ -458,16 +460,36 @@ public enum FlowSniffer {
     }
 
     static func tls(_ bytes: [UInt8]) -> Result {
-        guard bytes.count >= 5 else { return .needMore(5) }
-        guard bytes[1] == 3 else { return .unknown }
-        let record = Int(bytes[3]) << 8 | Int(bytes[4])
-        let total = 5 + record
-        guard total <= maximum else { return .unknown }
-        guard bytes.count >= total else { return .needMore(total) }
-        var index = 5
+        var offset = 0
+        var handshake: [UInt8] = []
+        var length: Int?
+        while true {
+            let body = offset + 5
+            guard body <= maximum else { return .tooLarge }
+            guard bytes.count >= body else { return .needMore(body) }
+            guard bytes[offset] == 0x16, bytes[offset + 1] == 3 else { return .unknown }
+            let recordLength = Int(bytes[offset + 3]) << 8 | Int(bytes[offset + 4])
+            let end = body + recordLength
+            guard recordLength > 0 else { return .unknown }
+            guard end <= maximum else { return .tooLarge }
+            guard bytes.count >= end else { return .needMore(end) }
+            handshake.append(contentsOf: bytes[body..<end])
+            if length == nil, handshake.count >= 4 {
+                guard handshake[0] == 1 else { return .unknown }
+                let size = Int(handshake[1]) << 16 | Int(handshake[2]) << 8 | Int(handshake[3])
+                guard size > 0 else { return .unknown }
+                guard size + 9 <= maximum else { return .tooLarge }
+                length = size + 4
+            }
+            if let length, handshake.count >= length { return clientHello(handshake, end: length) }
+            offset = end
+        }
+    }
+
+    private static func clientHello(_ bytes: [UInt8], end total: Int) -> Result {
+        var index = 4
         func byte() -> Int? { guard index < total else { return nil }; defer { index += 1 }; return Int(bytes[index]) }
         func short() -> Int? { guard let a = byte(), let b = byte() else { return nil }; return a << 8 | b }
-        guard byte() == 1, let a = byte(), let b = byte(), let c = byte(), (a << 16 | b << 8 | c) > 0 else { return .unknown }
         index += 2 + 32                                            // version, random
         guard let session = byte() else { return .unknown }; index += session
         guard let suites = short() else { return .unknown }; index += suites
@@ -501,8 +523,10 @@ public enum FlowSniffer {
     static func http(_ bytes: [UInt8]) -> Result {
         let head = String(decoding: bytes.prefix(8_192), as: UTF8.self)
         guard methods.contains(where: { head.hasPrefix($0) || $0.hasPrefix(head) }) else { return .unknown }
-        for line in head.components(separatedBy: "\r\n").dropFirst() {
-            if line.isEmpty { return .address }
+        guard let end = head.range(of: "\r\n\r\n") else {
+            return bytes.count >= 8_192 ? .tooLarge : .needMore(min(8_192, bytes.count + 1_024))
+        }
+        for line in head[..<end.lowerBound].components(separatedBy: "\r\n").dropFirst() {
             guard line.lowercased().hasPrefix("host:") else { continue }
             var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("[") { value = String(value.dropFirst().prefix { $0 != "]" }) }
@@ -510,7 +534,7 @@ public enum FlowSniffer {
             guard let host = HostName.normalize(value) else { return .unknown }
             return HostName.isAddress(host) ? .address : .name(host)
         }
-        return bytes.count >= 8_192 ? .unknown : .needMore(min(8_192, bytes.count + 1_024))
+        return .address
     }
 }
 

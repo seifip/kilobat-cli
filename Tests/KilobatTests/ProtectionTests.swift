@@ -296,6 +296,21 @@ struct FlowSnifferTests {
         #expect(FlowSniffer.sniff(Array(hello.prefix(40))) == .needMore(hello.count))
     }
 
+    @Test func readsTheSameServerNameAcrossTLSRecords() {
+        let hello = Self.clientHello("malware.example")
+        let handshake = Array(hello.dropFirst(5))
+        func record(_ bytes: ArraySlice<UInt8>) -> [UInt8] {
+            [0x16, 3, 1, UInt8(bytes.count >> 8), UInt8(bytes.count & 255)] + bytes
+        }
+        for split in 1..<handshake.count {
+            let first = record(handshake.prefix(split))
+            let second = record(handshake.dropFirst(split))
+            #expect(FlowSniffer.sniff(first) == .needMore(first.count + 5))
+            #expect(FlowSniffer.sniff(first + second) == .name("malware.example"))
+        }
+        #expect(FlowSniffer.sniff([0x16, 3, 1, 0xff, 0xff]) == .tooLarge)
+    }
+
     @Test func readsTheHostHeader() {
         #expect(FlowSniffer.sniff(Array("GET / HTTP/1.1\r\nHost: Tracker.Example:8080\r\nAccept: */*\r\n\r\n".utf8)) == .name("tracker.example"))
         #expect(FlowSniffer.sniff(Array("POST /x HTTP/1.1\r\nHost: 203.0.113.9\r\n\r\n".utf8)) == .address)

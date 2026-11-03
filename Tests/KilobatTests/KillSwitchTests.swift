@@ -68,8 +68,8 @@ struct KillSwitchPolicyTests {
         #expect(filter(blockLAN).decide(lan, now: now).reason == .killSwitch)
         // Allowed past the kill switch, the app's own rule still applies.
         #expect(filter(down, allow: ["com.apple.Safari": false]).decide(lan, now: now).verdict == .block)
-        // DHCP keeps the Mac on the network either way.
-        #expect(filter(blockLAN).decide(flow(nil, address: "255.255.255.255", port: "67"), now: now).verdict == .allow)
+        // A port number alone cannot prove the flow is DHCP.
+        #expect(filter(blockLAN).decide(flow(nil, address: "255.255.255.255", port: "67"), now: now).verdict == .block)
         for address in ["10.0.0.1", "172.20.1.1", "192.168.0.10", "169.254.3.4", "224.0.0.251", "fe80::1", "fd00::5", "ff02::fb"] {
             #expect(KillSwitchPolicy.isLocal(host: nil, address: address), "\(address)")
         }
@@ -200,4 +200,15 @@ struct KillSwitchStateTests {
         let reloaded = TrafficStore(directory: directory, startMonitoring: false).preferences
         #expect(KillSwitchState.enabled(reloaded) && !KillSwitchState.allowLAN(reloaded) && reloaded.killSwitchAllowedUntil == now)
     }
+}
+
+
+@Test func ipv4KillSwitchRequiresBothHalvesOnItsTunnel() {
+    let defaultPhysical: (UInt32, UInt32, UInt32) = (0, 0, 4)
+    let lower: (UInt32, UInt32, UInt32) = (0, 0x8000_0000, 7)
+    let upper: (UInt32, UInt32, UInt32) = (0x8000_0000, 0x8000_0000, 7)
+    #expect(!KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical], tunnel: 7))
+    #expect(!KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical, lower], tunnel: 7))
+    #expect(KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical, lower, upper], tunnel: 7))
+    #expect(KillSwitchPolicy.ipv4Covered(routes: [(0, 0, 7)], tunnel: 7))
 }

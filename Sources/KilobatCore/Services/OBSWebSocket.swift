@@ -220,16 +220,26 @@ final class WebSocketLink: @unchecked Sendable {
         connection = NWConnection(to: .url(url), using: parameters)
     }
 
+    private func operation<Value: Sendable>(_ begin: (SocketCompletion<Value>) -> Void) async throws -> Value {
+        let completion = SocketCompletion<Value>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if completion.install(continuation) { begin(completion) }
+            }
+        } onCancel: { [self] in
+            completion.finish(.failure(CancellationError()))
+            close()
+        }
+    }
+
     /// Waits for the handshake; a refused port fails at once instead of waiting for the network to change.
     func open() async throws {
-        let once = Once()
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { [connection] state in
+        try await operation { (completion: SocketCompletion<Void>) in
+            connection.stateUpdateHandler = { state in
                 switch state {
-                case .ready: if once.claim() { continuation.resume() }
-                case .failed(let error), .waiting(let error):
-                    if once.claim() { connection.cancel(); continuation.resume(throwing: error) }
-                case .cancelled: if once.claim() { continuation.resume(throwing: Closed(code: nil)) }
+                case .ready: completion.finish(.success(()))
+                case .failed(let error), .waiting(let error): completion.finish(.failure(error))
+                case .cancelled: completion.finish(.failure(Closed(code: nil)))
                 default: break
                 }
             }
@@ -240,22 +250,22 @@ final class WebSocketLink: @unchecked Sendable {
     func send(_ data: Data) async throws {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "text", metadata: [metadata])
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        try await operation { (completion: SocketCompletion<Void>) in
             connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                if let error { completion.finish(.failure(error)) } else { completion.finish(.success(())) }
             })
         }
     }
 
     /// The next text or binary message. Throws `Closed` with the close code when the other side hangs up.
     func receive() async throws -> Data {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+        try await operation { (completion: SocketCompletion<Data>) in
             connection.receiveMessage { content, context, _, error in
                 let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata
-                if let metadata, metadata.opcode == .close { continuation.resume(throwing: Closed(code: Self.code(metadata.closeCode))); return }
-                if let error { continuation.resume(throwing: error); return }
-                guard let content else { continuation.resume(throwing: Closed(code: nil)); return }
-                continuation.resume(returning: content)
+                if let metadata, metadata.opcode == .close { completion.finish(.failure(Closed(code: Self.code(metadata.closeCode)))); return }
+                if let error { completion.finish(.failure(error)); return }
+                guard let content else { completion.finish(.failure(Closed(code: nil))); return }
+                completion.finish(.success(content))
             }
         }
     }
@@ -271,11 +281,6 @@ final class WebSocketLink: @unchecked Sendable {
         }
     }
 
-    private final class Once: @unchecked Sendable {
-        private let lock = NSLock()
-        private var done = false
-        func claim() -> Bool { lock.withLock { defer { done = true }; return !done } }
-    }
 }
 
 /// A connection to OBS's WebSocket server on this Mac: the handshake, requests by ID, and StreamStateChanged.
@@ -302,7 +307,7 @@ public actor OBSClient {
 
     /// Connects and identifies. Throws an `OBSError` that says what to fix.
     public func connect(timeout: Duration = .seconds(4)) async throws {
-        guard !connected else { return }
+        guard self.link == nil else { return }
         let link = WebSocketLink(url: URL(string: "ws://127.0.0.1:\(port)")!)
         self.link = link
         do {
@@ -311,7 +316,8 @@ public actor OBSClient {
                 try await self.handshake(link)
             }
         } catch {
-            link.close(); self.link = nil
+            link.close()
+            if self.link === link { self.link = nil }
             if let closed = error as? WebSocketLink.Closed {
                 if closed.code == OBSProtocol.authenticationFailed { throw OBSError(.wrongPassword) }
                 if closed.code == OBSProtocol.unsupportedRPCVersion { throw OBSError(.unsupported) }
@@ -321,6 +327,7 @@ public actor OBSClient {
             if error is CancellationError { throw OBSError(.timeout) }
             throw OBSError(.notRunning)
         }
+        guard self.link === link, !Task.isCancelled else { link.close(); throw OBSError(.closed) }
         connected = true
         reader = Task { await self.read(link) }
     }
@@ -349,7 +356,7 @@ public actor OBSClient {
             default: continue
             }
         }
-        closeDown()
+        if self.link === link { closeDown() }
     }
 
     private func closeDown() {

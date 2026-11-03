@@ -248,7 +248,7 @@ import KilobatCore
             let since = Date().addingTimeInterval(-Double(days ?? (kind == "health" ? 1 : 30)) * 86400)
             let journal = NetworkJournal()
             switch kind {
-            case "outages": return .json(try DiagnosticsCLI.encode(journal.events.filter { $0.start >= since }))
+            case "outages": return .json(try DiagnosticsCLI.encode(journal.events.filter { $0.start >= since }.map(\.withoutNetworkKey)))
             case "speed_tests": return .json(try DiagnosticsCLI.encode(journal.speedTests.filter { $0.result.date >= since }))
             case "health": return .json(try JSONSerialization.data(withJSONObject: WiFiCLI.healthRows(hours: (days ?? 1) * 24), options: [.sortedKeys, .withoutEscapingSlashes]))
             default: throw MCPToolError("kind must be outages, speed_tests or health.")

@@ -19,7 +19,17 @@ import Observation
     public private(set) var reports: [RemoteSessionReport] = []
     public private(set) var live: [Live] = []
     public var enabled = UserDefaults.standard.object(forKey: "remoteSessionReports") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(enabled, forKey: "remoteSessionReports"); if !enabled { Task { await endAll(report: false) } } }
+        didSet {
+            guard enabled != oldValue else { return }
+            UserDefaults.standard.set(enabled, forKey: "remoteSessionReports")
+            generation = UUID()
+            if !enabled {
+                let ending = tracked
+                Task { for tracker in ending where tracked.contains(where: { $0 === tracker }) {
+                    await finish(tracker, end: Date(), diagnostics: nil, report: false)
+                } }
+            }
+        }
     }
     /// Notify after a session that lagged or froze; clean ones only get their row.
     public var notify = UserDefaults.standard.object(forKey: "remoteSessionNotices") as? Bool ?? true {
@@ -38,7 +48,8 @@ import Observation
     /// Processes that went quiet and ended a session, with the processes carrying their traffic; one starts again only with new input.
     @ObservationIgnored private var idle: [Int32: Set<Int32>] = [:]
     /// Processes whose connection couldn't be found, with the attempts so far.
-    @ObservationIgnored private var unresolved: [Int32: Int] = [:]
+    @ObservationIgnored private var unresolved: [Int32: (start: UInt64?, failures: Int, retry: Date)] = [:]
+    @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var scanning = false
 
     /// A terminal session ends after this long without a keystroke, a viewer after less; the report stops at the last input.
@@ -94,7 +105,9 @@ import Observation
 
     /// Finds new sessions: one measured at a time for each kind.
     private func scan(traffic: TrafficStore, diagnostics: DiagnosticStore, rates: [Int32: ProcessRate], front: NSRunningApplication?, now: Date) async {
+        let generation = self.generation
         let processes = await Task.detached(priority: .utility) { RemoteSessionDetector.terminalProcesses() }.value
+        guard enabled, self.generation == generation else { return }
         let alive = Set(processes.map(\.pid))
         unresolved = unresolved.filter { alive.contains($0.key) }
         idle = idle.filter { pid, carriers in
@@ -113,8 +126,18 @@ import Observation
                 guard RemoteSessionDetector.classify(ssh: process) == .interactive else { continue }
                 kind = .ssh
             }
-            guard !tracked.contains(where: { $0.kind == kind }), (unresolved[process.pid] ?? 0) < 3 else { continue }
-            guard let (carrier, peer) = await connection(kind: kind, process: process, among: processes) else { unresolved[process.pid, default: 0] += 1; continue }
+            guard !tracked.contains(where: { $0.kind == kind }) else { continue }
+            let start = CallMode.startTime(process.pid)
+            let previous = unresolved[process.pid].flatMap { $0.start == start ? $0 : nil }
+            if let previous, previous.retry > now { continue }
+            let connection = await connection(kind: kind, process: process, among: processes)
+            guard enabled, self.generation == generation else { return }
+            guard let (carrier, peer) = connection else {
+                let failures = min((previous?.failures ?? 0) + 1, 4)
+                unresolved[process.pid] = (start, failures, now.addingTimeInterval(min(60, 5 * pow(2, Double(failures - 1)))))
+                continue
+            }
+            unresolved[process.pid] = nil
             let typed = kind == .ssh ? RemoteSessionDetector.destination(ssh: process.args) : RemoteSessionDetector.mosh(process.args).host
             await begin(Tracker(kind: kind, pid: process.pid, carriers: [carrier], socket: carrier, app: process.app, host: typed ?? peer.address, peer: peer,
                                 start: now, starlink: starlink, peers: peers), diagnostics: diagnostics)
@@ -128,6 +151,7 @@ import Observation
             guard pids.reduce(0, { $0 + (rates[$1]?.down ?? 0) }) >= Self.viewerLoad else { continue }
             var sockets: [RemoteSessionDetector.Socket] = []
             for each in pids.prefix(4) { sockets += await RemoteSessionDetector.sockets(pid: each) }
+            guard enabled, self.generation == generation else { return }
             guard let peer = RemoteSessionDetector.peer(kind, sockets: sockets) else { continue }
             await begin(Tracker(kind: kind, pid: pid, carriers: pids, socket: peer.pid, app: app.bundleIdentifier, host: peer.address, peer: peer,
                                 start: now, starlink: starlink, peers: peers), diagnostics: diagnostics)
@@ -153,6 +177,9 @@ import Observation
         tracked.append(tracker)
         live = tracked.map { Live(kind: $0.kind, host: $0.host, start: $0.start) }
         await tracker.begin(diagnostics: diagnostics)
+        if !tracked.contains(where: { $0 === tracker }) {
+            _ = await tracker.finish(report: false, end: Date(), diagnostics: nil)
+        }
     }
 
     private func finish(_ tracker: Tracker, end: Date, diagnostics: DiagnosticStore?, report: Bool) async {
@@ -162,7 +189,7 @@ import Observation
         let worth = report && RemoteSessionDetector.counts(tracker.kind, start: tracker.start, end: end, seconds: tracker.seconds)
         var samples = await tracker.finish(report: worth, end: end, diagnostics: diagnostics)
         guard worth, !samples.line.internet.isEmpty || !samples.remote.isEmpty else { return }
-        let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        let network = tracker.reportNetwork
         func analyse() -> RemoteSessionReport {
             RemoteAnalysis.report(kind: tracker.kind, host: tracker.host, address: tracker.peer.address, port: tracker.peer.port,
                                   start: tracker.start, end: end, network: network, samples: samples)
@@ -186,7 +213,11 @@ import Observation
     }
 
     /// Ends every session and writes what was measured; the app calls this when it quits.
-    public func stop() async { await endAll(report: true) }
+    public func stop() async {
+        generation = UUID()
+        loop?.cancel(); loop = nil
+        await endAll(report: true)
+    }
 }
 
 /// One session being measured.
@@ -201,6 +232,8 @@ import Observation
     let peer: RemoteSessionDetector.Socket
     let start: Date
     private let sampler: LineSampler
+    var reportNetwork: (String, String)? { sampler.reportNetwork }
+    private var finished = false
     private var remote: PingStream?
     private(set) var seconds: [RemoteSessionDetector.Second] = []
     private var connection: [CallSamples.Ping] = []
@@ -216,6 +249,7 @@ import Observation
 
     func begin(diagnostics: DiagnosticStore) async {
         await sampler.begin(diagnostics: diagnostics)
+        guard !finished else { return }
         // ICMP to the host; ping6 has no per-reply timeout, so an IPv6 host is measured by its TCP round trip instead.
         if !peer.address.contains(":") { remote = PingStream(target: peer.address, start: start); await remote?.start() }
     }
@@ -260,6 +294,7 @@ import Observation
     }
 
     func finish(report: Bool, end: Date, diagnostics: DiagnosticStore?) async -> RemoteSamples {
+        finished = true
         var samples = RemoteSamples()
         samples.line = await sampler.finish(report: report, end: end, diagnostics: diagnostics)
         samples.remote = await remote?.stop() ?? []

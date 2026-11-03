@@ -400,6 +400,8 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
         return removed
     }
 
+    @ObservationIgnored private var indexedKnownHosts: Set<String>?
+
     /// Downloads what's due and rebuilds the index when a list changed, the lists in use changed, or the known hosts did.
     public func refresh(_ lists: [ProtectionList], known: [String], force: Bool = false) async {
         guard !updating, !lists.isEmpty else { return }
@@ -409,10 +411,13 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
         let next = await Task.detached(priority: .utility) { await updater.update(lists, force: force) }.value
         let ids = Set(lists.map(\.id))
         let built = index.map { Set($0.slots.map(\.id)).subtracting(["agent-known"]) }
-        let knownCount = index?.slots.first { $0.id == "agent-known" }?.entries ?? 0
+        let canonical = Set(known.compactMap(HostName.normalize))
         let changed = index == nil || built != ids || lists.contains { next.lists[$0.id]?.updated != before.lists[$0.id]?.updated }
-            || Set(known.compactMap(HostName.normalize)).count != knownCount
-        if changed { index = await Task.detached(priority: .utility) { updater.build(lists, known: known) }.value ?? index }
+            || canonical != indexedKnownHosts
+        if changed, let rebuilt = await Task.detached(priority: .utility, operation: { updater.build(lists, known: known) }).value {
+            index = rebuilt
+            indexedKnownHosts = canonical
+        }
         state = updater.loadState()
         updating = false
     }

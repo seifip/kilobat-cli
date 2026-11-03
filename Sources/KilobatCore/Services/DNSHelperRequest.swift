@@ -18,7 +18,10 @@ public struct DNSHelperRequest: Codable, Equatable, Sendable {
     public var service: String
     /// Empty puts automatic DNS back.
     public var servers: [String]
-    public init(service: String, servers: [String]) { self.service = service; self.servers = servers }
+    public var expectedServers: [String]?
+    public init(service: String, servers: [String], expectedServers: [String]? = nil) {
+        self.service = service; self.servers = servers; self.expectedServers = expectedServers
+    }
 
     /// networksetup's arguments, or nil unless the service exists and every server is an IP address (at most four).
     public func arguments(services: [String]) -> [String]? {
@@ -35,6 +38,12 @@ public struct DNSHelperRequest: Codable, Equatable, Sendable {
     }
 
     /// `networksetup -getdnsservers <service>`: the addresses, or none when DNS is automatic ("There aren't any…").
+    public static func verifiedServers(_ output: String) -> [String]? {
+        if output.hasPrefix("There aren't any DNS Servers set on ") { return [] }
+        let parsed = servers(output)
+        return parsed.isEmpty ? nil : parsed
+    }
+
     public static func servers(_ output: String) -> [String] {
         output.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter(DNSAddress.valid)
     }

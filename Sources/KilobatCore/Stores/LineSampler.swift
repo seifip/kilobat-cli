@@ -7,7 +7,15 @@ import Foundation
 @MainActor final class LineSampler {
     private(set) var samples = CallSamples()
     let start: Date
+    private let consumer = UUID()
     private var networkKey: String?
+    private var networkName: String?
+    private var mixedNetworks = false
+    private var finished = false
+    var reportNetwork: (String, String)? {
+        guard !mixedNetworks, let networkKey, networkKey != "unknown", let networkName else { return nil }
+        return (networkKey, networkName)
+    }
     private var internet: PingStream?
     private var router: PingStream?
     private var ticks: MacLoad.Ticks?
@@ -29,12 +37,15 @@ import Foundation
     }
 
     func begin(diagnostics: DiagnosticStore) async {
+        guard !finished else { return }
         networkKey = diagnostics.snapshot?.networkKey
+        networkName = diagnostics.snapshot?.networkName
         internet = PingStream(target: "internet", start: start); router = PingStream(target: "router", start: start)
         await internet?.start(); await router?.start()
+        guard !finished else { return }
         // A connected router is read every 10 s while the call lasts.
         homeUsage = diagnostics.homeUsage
-        homeUsage?.need(.call, true)
+        homeUsage?.need(.call, true, consumer: consumer)
         if let snapshot = diagnostics.snapshot, let gateway = snapshot.gateway {
             let key = snapshot.networkKey
             Task { if let control = await CallStore.routerCounters(network: key, gateway: gateway) { self.routerControl = control; self.samples.household = [] } }
@@ -43,6 +54,9 @@ import Foundation
 
     /// One second of the line. `own` picks out the traffic that is the call's or session's own, so it is never blamed.
     func record(traffic: TrafficStore, diagnostics: DiagnosticStore, own: (AppTraffic) -> Bool, now: Date) {
+        guard !finished else { return }
+        if diagnostics.snapshot?.networkKey != networkKey || (traffic.networkKey != "unknown" && traffic.networkKey != networkKey) { mixedNetworks = true }
+        guard !mixedNetworks else { return }
         let at = now.timeIntervalSince(start)
         let others = traffic.apps.filter { !$0.carrier && !own($0) }
         if let top = others.max(by: { $0.rate < $1.rate }), top.rate > 0 {
@@ -55,7 +69,7 @@ import Foundation
         }
         if samples.loggedOut == nil, case .loggedOut(let since) = diagnostics.portal.status { samples.loggedOut = max(0, since.timeIntervalSince(start)) }
         if let starlink, let status = starlink.status, status.date != lastDish, starlink.present {
-            starlink.watching = true; lastDish = status.date
+            starlink.watch(for: consumer, active: true); lastDish = status.date
             if let sample = CallSamples.Dish(status: status, start: start) { samples.dish.append(sample) }
         }
         if now.timeIntervalSince(lastLoad) >= 5 {
@@ -119,13 +133,20 @@ import Foundation
 
     /// Stops the pings. For a report it also reads the dish's outage log and the devices that joined around it.
     func finish(report: Bool, end: Date, diagnostics: DiagnosticStore?) async -> CallSamples {
+        finished = true
+        if let diagnostics, diagnostics.snapshot?.networkKey != networkKey { mixedNetworks = true }
+        let internet = self.internet, router = self.router
+        self.internet = nil; self.router = nil
+        homeUsage?.need(.call, false, consumer: consumer)
+        starlink?.watch(for: consumer, active: false); lastDish = nil
         samples.internet = await internet?.stop() ?? []; samples.router = await router?.stop() ?? []
-        internet = nil; router = nil
-        homeUsage?.need(.call, false)
-        starlink?.watching = false; lastDish = nil
+        guard !mixedNetworks else { return CallSamples() }
         guard report else { return samples }
         // The dish's own log has each outage to the second, with its cause.
-        if starlink?.present == true, let history = await Starlink.history() { samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: start) } }
+        if starlink?.present == true, diagnostics?.snapshot?.networkKey == networkKey, let history = await Starlink.history() {
+            if diagnostics?.snapshot?.networkKey != networkKey { mixedNetworks = true; return CallSamples() }
+            samples.dish += history.outages.compactMap { CallSamples.Dish(outage: $0, start: start) }
+        }
         // Devices that joined around it, so a freeze the router blames on another device can name it.
         if let key = networkKey, diagnostics?.snapshot?.networkKey == key,
            let devices = diagnostics?.knownDevices, devices.isHome(key) {

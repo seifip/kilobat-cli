@@ -41,10 +41,10 @@ import Observation
 
     /// Off by default: it only means something to someone who streams with OBS.
     public var enabled = UserDefaults.standard.bool(forKey: "obs.enabled") {
-        didSet { guard !previewing else { return }; UserDefaults.standard.set(enabled, forKey: "obs.enabled"); Task { await reconnect() } }
+        didSet { guard !previewing else { return }; UserDefaults.standard.set(enabled, forKey: "obs.enabled"); scheduleReconnect() }
     }
     public var port = UInt16(clamping: UserDefaults.standard.object(forKey: "obs.port") as? Int ?? Int(OBSProtocol.defaultPort)) {
-        didSet { guard port != oldValue else { return }; UserDefaults.standard.set(Int(port), forKey: "obs.port"); Task { await reconnect() } }
+        didSet { guard port != oldValue else { return }; UserDefaults.standard.set(Int(port), forKey: "obs.port"); scheduleReconnect() }
     }
     /// Notify after a stream that dropped frames meaningfully; clean ones only get their row.
     public var notify = UserDefaults.standard.object(forKey: "streamNotices") as? Bool ?? true {
@@ -71,6 +71,8 @@ import Observation
 
     private let file: URL
     @ObservationIgnored private var client: OBSClient?
+    @ObservationIgnored private var pendingClient: OBSClient?
+    @ObservationIgnored private var connectionGeneration = UUID()
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var sampler: LineSampler?
     @ObservationIgnored private var seconds: [StreamSamples.Second] = []
@@ -81,6 +83,7 @@ import Observation
     /// App IDs held with a timed block while going live, for the rule inspector.
     public var heldBlocks: [String] { blocked }
     @ObservationIgnored private var released: Set<String> = []
+    @ObservationIgnored private var holdDeadline: Task<Void, Never>?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
@@ -133,7 +136,7 @@ import Observation
     public func setPassword(_ value: String) {
         OBSPassword.save(value, port: port)
         passwordSaved = !value.isEmpty
-        Task { await reconnect() }
+        scheduleReconnect()
     }
 
     /// Settings' Test connection: connects now and says what went wrong. Nil when it connected.
@@ -144,25 +147,45 @@ import Observation
         return nil
     }
 
+    private func scheduleReconnect() {
+        let generation = UUID()
+        connectionGeneration = generation
+        Task { if connectionGeneration == generation { await reconnect() } }
+    }
+
     private func reconnect() async {
-        if live != nil { await finish(report: true) }
-        await client?.disconnect(); client = nil
+        connectionGeneration = UUID()
+        let previous = client, pending = pendingClient
+        client = nil; pendingClient = nil
         connection = enabled ? .connecting : .off
         lastAttempt = .distantPast
+        async let disconnectPending: Void? = pending?.disconnect()
+        async let disconnectPrevious: Void? = previous?.disconnect()
+        if live != nil { await finish(report: true) }
+        _ = await (disconnectPending, disconnectPrevious)
     }
 
     private func connect() async {
-        guard enabled, client == nil else { return }
+        guard enabled, client == nil, pendingClient == nil else { return }
         lastAttempt = Date()
+        let generation = connectionGeneration
         let client = OBSClient(port: port, password: password(port))
+        pendingClient = client
+        defer { if pendingClient === client { pendingClient = nil } }
         do {
             try await client.connect()
-            await client.observe(streamState: { _ in Task { @MainActor [weak self] in self?.stateChanged = true } },
-                                 closed: { Task { @MainActor [weak self] in self?.dropped(client) } })
+            await client.observe(streamState: { _ in Task { @MainActor [weak self] in
+                if self?.client === client { self?.stateChanged = true }
+            } }, closed: { Task { @MainActor [weak self] in self?.dropped(client) } })
+            let version = await client.version
+            let connected = await client.connected
+            guard enabled, generation == connectionGeneration, pendingClient === client else { await client.disconnect(); return }
+            guard connected else { connection = .failed(OBSError(.closed)); return }
             self.client = client
-            connection = .connected(version: await client.version)
+            connection = .connected(version: version)
             stateChanged = true
         } catch {
+            guard generation == connectionGeneration else { return }
             connection = .failed(error as? OBSError ?? OBSError(.notRunning))
         }
     }
@@ -194,24 +217,35 @@ import Observation
     }
 
     private func begin(_ client: OBSClient, status: OBSStreamStatus, now: Date) async {
-        guard let traffic, let diagnostics else { return }
+        guard enabled, self.client === client, let traffic, let diagnostics else { return }
+        let generation = connectionGeneration
         // OBS counts from the stream's start; Kilobat measures from now, when it may have joined late.
         let start = now.addingTimeInterval(-min(status.duration / 1000, 5))
         live = Live(start: start, status: status, first: status)
+        holdDeadline?.cancel()
+        holdDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, start.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
+            catch { return }
+            guard let self, self.live?.start == start else { return }
+            self.release()
+        }
         seconds = []; released = []
         let sampler = LineSampler(start: start, starlink: starlink, peers: peers)
         self.sampler = sampler
         await sampler.begin(diagnostics: diagnostics)
         let bitrate = await client.bitrate()
+        guard connectionGeneration == generation, live?.start == start else { return }
         live?.bitrate = bitrate
         hold(traffic: traffic, now: now)
     }
 
     private func sample(_ client: OBSClient, now: Date) async {
-        guard let live, let traffic, let diagnostics else { return }
-        guard let status = try? await client.streamStatus() else { return }
+        guard enabled, self.client === client, let live, let traffic, let diagnostics else { return }
+        let generation = connectionGeneration
+        guard let status = try? await client.streamStatus(), connectionGeneration == generation, self.live?.start == live.start else { return }
         guard status.active else { await finish(report: true); return }
         let stats = try? await client.stats()
+        guard connectionGeneration == generation, self.live?.start == live.start else { return }
         self.live?.status = status; self.live?.stats = stats
         seconds.append(.init(at: now.timeIntervalSince(live.start), status: status, stats: stats))
         sampler?.record(traffic: traffic, diagnostics: diagnostics, own: { $0.id.hasPrefix(Self.obsBundle) || $0.name == "OBS" }, now: now)
@@ -220,6 +254,7 @@ import Observation
 
     /// Ends the stream being measured and writes its report.
     private func finish(report: Bool) async {
+        holdDeadline?.cancel(); holdDeadline = nil
         guard let live, let sampler else { self.live = nil; return }
         self.live = nil; self.sampler = nil
         let held = holding
@@ -231,7 +266,7 @@ import Observation
         guard worth else { seconds = []; return }
         samples.obs = seconds; seconds = []
         samples.bitrate = live.bitrate
-        let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        let network = sampler.reportNetwork
         if let key = network?.0, let uplink = uplink(key) { samples.uplink = uplink.mbps; samples.uplinkDate = uplink.date }
         var card = StreamAnalysis.report(start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
@@ -242,8 +277,8 @@ import Observation
 
     /// Ends a stream in progress and writes what was measured; the app calls this when it quits.
     public func stop() async {
-        await finish(report: true)
-        await client?.disconnect(); client = nil
+        loop?.cancel(); loop = nil
+        await reconnect()
     }
 
     // MARK: Call mode for streams
@@ -252,7 +287,7 @@ import Observation
     /// the person brings to the front. A launcher is left alone while a game is in front: it runs the game being streamed.
     private func hold(traffic: TrafficStore, now: Date) {
         guard holdApps, allowed(), let live else { return }
-        if now.timeIntervalSince(live.start) > CallMode.limit { release(); return }
+        if Date().timeIntervalSince(live.start) >= CallMode.limit { release(); return }
         if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
             released.insert(name); CallMode.resume(app: name, owner: CallMode.stream); holding.removeAll { $0 == name }
         }

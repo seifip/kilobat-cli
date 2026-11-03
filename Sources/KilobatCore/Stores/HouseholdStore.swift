@@ -111,6 +111,8 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
     @ObservationIgnored private var advertised: [String: String]?
     @ObservationIgnored private var session: HouseholdPairing?
     @ObservationIgnored private var sessionLink: HouseholdConnection?
+    @ObservationIgnored private var pairingAttempt: UUID?
+    @ObservationIgnored private var pairingTask: Task<Void, Never>?
     @ObservationIgnored private var sessionNetwork: HouseholdNetwork?
 
     public init(directory: URL? = nil, keys: HouseholdKeyStore = KeychainHouseholdKeys()) {
@@ -362,13 +364,18 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
         let (start, hello) = HouseholdPairing.initiator(me: book.me, name: name)
         session = start; sessionNetwork = net
         pairing = HouseholdPairingStatus(peerName: mac.name ?? String(localized: "the other Mac", comment: "Household pairing, when the other Mac's name isn't known"), phase: .connecting, incoming: false)
-        Task {
+        let attempt = UUID()
+        pairingAttempt = attempt
+        pairingTask = Task {
+            defer { if pairingAttempt == attempt { pairingAttempt = nil; pairingTask = nil } }
             do {
                 let link = try await HouseholdConnection.connect(to: mac.endpoint)
+                guard pairingAttempt == attempt, !Task.isCancelled else { link.cancel(); return }
                 sessionLink = link
                 try await link.send(hello)
                 await run(on: link)
             } catch {
+                guard pairingAttempt == attempt, !Task.isCancelled else { return }
                 finish(failure: error as? HouseholdLinkError == .localNetworkDenied
                        ? String(localized: "Local Network access is off for Kilobat.", comment: "Household pairing failed")
                        : String(localized: "Couldn’t reach that Mac.", comment: "Household pairing failed"))
@@ -403,7 +410,7 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
             let replies = current.receive(message)
             session = current
             for reply in replies { try? await link.send(reply) }
-            update()
+            if sessionLink === link { update() }
         }
     }
 
@@ -412,15 +419,16 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
         guard var current = session, let link = sessionLink else { return }
         let replies = current.confirm()
         session = current
-        Task { for reply in replies { try? await link.send(reply) }; update() }
+        Task { for reply in replies { try? await link.send(reply) }; if sessionLink === link { update() } }
         update()
     }
 
     public func cancelPairing() {
+        pairingAttempt = nil; pairingTask?.cancel(); pairingTask = nil
         guard var current = session else { pairing = nil; return }
         let replies = current.cancel()
         let link = sessionLink
-        session = nil; sessionLink = nil
+        session = nil; sessionLink = nil; sessionNetwork = nil
         Task { for reply in replies { try? await link?.send(reply) }; link?.cancel() }
         pairing = nil
     }
@@ -488,7 +496,7 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
             let here = peer.network == net?.key
             let fresh = live[peer.id].flatMap { $0.fresh(now: now) ? $0 : nil }
             return HouseholdReport.Peer(id: peer.id, name: peer.name, network: peer.networkName, pairedAt: peer.paired, onThisNetwork: here,
-                                        reachable: here && pro ? (fresh != nil ? true : unreachable.contains(peer.id) ? false : nil) : nil,
+                                        reachable: here && pro ? (unreachable.contains(peer.id) ? false : fresh != nil ? true : nil) : nil,
                                         refused: refused[peer.id], live: pro ? fresh?.summary : nil,
                                         ageSeconds: pro ? fresh.map { (now.timeIntervalSince($0.received) * 10).rounded() / 10 } : nil, busy: pro ? fresh?.summary.busy : nil)
         }

@@ -123,6 +123,7 @@ public struct RouterDraft: Sendable, Equatable {
     @ObservationIgnored private var phaseConnection: String?
     @ObservationIgnored private var reader: (id: String, reader: RouterReader)?
     @ObservationIgnored private var needs: Set<Need> = []
+    @ObservationIgnored private var consumerNeeds: [Need: Set<UUID>] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var lastPoll = Date.distantPast
     @ObservationIgnored private var retryAfter = Date.distantPast
@@ -260,14 +261,18 @@ public struct RouterDraft: Sendable, Equatable {
 
     // MARK: Polling
 
-    public func need(_ need: Need, _ on: Bool) {
-        if on { needs.insert(need) } else { needs.remove(need) }
+    public func need(_ need: Need, _ on: Bool, consumer: UUID? = nil) {
+        if let consumer {
+            if on { consumerNeeds[need, default: []].insert(consumer) }
+            else { consumerNeeds[need]?.remove(consumer) }
+        } else if on { needs.insert(need) }
+        else { needs.remove(need) }
         if on, lastPoll < Date().addingTimeInterval(-Self.fast) { Task { await tick() } }
     }
 
     public var interval: TimeInterval {
-        if needs.contains(.call) { return Self.call }
-        if !needs.isEmpty { return Self.fast }
+        if needs.contains(.call) || consumerNeeds[.call]?.isEmpty == false { return Self.call }
+        if !needs.isEmpty || consumerNeeds.values.contains(where: { !$0.isEmpty }) { return Self.fast }
         return current?.kind == .fritzbox ? Self.idleFritz : Self.idle
     }
 
@@ -342,7 +347,10 @@ public struct RouterDraft: Sendable, Equatable {
         return RouterFirmware(product: "OpenWrt", installed: release.version, available: newer, updateAvailable: newer != nil, url: flash, source: "openwrt.org")
     }
 
+    private var lastRouterUptime: TimeInterval?
+
     private func clearMeasurements() {
+        lastRouterUptime = nil
         measuredConnection = nil; meter = RouterMeter(); latest = nil; rates = [:]; line = nil; firmware = nil
     }
 
@@ -350,6 +358,10 @@ public struct RouterDraft: Sendable, Equatable {
     public func ingest(_ poll: RouterPoll, connection: RouterConnection, calendar: Calendar = .current) {
         if measuredConnection != connection.id { clearMeasurements(); measuredConnection = connection.id }
         phaseConnection = connection.id
+        if let uptime = poll.uptime {
+            if let previous = lastRouterUptime, uptime < previous { meter = RouterMeter() }
+            lastRouterUptime = uptime
+        }
         var next: [String: HomeUsageMerge.Rate] = [:]
         for client in poll.clients {
             guard let mac = MACAddress.normalized(client.mac) else { continue }

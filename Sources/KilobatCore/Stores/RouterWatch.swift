@@ -14,6 +14,7 @@ import Observation
     @ObservationIgnored public var onSlowdown: ((RouterRecord, RouterReport) -> Void)?
     @ObservationIgnored private let file: URL?
     @ObservationIgnored private var outage = OutageTracker()
+    @ObservationIgnored private var macNetwork: String?
     @ObservationIgnored private var macs: [String: (mac: String?, read: Date)] = [:]
     @ObservationIgnored private var lastSave = Date.distantPast
     @ObservationIgnored private let calendar: Calendar
@@ -45,11 +46,19 @@ import Observation
 
     /// One health check. Looks up the router's hardware address when it's new or hasn't been read for six hours.
     public func observe(_ snapshot: DiagnosticSnapshot, busy: Bool, interval: TimeInterval) async {
-        var mac: String?
-        if let gateway = snapshot.gateway, snapshot.router?.average != nil {
-            let cached = macs[gateway]
-            if let cached, Date().timeIntervalSince(cached.read) < (cached.mac == nil ? 600 : 6 * 3600) { mac = cached.mac }
-            else { mac = await Self.hardwareAddress(of: gateway); macs[gateway] = (mac, Date()) }
+        let network = snapshot.networkKey
+        if macNetwork != network { macNetwork = network; macs.removeAll() }
+        var mac = snapshot.gatewayMAC
+        if mac == nil, let gateway = snapshot.gateway, snapshot.router?.average != nil {
+            let interface = snapshot.wiredInterface ?? snapshot.radio.interface
+            let key = "\(interface ?? "")|\(gateway)"
+            let cached = macs[key]
+            if let cached, Date().timeIntervalSince(cached.read) < 60 { mac = cached.mac }
+            else {
+                mac = await Self.hardwareAddress(of: gateway, interface: interface)
+                guard macNetwork == network else { return }
+                macs[key] = (mac, Date())
+            }
         }
         ingest(snapshot, mac: mac, busy: busy, interval: interval)
     }
@@ -164,9 +173,10 @@ import Observation
     }
 
     /// The router's hardware address from the ARP cache, which the ping just filled.
-    static func hardwareAddress(of gateway: String) async -> String? {
+    static func hardwareAddress(of gateway: String, interface: String? = nil) async -> String? {
         guard ExpertTools.validHost(gateway) else { return nil }
-        let result = await CommandRunner.run("/usr/sbin/arp", ["-n", gateway], timeout: 3)
+        let scope = interface.flatMap { $0.range(of: #"^[a-z]+[0-9]+$"#, options: .regularExpression) == nil ? nil : $0 }
+        let result = await CommandRunner.run("/usr/sbin/arp", ["-n"] + (scope.map { ["-i", $0] } ?? []) + [gateway], timeout: 3)
         return parseARP(result.output)
     }
     nonisolated public static func parseARP(_ output: String) -> String? {

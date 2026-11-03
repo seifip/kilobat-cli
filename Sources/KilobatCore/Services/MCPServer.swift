@@ -72,11 +72,24 @@ public struct MCPToolError: LocalizedError {
         guard let message = try? JSONSerialization.jsonObject(with: line) else { return send(Self.failure(NSNull(), -32700, "Parse error")) }
         if let batch = message as? [Any] {
             guard !batch.isEmpty else { return send(Self.failure(NSNull(), -32600, "Invalid Request")) }
+            var replies: [Int: [String: Any]] = [:]
+            var tasks: [Task<Void, Never>] = []
+            for (index, item) in batch.enumerated() {
+                let key = (item as? [String: Any])?["id"].map(Self.key)
+                let token = UUID()
+                if let key { requests[key] = token }
+                let task = Task { @MainActor in
+                    if !Task.isCancelled, let reply = await self.respond(to: item), !Task.isCancelled { replies[index] = reply }
+                    if let key, self.requests[key] == token { self.requests.removeValue(forKey: key) }
+                    self.running.removeValue(forKey: token)
+                }
+                tasks.append(task)
+                running[token] = task
+            }
             let token = UUID()
             running[token] = Task { @MainActor in
-                var replies: [[String: Any]] = []
-                for item in batch { if let reply = await self.respond(to: item) { replies.append(reply) } }
-                if !replies.isEmpty { self.send(replies) }
+                for task in tasks { await task.value }
+                if !replies.isEmpty { self.send(replies.keys.sorted().compactMap { replies[$0] }) }
                 self.running.removeValue(forKey: token)
             }
             return

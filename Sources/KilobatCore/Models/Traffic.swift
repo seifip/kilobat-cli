@@ -126,8 +126,9 @@ public struct NetworkSession: Codable, Sendable {
     public var identified: Bool? = nil
     public var local: UInt64? = nil
     public var unattributed: UInt64? = nil
-    public init(name: String, received: UInt64 = 0, sent: UInt64 = 0, identified: Bool? = nil, local: UInt64? = nil, unattributed: UInt64? = nil) {
-        self.name = name; self.received = received; self.sent = sent; self.identified = identified; self.local = local; self.unattributed = unattributed
+    public var budgetSession: UUID? = nil
+    public init(name: String, received: UInt64 = 0, sent: UInt64 = 0, identified: Bool? = nil, local: UInt64? = nil, unattributed: UInt64? = nil, budgetSession: UUID? = nil) {
+        self.name = name; self.received = received; self.sent = sent; self.identified = identified; self.local = local; self.unattributed = unattributed; self.budgetSession = budgetSession
     }
 }
 

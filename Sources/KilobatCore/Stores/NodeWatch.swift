@@ -57,26 +57,39 @@ import Observation
     public func place(_ network: String) -> NodePlace? { places[network] }
     private static let snapshotRun = ProcessInfo.processInfo.environment["KILOBAT_SNAPSHOT"] != nil
 
+    private func interruptEpisode() {
+        defer { detector.reset() }
+        guard let report, let key = report.network, var place = places[key],
+              let last = place.episodes.indices.last, place.episodes[last].end == nil else { return }
+        place.episodes[last].end = max(report.date, place.episodes[last].start)
+        places[key] = place
+        save()
+    }
+
+    private var observation = UUID()
+
     /// One health check.
     public func observe(_ snapshot: DiagnosticSnapshot, locationAllowed: Bool) async {
         // A screenshot run shows sample nodes and never scans.
         guard !Self.snapshotRun else { return }
+        let token = UUID()
+        observation = token
         let network = snapshot.networkKey
         guard snapshot.wiredInterface == nil, snapshot.radio.interface != nil, let rssi = snapshot.radio.rssi else {
-            detector.reset(); report = NodeReport(date: snapshot.date, ssid: nil, network: nil, state: .notWiFi); return
+            interruptEpisode(); report = NodeReport(date: snapshot.date, ssid: nil, network: nil, state: .notWiFi); return
         }
-        guard locationAllowed else { report = NodeReport(date: snapshot.date, ssid: snapshot.radio.ssid, network: network, state: .noLocation); return }
+        guard locationAllowed else { interruptEpisode(); report = NodeReport(date: snapshot.date, ssid: snapshot.radio.ssid, network: network, state: .noLocation); return }
         let now = Date()
         let scan = rssi < MeshNodes.weakAbove && !callLive() && !reconnecting && now.timeIntervalSince(lastScan) >= Self.scanEvery
         if scan { lastScan = now }
         let reading = await probe.nodeReading(activeScan: scan)
-        guard !reconnecting else { return }
+        guard !reconnecting, observation == token else { return }
         ingest(reading, network: network)
     }
 
     /// One reading on `network`, for `observe` and tests.
     public func ingest(_ reading: NodeReading, network: String) {
-        if report?.network != network { outcome = nil }
+        if report?.network != network { interruptEpisode(); outcome = nil }
         var place = places[network] ?? NodePlace()
         if let ssid = reading.ssid { place.ssid = ssid }
         detector.observe(reading, names: place.names)
