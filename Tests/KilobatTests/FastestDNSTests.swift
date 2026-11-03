@@ -539,6 +539,37 @@ struct FastestDNSTests {
         #expect(FastestDNS.history(tallies, now: at(30), calendar: calendar).isEmpty)
     }
 
+    @MainActor @Test func lateDNSWriteRemainsRecoverableAfterRelaunch() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = applied()
+        let saved = FastestDNSWatch.Saved(current: "home", networks: [], switches: [], applied: nil, pending: target)
+        try JSONEncoder().encode(saved).write(to: folder.appendingPathComponent(FastestDNSWatch.fileName))
+
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        let context = context(lookupWorked: true)
+        await watch.observe(context, now: target.date + 31)
+        #expect(FastestDNSWatch.load(directory: folder).pending == target)
+        #expect(applier.calls == 0)
+
+        let relaunched = FastestDNSWatch(directory: folder, system: system)
+        relaunched.applier = applier
+        system.servers = ["203.0.113.53"]
+        await relaunched.observe(context, now: target.date + 32)
+        #expect(system.servers == ["203.0.113.53"])
+        #expect(FastestDNSWatch.load(directory: folder).pending == target)
+
+        system.servers = target.servers
+        await relaunched.observe(context, now: target.date + 33)
+        #expect(applier.history == [[]])
+        #expect(system.servers.isEmpty)
+        #expect(FastestDNSWatch.load(directory: folder).pending == nil)
+    }
+
     @MainActor @Test func savedRecordsWithoutHistoryStillRead() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-dns-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

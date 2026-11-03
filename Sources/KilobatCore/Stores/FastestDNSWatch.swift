@@ -121,7 +121,17 @@ import Observation
         current = context.network
         guard !acting else { return }
         let observedGeneration = generation
-        if pending != nil { await recoverPending(now: now); if pending != nil { return } }
+        if pending != nil {
+            await recoverPending()
+            if pending != nil {
+                error = String(localized: "Waiting to verify an earlier DNS change. Automatic DNS switching is paused.")
+                let index = context.network.map { record(network: $0, name: context.name, now: now) }
+                wait = FastestDNS.wait(context.moment, runs: index.map { records[$0].runs } ?? [], now: now)
+                if wait == nil, !measuring, let index { measure(index: index, context: context, preferences: preferences() ?? SavedPreferences()) }
+                save()
+                return
+            }
+        }
         if let applied, applied.network != context.network || applied.service != context.service {
             await revert(.leftNetwork, now: now)
             if self.applied != nil { return }
@@ -236,13 +246,17 @@ import Observation
             try await applier.apply(servers: target.servers, service: target.service, expecting: expected)
             applied = target; pending = nil
             save()
+        } catch let rejection as DNSWriteRejected {
+            pending = nil
+            save()
+            throw rejection
         } catch {
-            await recoverPending(now: Date(), recoveringApply: true)
+            await recoverPending(recoveringApply: true)
             throw error
         }
     }
 
-    private func recoverPending(now: Date, recoveringApply: Bool = false) async {
+    private func recoverPending(recoveringApply: Bool = false) async {
         guard let pending, !acting || recoveringApply else { return }
         let wasActing = acting
         acting = true; defer { acting = wasActing }
@@ -256,21 +270,19 @@ import Observation
             do {
                 try await applier.apply(servers: expected, service: pending.service, expecting: current)
                 self.pending = nil
+                error = nil
+                save()
             } catch {
                 self.error = error.localizedDescription
-                if let restored = await system.verifiedServiceServers(pending.service), Set(restored) == Set(expected) { self.pending = nil }
             }
-        } else if !recoveringApply && now.timeIntervalSince(pending.date) > 30 {
-            // A timed-out helper may still have a write queued. Keep its recovery record until it has settled.
-            self.pending = nil
         }
-        save()
+        // A verified mismatch can precede an outstanding helper write. Keep the intent across observations and relaunches.
     }
 
     /// Puts automatic DNS back on the service Kilobat changed. Without the helper the change stays, and the panel
     /// says so: the person can choose Automatic there.
     private func revert(_ reason: DNSSwitch.Reason, now: Date) async {
-        guard let done = applied, !acting, !inert else { return }
+        guard let done = applied, pending == nil, !acting, !inert else { return }
         acting = true; defer { acting = false }
         guard let current = await system.verifiedServiceServers(done.service) else { return }
         guard Set(current) == Set(done.servers) else { applied = nil; save(); return }

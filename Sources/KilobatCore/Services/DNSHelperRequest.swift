@@ -53,5 +53,15 @@ public struct DNSHelperRequest: Codable, Equatable, Sendable {
 public struct DNSHelperReply: Codable, Equatable, Sendable {
     public var ok: Bool
     public var message: String
-    public init(ok: Bool, message: String) { self.ok = ok; self.message = message }
+    public var rejectedBeforeWrite: Bool?
+    public init(ok: Bool, message: String, rejectedBeforeWrite: Bool? = nil) {
+        self.ok = ok; self.message = message; self.rejectedBeforeWrite = rejectedBeforeWrite
+    }
+}
+
+/// The request was rejected before any DNS command could run.
+public struct DNSWriteRejected: LocalizedError {
+    public let message: String
+    public init(_ message: String) { self.message = message }
+    public var errorDescription: String? { message }
 }
