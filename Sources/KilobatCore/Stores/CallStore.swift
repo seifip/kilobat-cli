@@ -28,15 +28,16 @@ import Observation
     /// The apps call mode holds right now.
     public private(set) var holding: [String] = []
     @ObservationIgnored private var heldSince: [String: Date] = [:]
-    @ObservationIgnored private var blocked: [String] = []
+    @ObservationIgnored private var blocked: [String: TrafficStore.OwnedTemporary] = [:]
     /// App IDs this call holds with a timed block, for the rule inspector.
-    public var heldBlocks: [String] { blocked }
+    public var heldBlocks: [String] { blocked.values.map(\.id).sorted() }
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var airDropHeld = false
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
     private let file: URL
+    private let ledger: URL
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var candidate: (call: CallDetector.Call, since: Date)?
     @ObservationIgnored private var silentSince: Date?
@@ -44,13 +45,14 @@ import Observation
     /// A call this short isn't worth a card; mic tests and voice messages are.
     static let shortest: TimeInterval = 60
 
-    public init(directory: URL? = nil) {
+    public init(directory: URL? = nil, ledger: URL = CallMode.ledgerURL) {
+        self.ledger = ledger
         let folder = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         file = folder.appendingPathComponent("calls.json")
         reports = StoredJSON.read(file) ?? []
         // A previous run that quit or crashed mid-call never leaves anything suspended.
-        CallMode.recoverAtLaunch()
+        if ledger == CallMode.ledgerURL { CallMode.recoverAtLaunch() }
     }
 
     #if DEBUG
@@ -67,9 +69,10 @@ import Observation
     /// Paired Macs' fresh summaries, from Household Macs; set by the app when it has Kilobat Pro.
     @ObservationIgnored public var peers: () -> [HouseholdLive] = { [] }
 
-    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore) {
+    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore, polling: Bool = true) {
         guard loop == nil else { return }
         self.traffic = traffic; self.diagnostics = diagnostics
+        guard polling else { return }
         loop = Task { [weak self, weak traffic, weak diagnostics] in
             while !Task.isCancelled {
                 guard let self, let traffic, let diagnostics else { return }
@@ -123,10 +126,10 @@ import Observation
     }
 
     private func hold(_ app: AppTraffic, name: String, traffic: TrafficStore, now: Date) {
-        guard !holding.contains(name), !CallMode.hold(app.processIDs, app: name).isEmpty else { return }
+        guard !holding.contains(name), !CallMode.hold(app.processIDs, app: name, ledger: ledger).isEmpty else { return }
         holding.append(name); heldSince[name] = now
         // New connections are refused too, for whatever the suspended processes hand off to a helper.
-        if traffic.temporaryRule(app.id) == nil { traffic.setTemporary(app.id, allowed: false, minutes: Int(CallMode.limit / 60)); blocked.append(app.id) }
+        if traffic.temporaryRule(app.id) == nil { blocked[name] = traffic.holdTemporary(app.id, minutes: Int(CallMode.limit / 60)) }
     }
 
     /// Holds these apps now, from the check before a meeting, until the call ends, or for half an hour if none starts.
@@ -148,16 +151,17 @@ import Observation
         return control
     }
 
-    private func resume(_ name: String) {
-        CallMode.resume(app: name, owner: CallMode.call)
+    func resume(_ name: String) {
+        CallMode.resume(app: name, owner: CallMode.call, ledger: ledger)
+        if let rule = blocked.removeValue(forKey: name) { traffic?.clearTemporary(rule) }
         holding.removeAll { $0 == name }; heldSince[name] = nil
     }
 
     /// Resumes everything call mode holds, but not what a Focus filter holds too; the app also calls this when it quits.
     public func release() {
-        CallMode.resume(owner: CallMode.call)
-        for id in blocked { traffic?.clearTemporary(id) }
-        blocked = []; holding = []; heldSince = [:]
+        CallMode.resume(owner: CallMode.call, ledger: ledger)
+        for rule in blocked.values { traffic?.clearTemporary(rule) }
+        blocked = [:]; holding = []; heldSince = [:]
         if airDropHeld { diagnostics?.lowLatency.release(); airDropHeld = false }
     }
 

@@ -15,7 +15,7 @@ import Testing
     /// A phone on USB, with Wi-Fi joined alongside or off.
     private func tethered(alongside ssid: String?) -> DiagnosticSnapshot {
         DiagnosticSnapshot(date: Date(), radio: RadioSample(ssid: ssid, interface: ssid == nil ? nil : "en0", rssi: nil, noise: nil, transmitMbps: nil, channel: nil, band: nil), gateway: "172.20.10.1", router: nil,
-                           internet: PingResult(host: "test", samples: [10], lossPercent: 0), dnsMilliseconds: 1, dnsServers: [], captivePortal: false, networkService: "iPhone USB", wiredInterface: "en7")
+                           internet: PingResult(host: "test", samples: [10], lossPercent: 0), dnsMilliseconds: 1, dnsServers: [], captivePortal: false, networkService: "iPhone USB", wiredInterface: "en7", gatewayMAC: "00:11:22:33:44:55")
     }
 
     @Test func theEffectiveCostIsYoursOrMacOS() {

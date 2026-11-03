@@ -342,7 +342,10 @@ public struct RouterDraft: Sendable, Equatable {
         return RouterFirmware(product: "OpenWrt", installed: release.version, available: newer, updateAvailable: newer != nil, url: flash, source: "openwrt.org")
     }
 
+    private var lastRouterUptime: TimeInterval?
+
     private func clearMeasurements() {
+        lastRouterUptime = nil
         measuredConnection = nil; meter = RouterMeter(); latest = nil; rates = [:]; line = nil; firmware = nil
     }
 
@@ -350,6 +353,10 @@ public struct RouterDraft: Sendable, Equatable {
     public func ingest(_ poll: RouterPoll, connection: RouterConnection, calendar: Calendar = .current) {
         if measuredConnection != connection.id { clearMeasurements(); measuredConnection = connection.id }
         phaseConnection = connection.id
+        if let uptime = poll.uptime {
+            if let previous = lastRouterUptime, uptime < previous { meter = RouterMeter() }
+            lastRouterUptime = uptime
+        }
         var next: [String: HomeUsageMerge.Rate] = [:]
         for client in poll.clients {
             guard let mac = MACAddress.normalized(client.mac) else { continue }

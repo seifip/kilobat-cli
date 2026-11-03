@@ -170,7 +170,7 @@ import KilobatCore
                 since = Date().addingTimeInterval(-Double(days) * 86400)
             }
             let journal = NetworkJournal()
-            if command == "outages" { try json(journal.events.filter { $0.start >= since }) } else { try json(journal.speedTests.filter { $0.result.date >= since }) }
+            if command == "outages" { try json(journal.events.filter { $0.start >= since }.map(\.withoutNetworkKey)) } else { try json(journal.speedTests.filter { $0.result.date >= since }) }
         default: throw CLIError("Unknown expert command.")
         }
     }

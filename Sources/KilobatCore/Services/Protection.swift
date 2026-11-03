@@ -501,8 +501,10 @@ public enum FlowSniffer {
     static func http(_ bytes: [UInt8]) -> Result {
         let head = String(decoding: bytes.prefix(8_192), as: UTF8.self)
         guard methods.contains(where: { head.hasPrefix($0) || $0.hasPrefix(head) }) else { return .unknown }
-        for line in head.components(separatedBy: "\r\n").dropFirst() {
-            if line.isEmpty { return .address }
+        guard let end = head.range(of: "\r\n\r\n") else {
+            return bytes.count >= 8_192 ? .unknown : .needMore(min(8_192, bytes.count + 1_024))
+        }
+        for line in head[..<end.lowerBound].components(separatedBy: "\r\n").dropFirst() {
             guard line.lowercased().hasPrefix("host:") else { continue }
             var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("[") { value = String(value.dropFirst().prefix { $0 != "]" }) }
@@ -510,7 +512,7 @@ public enum FlowSniffer {
             guard let host = HostName.normalize(value) else { return .unknown }
             return HostName.isAddress(host) ? .address : .name(host)
         }
-        return bytes.count >= 8_192 ? .unknown : .needMore(min(8_192, bytes.count + 1_024))
+        return .address
     }
 }
 

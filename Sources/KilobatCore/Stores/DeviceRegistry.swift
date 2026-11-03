@@ -147,7 +147,7 @@ public struct DeviceBook: Codable, Sendable, Equatable {
             if MACAddress.locallyAdministered(sighting.mac), let key = DeviceNames.stable(sighting.hostname),
                let index = net.devices.indices.first(where: { index in
                    let device = net.devices[index]
-                   return !touched.contains(index) && device.privateAddress && DeviceNames.stable(device.hostname) == key && !device.macs.contains { seen[$0] != nil }
+                   return !touched.contains(index) && device.privateAddress && device.verdict == nil && DeviceNames.stable(device.hostname) == key && !device.macs.contains { seen[$0] != nil }
                }) {
                 var device = net.devices[index]
                 device.aliases = Array(([device.mac] + (device.aliases ?? [])).prefix(8))
@@ -370,10 +370,10 @@ public enum DeviceNames {
         var next = book
         edit(&next)
         guard next != book else { return }
-        book = next
         do {
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(book).write(to: file, options: .atomic)
+            try encoder.encode(next).write(to: file, options: .atomic)
+            book = next
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
             stamp = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
             persistenceError = nil

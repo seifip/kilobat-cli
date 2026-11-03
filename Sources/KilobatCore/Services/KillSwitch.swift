@@ -80,8 +80,6 @@ public struct KillSwitchPolicy: Sendable, Equatable {
         if let name = names.first(where: { Self.vpnApp($0, configured: vpnApps) }) { return .vpnApp(name) }
         if Self.vpnProcesses.contains(flow.process) { return .vpnApp(flow.process) }
         if let name = names.first(where: Self.appleNetworking), appleSigned() { return .appleNetworking(name) }
-        // DHCP keeps the Mac on the Wi-Fi so the VPN has something to connect over.
-        if flow.port == "67" || flow.port == "68" { return .localNetwork }
         if allowLAN, Self.isLocal(host: flow.host, address: flow.address) { return .localNetwork }
         return nil
     }
@@ -143,6 +141,43 @@ public struct KillSwitchPolicy: Sendable, Equatable {
             if !id.hasPrefix("com.apple."), !apps.contains(String(id)) { apps.append(String(id)) }
         }
         return apps
+    }
+
+    /// Fail closed if the kernel has an unscoped IPv6 default outside a tunnel, or if
+    /// the route table cannot be read. An interface may stay up while its routes change.
+    public static func ipv6Covered() -> Bool {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET6, NET_RT_DUMP2, 0]
+        let mibCount = UInt32(mib.count)
+        var size = 0
+        guard sysctl(&mib, mibCount, nil, &size, nil, 0) == 0 else { return false }
+        if size == 0 { return true }
+        var table = Data(count: size)
+        guard table.withUnsafeMutableBytes({ sysctl(&mib, mibCount, $0.baseAddress, &size, nil, 0) }) == 0 else { return false }
+        return table.withUnsafeBytes { bytes in
+            var offset = 0
+            let headerSize = MemoryLayout<rt_msghdr2>.size
+            while offset + headerSize <= size {
+                let header = bytes.loadUnaligned(fromByteOffset: offset, as: rt_msghdr2.self)
+                let end = offset + Int(header.rtm_msglen)
+                let destination = offset + headerSize
+                guard end > destination, end <= size else { return false }
+                if header.rtm_flags & (RTF_UP | RTF_IFSCOPE) == RTF_UP,
+                   header.rtm_addrs & RTA_DST != 0,
+                   destination + MemoryLayout<sockaddr_in6>.size <= end,
+                   bytes[destination + 1] == UInt8(AF_INET6) {
+                    let address = bytes.loadUnaligned(fromByteOffset: destination, as: sockaddr_in6.self)
+                    var ip = address.sin6_addr
+                    if withUnsafeBytes(of: &ip, { $0.allSatisfy { $0 == 0 } }) {
+                        var name = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+                        guard if_indextoname(UInt32(header.rtm_index), &name) != nil else { return false }
+                        let interface = String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                        if !["utun", "ipsec", "ppp", "tun", "tap"].contains(where: interface.hasPrefix) { return false }
+                    }
+                }
+                offset = end
+            }
+            return offset == size
+        }
     }
 
     /// Whether an interface exists and is up, from the kernel's interface list.

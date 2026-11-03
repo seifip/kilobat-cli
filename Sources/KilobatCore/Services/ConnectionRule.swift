@@ -36,5 +36,8 @@ public enum ProcessRuleKey {
 public struct TemporaryRule: Codable, Equatable, Sendable {
     public let allowed: Bool
     public let expires: Date
-    public init(allowed: Bool, expires: Date) { self.allowed = allowed; self.expires = expires }
+    public let ownership: UUID?
+    public init(allowed: Bool, expires: Date, ownership: UUID? = nil) {
+        self.allowed = allowed; self.expires = expires; self.ownership = ownership
+    }
 }

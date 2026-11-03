@@ -33,6 +33,10 @@ import Observation
     @ObservationIgnored private var reverse: [String: String?] = [:]
     @ObservationIgnored private var resolving: Set<String> = []
     @ObservationIgnored private var network: (key: String, name: String)?
+    @ObservationIgnored private var networkGeneration = UUID()
+    @ObservationIgnored var runTest: (ServiceSpeedTarget, Bool) async throws -> ServiceTransfer = {
+        try await ServiceSpeedTest.run($0, metered: $1)
+    }
     @ObservationIgnored private var lastFinding: String?
     @ObservationIgnored private var refreshed = Date.distantPast
     @ObservationIgnored private var tracing: Set<String> = []
@@ -63,8 +67,10 @@ import Observation
         guard enabled else { return }
         if network?.key != key || vpn || key == "unknown" {
             record(tracker.finish())
-            let changed = network?.key != key
-            network = vpn || key == "unknown" ? nil : (key, name)
+            let next: (key: String, name: String)? = vpn || key == "unknown" ? nil : (key, name)
+            let changed = network?.key != next?.key
+            if changed { networkGeneration = UUID() }
+            network = next
             guard network != nil else { return }
             if changed { refresh() }
         }
@@ -84,7 +90,7 @@ import Observation
     public func reverseName(_ address: String) -> String? { reverse[address] ?? nil }
 
     /// The Mac is going to sleep or the monitor stopped: transfers in progress end here.
-    public func pause() { record(tracker.finish()); network = nil }
+    public func pause() { record(tracker.finish()); network = nil; networkGeneration = UUID() }
 
     private func record(_ ended: [(key: String, transfer: ServiceTransfer)]) {
         guard !ended.isEmpty, let network else { return }
@@ -144,12 +150,16 @@ import Observation
     /// Test this service: at most 25 MB from the target's public file. Refused on a metered network.
     public func test(_ target: ServiceSpeedTarget, metered: Bool) async {
         guard testing == nil else { return }
+        guard let network else { testError = String(localized: "The current network could not be identified."); return }
+        let generation = networkGeneration
         testing = target.id; testError = nil
         defer { testing = nil }
         do {
-            let transfer = try await ServiceSpeedTest.run(target, metered: metered)
-            let saved = log.current.map { (key: $0, name: log.networks[$0]?.name ?? $0) }
-            guard let network = network ?? saved else { return }
+            let transfer = try await runTest(target, metered)
+            guard generation == networkGeneration, enabled else {
+                testError = String(localized: "The network changed during the test.")
+                return
+            }
             log.add(transfer, key: target.key, network: network.key, name: network.name)
             log.current = network.key
             save(); refresh()

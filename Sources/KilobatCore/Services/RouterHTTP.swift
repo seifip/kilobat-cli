@@ -1,3 +1,4 @@
+import CFNetwork
 import CryptoKit
 import Darwin
 import Foundation
@@ -107,6 +108,10 @@ public final class RouterSession: RouterTransport, @unchecked Sendable {
         configuration.httpCookieStorage = nil; configuration.httpShouldSetCookies = false; configuration.urlCredentialStorage = nil
         configuration.urlCache = nil; configuration.timeoutIntervalForRequest = 8; configuration.timeoutIntervalForResource = 20
         configuration.waitsForConnectivity = false
+        configuration.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: 0, kCFNetworkProxiesHTTPSEnable as String: 0, kCFNetworkProxiesSOCKSEnable as String: 0,
+            kCFNetworkProxiesProxyAutoConfigEnable as String: 0, kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 0,
+        ]
         session = URLSession(configuration: configuration, delegate: trust, delegateQueue: nil)
     }
     deinit { session.invalidateAndCancel() }

@@ -29,8 +29,9 @@ struct SupportReportTests {
 
     @Test func countsOutagesOnThisNetworkOnly() {
         let samples = [sample(30, router: 3, internet: 30)]
-        let events = [NetworkEvent(start: now.addingTimeInterval(-3600), end: now.addingTimeInterval(-3000), network: "Home Wi-Fi", kind: "Unreachable", detail: ""),
-                      NetworkEvent(start: now.addingTimeInterval(-1800), end: now.addingTimeInterval(-1700), network: "Café", kind: "Unreachable", detail: ""),
+        let events = [NetworkEvent(start: now.addingTimeInterval(-3600), end: now.addingTimeInterval(-3000), network: "Home Wi-Fi", networkKey: samples[0].networkKey, kind: "Unreachable", detail: ""),
+                      NetworkEvent(start: now.addingTimeInterval(-1800), end: now.addingTimeInterval(-1700), network: "Home Wi-Fi", networkKey: "different", kind: "Unreachable", detail: ""),
+                      NetworkEvent(start: now - 900, end: now - 800, network: "Home Wi-Fi", kind: "Unreachable", detail: ""),
                       NetworkEvent(start: now.addingTimeInterval(-900), end: now.addingTimeInterval(-900), network: "Home Wi-Fi", kind: "Wi-Fi roam", detail: "")]
         let report = SupportReport.make(samples: samples, events: events, speedTests: [], hours: 24, mac: "Mac", now: now)
         #expect(report.outages.count == 1)
@@ -87,7 +88,10 @@ struct SupportReportTests {
                                      downloadSeconds: 8, uploadSeconds: 8, transferredBytes: 1000)
         let samples = [sample(30, router: 3, internet: 30)]
         let saved = SavedSpeedTest(networkKey: samples[0].networkKey, networkName: "Home Wi-Fi", result: result)
-        let report = SupportReport.make(samples: samples, events: [], speedTests: [saved], hours: 24, planMbps: 200, mac: "Mac", now: now)
+        var crossedNetwork = saved
+        crossedNetwork.networkChanged = true
+        let report = SupportReport.make(samples: samples, events: [], speedTests: [saved, crossedNetwork], hours: 24, planMbps: 200, mac: "Mac", now: now)
+        #expect(report.speedTests.count == 1)
         #expect(report.findings.contains { $0.contains("50 Mbps down") && $0.contains("25% of the 200 Mbps plan") })
     }
 }

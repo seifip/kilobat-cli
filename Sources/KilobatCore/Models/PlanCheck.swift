@@ -6,9 +6,13 @@ public enum PlanSpeeds {
     public static let key = "speed.plans"
     public static let legacyKey = "speed.planMbps"
 
+    public static func settings(_ defaults: UserDefaults = .standard) -> [String: Double] {
+        (defaults.dictionary(forKey: key) ?? [:]).compactMapValues { ($0 as? NSNumber)?.doubleValue }.filter { $0.value >= 0 && $0.value.isFinite }
+    }
+
     /// Plans set for a network, by `networkKey`.
     public static func all(_ defaults: UserDefaults = .standard) -> [String: Double] {
-        (defaults.dictionary(forKey: key) ?? [:]).compactMapValues { ($0 as? NSNumber)?.doubleValue }.filter { $0.value > 0 && $0.value.isFinite }
+        settings(defaults).filter { $0.value > 0 }
     }
     /// The plan set for this network itself.
     public static func explicit(for network: String?, _ defaults: UserDefaults = .standard) -> Double? {
@@ -17,16 +21,16 @@ public enum PlanSpeeds {
     }
     /// This network's plan, or the single plan from before plans were per network.
     public static func plan(for network: String?, _ defaults: UserDefaults = .standard) -> Double? {
-        if let plan = explicit(for: network, defaults) { return plan }
+        if let network, let value = settings(defaults)[network] { return value > 0 ? value : nil }
         let legacy = defaults.double(forKey: legacyKey)
         return legacy > 0 && legacy.isFinite ? legacy : nil
     }
-    /// Sets or clears this network's plan. The single plan follows the newest one, for older readers of it.
+    /// Sets or clears this network's plan. Zero suppresses the old global fallback for this network.
     public static func set(_ mbps: Double?, for network: String, _ defaults: UserDefaults = .standard) {
         guard network != "unknown" else { return }
-        var plans = all(defaults)
-        if let mbps, mbps > 0, mbps.isFinite, mbps <= 100_000 { plans[network] = mbps; defaults.set(mbps, forKey: legacyKey) }
-        else { plans.removeValue(forKey: network) }
+        var plans = settings(defaults)
+        if let mbps, mbps > 0, mbps.isFinite, mbps <= 100_000 { plans[network] = mbps }
+        else { plans[network] = 0 }
         defaults.set(plans, forKey: key)
     }
 }
@@ -36,6 +40,11 @@ public enum PlanSpeeds {
 /// minute each day, and with the last of the three kept for the evening peak. Never on a metered network, through a
 /// VPN, during a call, under other traffic or on a low battery.
 public enum PlanCheck {
+    public struct Attempt: Codable, Sendable {
+        public let network: String
+        public let date: Date
+        public let reservedBytes: Int
+    }
     public static let enabledKey = "speed.planCheck"
     public static let perDay = 3
     public static let gap: TimeInterval = 3 * 3600
@@ -101,12 +110,13 @@ public enum PlanCheck {
     }
 
     /// Nil when a check should start now. `history` is every saved test; only scheduled ones on this network count.
-    public static func wait(_ moment: Moment, history: [SavedSpeedTest], now: Date = Date(), calendar: Calendar = .current) -> Wait? {
+    public static func wait(_ moment: Moment, history: [SavedSpeedTest], attempts: [Attempt] = [], now: Date = Date(), calendar: Calendar = .current) -> Wait? {
         guard moment.enabled else { return .off }
         guard moment.connected, let network = moment.network, network != "unknown" else { return .network }
         guard let plan = moment.planMbps, plan > 0 else { return .noPlan }
         if moment.metered { return .metered }
-        let done = history.filter { $0.scheduled == true && $0.networkKey == network && $0.result.date <= now }.map(\.result.date)
+        let done = history.filter { $0.scheduled == true && $0.reservedAttempt != true && $0.networkKey == network && $0.result.date <= now }.map(\.result.date)
+            + attempts.filter { $0.network == network && $0.date <= now }.map(\.date)
         let lastDay = done.filter { now.timeIntervalSince($0) < 86_400 }
         if lastDay.count >= perDay { return .enough }
         if let last = done.max(), now.timeIntervalSince(last) < gap { return .recent }

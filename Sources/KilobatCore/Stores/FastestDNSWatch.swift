@@ -35,6 +35,8 @@ import Observation
     @ObservationIgnored private var managed: (value: Bool, read: Date)?
     @ObservationIgnored private var last: Context?
     @ObservationIgnored private var acting = false
+    @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var pending: DNSApplied?
     @ObservationIgnored private var paths: NetworkStatus?
 
     nonisolated public static let fileName = "fastest-dns.json"
@@ -43,6 +45,7 @@ import Observation
         public var networks: [DNSNetworkRecord]
         public var switches: [DNSSwitch]
         public var applied: DNSApplied?
+        public var pending: DNSApplied? = nil
     }
 
     /// What one health check knew, for the switch.
@@ -69,7 +72,7 @@ import Observation
         self.system = system; self.probe = probe; self.calendar = calendar
         file = directory?.appendingPathComponent(Self.fileName)
         if let file, let saved: Saved = StoredJSON.read(file) {
-            records = saved.networks; switches = saved.switches; applied = saved.applied; current = saved.current
+            records = saved.networks; switches = saved.switches; applied = saved.applied; pending = saved.pending; current = saved.current
             // Records from before the history: start it from the runs they kept.
             for index in records.indices where records[index].tallies == nil { records[index].tallies = FastestDNS.tallies(from: records[index].runs, calendar: calendar) }
         }
@@ -100,6 +103,7 @@ import Observation
     }
 
     private func pathChanged() async {
+        generation = UUID()
         guard let applied, !acting else { return }
         let gateway = await system.gateway()
         guard gateway != applied.gateway else { return }
@@ -110,8 +114,18 @@ import Observation
 
     public func observe(_ context: Context, now: Date = Date()) async {
         guard !inert else { return }
+        if last?.network != context.network || last?.service != context.service ||
+            last?.gateway != context.gateway || last?.moment.vpn != context.moment.vpn ||
+            last?.moment.portal != context.moment.portal { generation = UUID() }
         last = context
         current = context.network
+        guard !acting else { return }
+        let observedGeneration = generation
+        if pending != nil { await recoverPending(now: now); if pending != nil { return } }
+        if let applied, applied.network != context.network || applied.service != context.service {
+            await revert(.leftNetwork, now: now)
+            if self.applied != nil { return }
+        }
         let preferences = preferences() ?? SavedPreferences()
         let index = context.network.map { record(network: $0, name: context.name, now: now) }
 
@@ -136,12 +150,16 @@ import Observation
         } else { verdict = nil }
 
         var servers: [String] = []
-        if let service = context.service { servers = await system.serviceServers(service) }
+        if let service = context.service {
+            guard let verified = await system.verifiedServiceServers(service) else { return }
+            servers = verified
+        }
         let failed = index.map { records[$0].failed(at: now) } ?? []
         let situation = FastestDNS.Situation(network: context.network, enabled: context.network.map(preferences.fastestDNSEnabled(on:)) ?? false,
                                              pro: allowed(), helper: applier?.available ?? false, vpn: context.moment.vpn, managed: await isManaged(now: now),
                                              portal: context.moment.portal, serviceServers: servers, applied: applied, verdict: verdict, failed: failed,
                                              fallback: index.flatMap { usableFallback(index: $0, preferences: preferences, now: now) })
+        guard generation == observedGeneration else { return }
         await act(FastestDNS.plan(situation), context: context, now: now)
 
         wait = FastestDNS.wait(context.moment, runs: index.map { records[$0].runs } ?? [], now: now)
@@ -159,11 +177,10 @@ import Observation
             await useFallback(choice, context: context, index: index, now: now)
         case .apply(let choice):
             guard let network = context.network, let service = context.service, let applier, !acting, !inert else { return }
-            acting = true; defer { acting = false }
             let from = applied?.resolver ?? DNSResolverChoice.network.id
+            let target = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers, gateway: context.gateway, date: now)
             do {
-                try await applier.apply(servers: choice.servers, service: service)
-                applied = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers, gateway: context.gateway, date: now)
+                try await apply(target, with: applier)
                 watchdog = FastestDNS.Watchdog()
                 log(DNSSwitch(date: now, network: network, networkName: context.name, from: from, to: choice.id, reason: .fastest))
                 hold = .applied; error = nil
@@ -192,33 +209,74 @@ import Observation
             return
         }
         let from = applied?.resolver ?? DNSResolverChoice.network.id
-        acting = true
+        let target = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers,
+                                gateway: context.gateway, date: now, fallback: true)
         do {
-            try await applier.apply(servers: choice.servers, service: service)
-            acting = false
-            applied = DNSApplied(network: network, networkName: context.name, service: service, resolver: choice.id, servers: choice.servers,
-                                 gateway: context.gateway, date: now, fallback: true)
+            try await apply(target, with: applier)
             watchdog = FastestDNS.Watchdog()
             log(DNSSwitch(date: now, network: network, networkName: context.name, from: from, to: choice.id, reason: .fallback))
             hold = .onFallback; error = nil
         } catch {
-            acting = false
             records[index].failedUntil[choice.id] = now.addingTimeInterval(FastestDNS.failurePause)
             let message = error.localizedDescription
-            // Whatever the service has now, automatic DNS is the safe place to leave it.
-            if applied != nil { await revert(.watchdog, now: now) } else { try? await applier.apply(servers: [], service: service) }
+            if pending == nil, applied != nil { await revert(.watchdog, now: now) }
             self.error = message
         }
+    }
+
+    private func apply(_ target: DNSApplied, with applier: DNSApplying) async throws {
+        acting = true; defer { acting = false }
+        let expected = applied?.servers ?? []
+        guard let current = await system.verifiedServiceServers(target.service), Set(current) == Set(expected), last?.network == target.network, last?.service == target.service else {
+            throw DiagnosticError(String(localized: "The network or its DNS settings changed."))
+        }
+        pending = target
+        guard save() else { pending = nil; throw DiagnosticError(String(localized: "Kilobat could not save its DNS recovery record.")) }
+        do {
+            try await applier.apply(servers: target.servers, service: target.service, expecting: expected)
+            applied = target; pending = nil
+            save()
+        } catch {
+            await recoverPending(now: Date(), recoveringApply: true)
+            throw error
+        }
+    }
+
+    private func recoverPending(now: Date, recoveringApply: Bool = false) async {
+        guard let pending, !acting || recoveringApply else { return }
+        let wasActing = acting
+        acting = true; defer { acting = wasActing }
+        guard let current = await system.verifiedServiceServers(pending.service) else { return }
+        let expected = applied?.servers ?? []
+        // A helper can report a failed verification after only some requested servers took effect.
+        let possibleWrite = !current.isEmpty && Set(current) != Set(expected)
+            && Set(current).isSubset(of: Set(pending.servers))
+        if possibleWrite {
+            guard let applier, applier.available else { return }
+            do {
+                try await applier.apply(servers: expected, service: pending.service, expecting: current)
+                self.pending = nil
+            } catch {
+                self.error = error.localizedDescription
+                if let restored = await system.verifiedServiceServers(pending.service), Set(restored) == Set(expected) { self.pending = nil }
+            }
+        } else if !recoveringApply && now.timeIntervalSince(pending.date) > 30 {
+            // A timed-out helper may still have a write queued. Keep its recovery record until it has settled.
+            self.pending = nil
+        }
+        save()
     }
 
     /// Puts automatic DNS back on the service Kilobat changed. Without the helper the change stays, and the panel
     /// says so: the person can choose Automatic there.
     private func revert(_ reason: DNSSwitch.Reason, now: Date) async {
         guard let done = applied, !acting, !inert else { return }
-        guard let applier, applier.available else { error = String(localized: "Kilobat’s helper isn’t available to put automatic DNS back. Choose Automatic in Health › DNS."); return }
         acting = true; defer { acting = false }
+        guard let current = await system.verifiedServiceServers(done.service) else { return }
+        guard Set(current) == Set(done.servers) else { applied = nil; save(); return }
+        guard let applier, applier.available else { error = String(localized: "Kilobat’s helper isn’t available to put automatic DNS back. Choose Automatic in Health › DNS."); return }
         do {
-            try await applier.apply(servers: [], service: done.service)
+            try await applier.apply(servers: [], service: done.service, expecting: done.servers)
             applied = nil; error = nil; watchdog = FastestDNS.Watchdog()
             log(DNSSwitch(date: now, network: done.network, networkName: done.networkName, from: done.resolver, to: DNSResolverChoice.network.id, reason: reason))
             save()
@@ -235,8 +293,8 @@ import Observation
     /// On quit Kilobat puts automatic DNS back, so a network joined while it isn't running never inherits its choice.
     /// `automatic` puts automatic DNS back on a service synchronously and says whether it did: the app is
     /// terminating, when Swift tasks no longer run.
-    public func quit(automatic: (String) -> Bool) {
-        guard let done = applied, !inert, automatic(done.service) else { return }
+    public func quit(automatic: (String, [String]) -> Bool) {
+        guard let done = applied, pending == nil, !acting, !inert, automatic(done.service, done.servers) else { return }
         applied = nil
         log(DNSSwitch(date: Date(), network: done.network, networkName: done.networkName, from: done.resolver, to: DNSResolverChoice.network.id, reason: .quit))
     }
@@ -250,6 +308,7 @@ import Observation
 
     private func measure(index: Int, context: Context, preferences: SavedPreferences) {
         let network = records[index].network
+        let generation = self.generation
         measuring = true
         Task { [weak self, system, probe] in
             // The network's own: what DHCP handed out, or what macOS uses when DNS is automatic.
@@ -259,7 +318,7 @@ import Observation
             let run = await FastestDNSMeter.run(candidates: preferences.dnsCandidates(), networkServers: servers, probe: probe)
             guard let self else { return }
             self.measuring = false
-            guard !run.resolvers.isEmpty, let index = self.records.firstIndex(where: { $0.network == network }) else { return }
+            guard self.generation == generation, !run.resolvers.isEmpty, let index = self.records.firstIndex(where: { $0.network == network }) else { return }
             self.records[index].runs = Array((self.records[index].runs + [run]).filter { run.date.timeIntervalSince($0.date) <= FastestDNS.window }.suffix(FastestDNS.keptRuns))
             self.records[index].tallies = FastestDNS.tally(run, into: self.records[index].tallies ?? [], calendar: self.calendar)
             if self.current == network {
@@ -289,12 +348,14 @@ import Observation
         save()
     }
 
-    private func save() {
-        guard let file else { return }
-        // Networks not seen for 90 days go.
-        records.removeAll { Date().timeIntervalSince($0.lastSeen) > 90 * 86_400 }
-        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(Saved(current: current, networks: records, switches: switches, applied: applied)).write(to: file, options: .atomic)
+    @discardableResult private func save() -> Bool {
+        guard let file else { return true }
+        let recent = records.filter { Date().timeIntervalSince($0.lastSeen) <= 90 * 86_400 }
+        do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(Saved(current: current, networks: recent, switches: switches, applied: applied, pending: pending)).write(to: file, options: .atomic)
+            return true
+        } catch { return false }
     }
 
     #if DEBUG

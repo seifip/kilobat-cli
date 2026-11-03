@@ -544,7 +544,12 @@ public struct StarlinkEvidence: Codable, Sendable {
     public let software: String?
 
     public static func make(outages: [StarlinkOutage], status: StarlinkStatus?, since: Date, now: Date = Date()) -> StarlinkEvidence {
-        let window = outages.filter { $0.end >= since && $0.start <= now }.sorted { $0.start < $1.start }
+        let window = outages.compactMap { outage -> StarlinkOutage? in
+            var clipped = outage
+            clipped.start = max(outage.start, since)
+            clipped.seconds = min(outage.end, now).timeIntervalSince(clipped.start)
+            return clipped.seconds > 0 ? clipped : nil
+        }.sorted { $0.start < $1.start }
         func total(_ side: StarlinkOutage.Side) -> Double { window.filter { $0.side == side }.reduce(0) { $0 + $1.seconds } }
         return StarlinkEvidence(outages: window.suffix(60).map { Outage(start: $0.start, seconds: $0.seconds, cause: $0.cause.rawValue, side: $0.side.rawValue) },
                                 setupSeconds: total(.setup), networkSeconds: total(.network), dishSeconds: total(.dish),

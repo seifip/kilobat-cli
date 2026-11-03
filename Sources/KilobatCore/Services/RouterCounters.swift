@@ -65,10 +65,15 @@ public enum RouterCounters {
 
     public static func controlURL(description data: Data, base: URL) -> String? {
         let text = String(decoding: data, as: UTF8.self)
+        let declared = DiagnosticProbe.matches(#"<URLBase>\s*([^<]+?)\s*</URLBase>"#, in: text).first
+        let descriptionBase = declared.flatMap { URL(string: $0) } ?? base
         for service in text.components(separatedBy: "<service>").dropFirst() where service.contains("WANCommonInterfaceConfig") {
             guard let start = service.range(of: "<controlURL>"), let end = service.range(of: "</controlURL>", range: start.upperBound..<service.endIndex) else { continue }
             let path = service[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
-            return URL(string: path, relativeTo: base)?.absoluteString
+            guard let url = URL(string: path, relativeTo: descriptionBase)?.absoluteURL,
+                  ["http", "https"].contains(url.scheme), url.user == nil, url.password == nil,
+                  let host = url.host, IPv4PrivateAddress(host) != nil else { continue }
+            return url.absoluteString
         }
         return nil
     }

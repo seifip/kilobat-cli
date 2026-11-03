@@ -71,16 +71,22 @@ public struct DiagnosticSnapshot: Codable, Sendable {
     public let networkService: String?
     /// The Ethernet or USB interface traffic leaves through while Wi-Fi stays joined, such as a tethered phone.
     public var wiredInterface: String? = nil
+    /// The physical router, even when the default route points at a tunnel.
+    public var physicalGateway: String? = nil
+    /// Observed on the physical interface, used to distinguish Ethernet networks with the same router IP.
+    public var gatewayMAC: String? = nil
+    public var tunneledRoute: Bool? = nil
     /// The sign-in page came back on a network that was signed in to: the Wi-Fi logged you out, the internet isn't down.
     public var portalLoggedOut: Bool? = nil
     /// The Mac is on a device's own Wi-Fi (a printer's Wi-Fi Direct, a camera's or drone's network) where there is no
     /// internet by design: no alarm, no outage. The app fills it from the Wi-Fi name and whether anything past the router answered.
     public var setupNetwork: SetupNetworkMatch? = nil
+    var activeRadioHealth: ConnectionHealth? { wiredInterface == nil ? radio.health : nil }
     public var health: ConnectionHealth {
         if setupNetwork != nil { return .unknown }
         if captivePortal == true { return .poor }
-        if radio.health == .poor || (internet.lossPercent ?? 0) >= 20 { return .poor }
-        if radio.health == .degraded || (router?.average ?? 0) > 20 || (internet.average ?? 0) > 120 || (dnsMilliseconds ?? 0) > 150 || (internet.jitter ?? 0) > 30 { return .degraded }
+        if activeRadioHealth == .poor || (internet.lossPercent ?? 0) >= 20 { return .poor }
+        if activeRadioHealth == .degraded || (router?.average ?? 0) > 20 || (internet.average ?? 0) > 120 || (dnsMilliseconds ?? 0) > 150 || (internet.jitter ?? 0) > 30 { return .degraded }
         return internet.average == nil ? .unknown : .good
     }
     public var advice: [String] {
@@ -92,7 +98,7 @@ public struct DiagnosticSnapshot: Codable, Sendable {
                                             : "This network may require a login. Open the login page before testing again."]
         }
         var tips: [String] = []
-        if radio.health == .poor || radio.health == .degraded { tips.append("Wi-Fi signal is weak or noisy. Use Radar to find a stronger spot, or try a different channel.") }
+        if activeRadioHealth == .poor || activeRadioHealth == .degraded { tips.append("Wi-Fi signal is weak or noisy. Use Radar to find a stronger spot, or try a different channel.") }
         if (router?.average ?? 0) > 20 { tips.append("The local link to your router is slow. Move closer, reduce competing traffic, then retest before restarting the router.") }
         if (internet.average ?? 0) > 120 && (router?.average ?? 100) < 20 { tips.append("Your router responds quickly, but the internet path is slow. Compare another network or test again later; the upstream connection may be congested.") }
         if (dnsMilliseconds ?? 0) > 150 { tips.append("DNS lookups are slow. Compare Cloudflare or Google DNS, then restore Automatic if it does not help.") }

@@ -625,8 +625,10 @@ public struct CreditReport: Codable, Sendable {
                             interval: DateInterval, now: Date = Date()) -> CreditReport {
         let name = settings?.networkName ?? samples.last?.networkName
         let key = settings?.networkKey ?? samples.last?.networkKey
-        let starlink = dish.network != nil && dish.network == key ? dish.outages : []
-        let tally = CreditTally.make(events: events, samples: samples, starlink: starlink, sleeps: sleeps, network: name, from: interval.start, to: interval.end, now: now)
+        let starlink = dish.outages(on: key)
+        let scopedEvents = key.map { key in events.filter { $0.networkKey == key } } ?? []
+        let scopedSamples = key.map { key in samples.filter { $0.networkKey == key } } ?? []
+        let tally = CreditTally.make(events: scopedEvents, samples: scopedSamples, starlink: starlink, sleeps: sleeps, network: name, from: interval.start, to: interval.end, now: now)
         return make(settings: settings, tally: tally)
     }
 

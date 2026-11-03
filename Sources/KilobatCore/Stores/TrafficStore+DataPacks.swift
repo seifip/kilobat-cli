@@ -56,6 +56,7 @@ public extension TrafficStore {
         let mac = DataPacks.macBytes(pack, packs: dataPacks, usage: usage, names: { self.networkName(of: $0) },
                                      pending: networkKey == "unknown" ? nil : (networkKey, pendingBytes), to: now)
         try DataPacks.correct(&pack, leftBytes: leftBytes, macBytes: mac, now: now)
+        flush(at: now)
         preferences.dataPacks = dataPacks.map { $0.id == id ? pack : $0 }
     }
 

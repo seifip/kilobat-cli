@@ -94,19 +94,20 @@ public struct SupportReport: Codable, Sendable {
                             serviceSpeed: ServiceSpeedReport? = nil, mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
-        let key = latest?.networkKey, name = latest?.networkName
-        let window = samples.filter { $0.date >= since && $0.networkKey == key }
+        let key = latest.flatMap { $0.networkIdentified ? $0.networkKey : nil }, name = latest?.networkName
+        // With an unidentified network, summarize the current reading only.
+        let window = key == nil ? [latest].compactMap { $0 }.filter { $0.date >= since } : samples.filter { $0.date >= since && $0.networkKey == key }
         let outages = events
-            .filter { $0.kind == "Unreachable" && $0.network == name && ($0.end ?? now) >= since }
+            .filter { $0.kind == "Unreachable" && key != nil && $0.networkKey == key && ($0.end ?? now) >= since }
             .map { Outage(start: max($0.start, since), end: min($0.end ?? now, now)) }
             .filter { $0.end > $0.start }
         let speeds = speedTests
-            .filter { $0.result.date >= since && $0.networkKey == key }
+            .filter { $0.result.date >= since && $0.result.date <= now && $0.networkKey == key && $0.networkChanged != true }
             .suffix(10)
             .map { Speed(date: $0.result.date, downloadMbps: $0.result.downloadMbps, uploadMbps: $0.result.uploadMbps,
                          idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat) }
         let latency = window.isEmpty ? nil : Self.latency(window)
-        let plan = key.flatMap { plans[$0] } ?? ((planMbps ?? 0) > 0 ? planMbps : nil)
+        let plan = (key.flatMap { plans[$0] } ?? planMbps).flatMap { $0 > 0 ? $0 : nil }
         // Fewer than three tests add nothing the speed tests below don't say.
         let planCheck = PlanSummary.make(tests: speedTests, network: key, planMbps: plan, now: now).flatMap { $0.checks >= PlanSummary.enoughScheduled ? $0 : nil }
         let doctor = check.map { report in
