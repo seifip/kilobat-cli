@@ -37,6 +37,8 @@ public struct SupportReport: Codable, Sendable {
         public let uploadMbps: Double
         public let idleMs: Double?
         public let bufferbloat: String
+        public let downloadLoadedMs: Double?
+        public let uploadLoadedMs: Double?
     }
     public struct Check: Codable, Sendable {
         public let host: String
@@ -52,6 +54,9 @@ public struct SupportReport: Codable, Sendable {
 
     public let created: Date
     public let hours: Int
+    public let firstCheck: Date?
+    public let lastCheck: Date?
+    public let placeURL: String?
     /// "MacBook Pro · macOS 27.2". No serial number or name.
     public let mac: String
     /// "Wi-Fi 5 GHz, channel 149, signal −54 dBm" or "Ethernet". Never the network's name.
@@ -91,7 +96,7 @@ public struct SupportReport: Codable, Sendable {
     /// (`PlanSpeeds`); `planMbps` stands in for a network without one.
     public static func make(samples: [DiagnosticSnapshot], events: [NetworkEvent], speedTests: [SavedSpeedTest],
                             hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil, starlink: StarlinkEvidence? = nil,
-                            serviceSpeed: ServiceSpeedReport? = nil, mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
+                            serviceSpeed: ServiceSpeedReport? = nil, placeURL: String? = nil, mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
         let key = latest.flatMap { $0.networkIdentified ? $0.networkKey : nil }, name = latest?.networkName
@@ -105,7 +110,9 @@ public struct SupportReport: Codable, Sendable {
             .filter { $0.result.date >= since && $0.result.date <= now && $0.networkKey == key && $0.networkChanged != true }
             .suffix(10)
             .map { Speed(date: $0.result.date, downloadMbps: $0.result.downloadMbps, uploadMbps: $0.result.uploadMbps,
-                         idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat) }
+                         idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat,
+                         downloadLoadedMs: $0.result.downloadSeconds >= 2 ? $0.result.downloadLoaded.average : nil,
+                         uploadLoadedMs: $0.result.uploadSeconds >= 2 ? $0.result.uploadLoaded.average : nil) }
         let latency = window.isEmpty ? nil : Self.latency(window)
         let plan = (key.flatMap { plans[$0] } ?? planMbps).flatMap { $0 > 0 ? $0 : nil }
         // Fewer than three tests add nothing the speed tests below don't say.
@@ -128,7 +135,12 @@ public struct SupportReport: Codable, Sendable {
         if route != nil, let line = serviceSpeed?.providerLine {
             if latency == nil, outages.isEmpty, speeds.isEmpty, planCheck == nil, doctor == nil, starlink?.finding == nil { lines = [line] } else { lines.append(line) }
         }
-        return SupportReport(created: now, hours: hours, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
+        let suppliedURL = placeURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeURL = suppliedURL.flatMap { value -> String? in
+            guard let parts = URLComponents(string: value), ["http", "https"].contains(parts.scheme?.lowercased() ?? ""), parts.host != nil, parts.user == nil, parts.password == nil else { return nil }
+            return value
+        }
+        return SupportReport(created: now, hours: hours, firstCheck: window.map(\.date).min(), lastCheck: window.map(\.date).max(), placeURL: safeURL, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
                              findings: lines,
                              latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, planCheck: planCheck, check: doctor,
                              leftOut: [String(localized: "the network’s name", comment: "Left out of the provider report; items are joined with semicolons"),

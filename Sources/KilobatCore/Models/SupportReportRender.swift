@@ -7,6 +7,15 @@ public extension SupportReport {
             : String(localized: "\(date) · last \(hours) hours", comment: "When the provider report was made and the hours it covers")
     }
     private var leftOutLine: String { String(localized: "Left out for privacy: \(leftOut.joined(separator: "; ")).", comment: "Items joined with semicolons") }
+    private var observedLine: String? {
+        guard let firstCheck, let lastCheck else { return nil }
+        let first = firstCheck.formatted(date: .abbreviated, time: .shortened)
+        let last = lastCheck.formatted(date: .abbreviated, time: .shortened)
+        return String(localized: "Recorded checks: \(first) – \(last). Gaps may occur when the app is not running.")
+    }
+    private static func loaded(_ test: Speed) -> String {
+        String(localized: "download \(ms(test.downloadLoadedMs)), upload \(ms(test.uploadLoadedMs))")
+    }
     private static func result(_ status: String) -> String {
         switch status {
         case "ok": String(localized: "OK", comment: "A connection check layer passed, in the provider report")
@@ -52,6 +61,8 @@ public extension SupportReport {
     /// For pasting into a support chat or an email.
     var text: String {
         var lines = [String(localized: "Network report · \(dateLine)", comment: "The provider report’s title line, then when it was made and what it covers"), "\(mac) · \(connection)", ""]
+        if let observedLine { lines += [observedLine, ""] }
+        if let placeURL { lines += [String(localized: "Place: \(placeURL)"), ""] }
         lines += findings.map { "• " + $0 }
         if let latency {
             lines += ["", ([String(localized: "Checks: \(latency.checks)", comment: "How many health checks the provider report covers"),
@@ -71,7 +82,7 @@ public extension SupportReport {
         if !speedTests.isEmpty {
             lines += ["", String(localized: "Speed tests:", comment: "A heading in the provider report")] + speedTests.map { test in
                 let when = test.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-                return "  " + String(localized: "\(when)  ↓ \(Self.mbps(test.downloadMbps))  ↑ \(Self.mbps(test.uploadMbps))  idle \(Self.ms(test.idleMs))  under load \(Self.grade(test.bufferbloat))", comment: "One speed test in the provider report: when, download, upload, idle latency and the bufferbloat grade (Low, Moderate, High)")
+                return "  " + String(localized: "\(when)  ↓ \(Self.mbps(test.downloadMbps))  ↑ \(Self.mbps(test.uploadMbps))  idle \(Self.ms(test.idleMs))  under load \(Self.loaded(test)) (\(Self.grade(test.bufferbloat)))")
             }
         }
         if let planCheck {
@@ -91,6 +102,8 @@ public extension SupportReport {
 
     var markdown: String {
         var lines = ["# Network report", "", "\(dateLine)  ", "\(mac) · \(connection)", "", "## What was measured", ""]
+        if let observedLine { lines.insert(observedLine, at: 4) }
+        if let placeURL { lines.insert("Place: \(placeURL)", at: 4) }
         lines += findings.map { "- " + $0 }
         if let latency {
             lines += ["", "## Latency", "", "| Router | Internet | Internet p95 | DNS | Loss | Checks |", "|---|---|---|---|---|---|",
@@ -106,7 +119,7 @@ public extension SupportReport {
         }
         if !speedTests.isEmpty {
             lines += ["", "## Speed tests", "", "| When | Download | Upload | Idle latency | Under load |", "|---|---|---|---|---|"]
-            lines += speedTests.map { "| \($0.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \(Self.mbps($0.downloadMbps)) | \(Self.mbps($0.uploadMbps)) | \(Self.ms($0.idleMs)) | \($0.bufferbloat) |" }
+            lines += speedTests.map { "| \($0.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \(Self.mbps($0.downloadMbps)) | \(Self.mbps($0.uploadMbps)) | \(Self.ms($0.idleMs)) | \(Self.loaded($0)) (\($0.bufferbloat)) |" }
         }
         if let planCheck {
             let rows = Self.planRows(planCheck)
@@ -131,6 +144,8 @@ public extension SupportReport {
         var body = """
         <header><div class="brand">\(batSVG)<span>kilobat</span></div><div class="meta">\(esc(String(localized: "Network report", comment: "The provider report’s title")))<br><span>\(esc(dateLine))</span></div></header>
         <p class="device">\(esc(mac)) · \(esc(connection))</p>
+        \(observedLine.map { "<p>\(esc($0))</p>" } ?? "")
+        \(placeURL.map { "<p>\(esc(String(localized: "Place: \($0)")))</p>" } ?? "")
         <section class="findings"><h2>\(esc(String(localized: "What was measured", comment: "A heading in the provider report")))</h2><ul>\(findings.map { "<li>\(esc($0))</li>" }.joined())</ul></section>
         """
         if let latency {
@@ -159,7 +174,7 @@ public extension SupportReport {
         if !speedTests.isEmpty {
             body += "<section><h2>\(esc(String(localized: "Speed tests", comment: "A heading in the provider report")))</h2><table><tr>"
                 + [String(localized: "When"), String(localized: "Download"), String(localized: "Upload"), String(localized: "Idle latency"), String(localized: "Under load")].map { "<th>\(esc($0))</th>" }.joined() + "</tr>"
-            body += speedTests.map { "<tr><td>\(when($0.date))</td><td>\(esc(Self.mbps($0.downloadMbps)))</td><td>\(esc(Self.mbps($0.uploadMbps)))</td><td>\(esc(Self.ms($0.idleMs)))</td><td>\(esc(Self.grade($0.bufferbloat)))</td></tr>" }.joined()
+            body += speedTests.map { "<tr><td>\(when($0.date))</td><td>\(esc(Self.mbps($0.downloadMbps)))</td><td>\(esc(Self.mbps($0.uploadMbps)))</td><td>\(esc(Self.ms($0.idleMs)))</td><td>\(esc(Self.loaded($0))) (\(esc(Self.grade($0.bufferbloat))))</td></tr>" }.joined()
             body += "</table>" + (planMbps.map { "<p class=\"note\">\(esc(String(localized: "Plan: \(Self.mbps($0)) download.", comment: "The internet plan’s download speed, in the provider report")))</p>" } ?? "") + "</section>"
         }
         if let planCheck {
