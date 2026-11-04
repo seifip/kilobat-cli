@@ -94,4 +94,30 @@ struct SupportReportTests {
         #expect(report.speedTests.count == 1)
         #expect(report.findings.contains { $0.contains("50 Mbps down") && $0.contains("25% of the 200 Mbps plan") })
     }
+
+    @Test func reportIncludesObservedChecksLoadedLatencyAndOptionalPlace() throws {
+        let samples = [sample(60, router: 3, internet: 30), sample(10, router: 4, internet: 32)]
+        let baseline = PingResult(host: "example.com", samples: [20, 21, 22], lossPercent: 0)
+        let loaded = PingResult(host: "example.com", samples: [80, 80, 80], lossPercent: 0)
+        let result = SpeedTestResult(date: now.addingTimeInterval(-600), downloadMbps: 87, uploadMbps: 24, baseline: baseline, downloadLoaded: loaded, uploadLoaded: loaded, downloadSeconds: 8, uploadSeconds: 8, transferredBytes: 1000)
+        let saved = SavedSpeedTest(networkKey: samples[0].networkKey, networkName: "Home Wi-Fi", result: result)
+        let report = SupportReport.make(samples: samples, events: [], speedTests: [saved], hours: 24, placeURL: "https://example.com/stay?a=1&b=2", mac: "Mac", now: now)
+        #expect(report.firstCheck == samples.first?.date)
+        #expect(report.lastCheck == samples.last?.date)
+        #expect(report.speedTests.first?.downloadLoadedMs == 80)
+        #expect(report.speedTests.first?.uploadLoadedMs == 80)
+        #expect(report.text.contains("80 ms"))
+        #expect(report.html.contains("a=1&amp;b=2"))
+        #expect(report.markdown.contains("https://example.com/stay"))
+        let encoded = try JSONEncoder().encode(report)
+        #expect(try JSONDecoder().decode(SupportReport.self, from: encoded).placeURL == report.placeURL)
+    }
+
+    @Test func reportRejectsUnsafePlaceLinksAndDoesNotInventCoverage() {
+        let report = SupportReport.make(samples: [], events: [], speedTests: [], hours: 24, placeURL: "javascript:alert(1)", mac: "Mac", now: now)
+        #expect(report.placeURL == nil)
+        #expect(report.firstCheck == nil)
+        #expect(report.lastCheck == nil)
+        #expect(!report.text.contains("Recorded checks:"))
+    }
 }

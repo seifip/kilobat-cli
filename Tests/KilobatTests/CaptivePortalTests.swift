@@ -5,6 +5,14 @@ import Testing
 struct CaptivePortalProbeTests {
     private let appleSuccess = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"
 
+    @Test func chinaFallbackIsOptInAndInterceptionStillDetected() {
+        #expect(CaptivePortal.fallback(china: false) == .google)
+        #expect(CaptivePortal.fallback(china: true) == .xiaomi)
+        #expect(CaptivePortal.classify(.xiaomi, status: 204, body: "", location: nil) == .success)
+        #expect(CaptivePortal.classify(.xiaomi, status: 302, body: "", location: "http://login.example/") == .intercepted(URL(string: "http://login.example/")))
+        #expect(CaptivePortal.classify(.xiaomi, status: nil, body: "", location: nil) == .failed)
+    }
+
     @Test func applesSuccessPageIsOpen() {
         #expect(CaptivePortal.classify(.apple, status: 200, body: appleSuccess, location: nil) == .success)
     }
