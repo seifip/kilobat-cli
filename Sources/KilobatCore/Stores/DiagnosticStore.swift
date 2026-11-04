@@ -39,6 +39,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let journal = NetworkJournal()
     /// The network's sign-in page, when it has one, and how long a sign-in lasts there.
     public let portal = PortalWatch()
+    public let portalAlternative = PortalAlternative()
     /// Router check-up: whether the router has been getting slower over days, from the checks below.
     public let router = RouterWatch()
     /// Off in Lite, which has no router check-up: then no check is kept for it.
@@ -242,7 +243,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let after = Self.portBytes(), finished = Date()
         let other = await secondary
         let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
-        await checkPortal(&sample, internetFailed: fallback == false)
+        await checkPortal(&sample, internetFailed: fallback == false, reachable: sample.internet.average != nil || other.average != nil || fallback == true)
         if sample.wiredInterface == nil {
             let reachable = sample.internet.average != nil || other.average != nil || fallback == true
             sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable)
@@ -271,10 +272,15 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         diagnosing = false
     }
     /// Looks for the network's sign-in page when PortalWatch says it's due, and marks the sample with what it knows.
-    private func checkPortal(_ sample: inout DiagnosticSnapshot, internetFailed: Bool) async {
+    private func checkPortal(_ sample: inout DiagnosticSnapshot, internetFailed: Bool, reachable: Bool) async {
         let key = sample.networkKey
-        if portal.due(network: key, internetFailed: internetFailed) {
-            portal.observe(await CaptivePortal.check(), network: key, name: sample.networkName, identified: sample.networkIdentified)
+        let wifi = sample.wiredInterface == nil && sample.gateway != nil
+        portalAlternative.context(network: key, identified: sample.networkIdentified, wifi: wifi, reachable: reachable)
+        let alternative = portalAlternative.enabled(for: key, identified: sample.networkIdentified)
+        if portal.due(network: key, internetFailed: internetFailed) || (portalAlternative.needsRetry && reachable) {
+            let check = await CaptivePortal.check(useAlternative: alternative)
+            portal.observe(check, network: key, name: sample.networkName, identified: sample.networkIdentified)
+            portalAlternative.observe(check, normal: !alternative && !UserDefaults.standard.bool(forKey: "network.chinaPortalFallback"), reachable: reachable, wifi: wifi)
         }
         portal.tick()
         sample.captivePortal = portal.intercepting

@@ -96,19 +96,28 @@ public enum CaptivePortal {
 
     /// Apple's page first; Google's only when Apple's didn't answer. When Apple's answered with something else,
     /// that's what macOS sees too, so it decides.
-    public static func check(timeout: TimeInterval = 5) async -> PortalCheck {
+    public static func check(timeout: TimeInterval = 5, useAlternative: Bool = false) async -> PortalCheck {
         let apple = await fetch(.apple, timeout: timeout)
         switch apple.answer {
         case .success: return PortalCheck(state: .open)
         case .intercepted(let url): return PortalCheck(state: .portal, url: url, hintMinutes: hint(in: apple.body))
         case .failed:
-            let fallback = fallback(china: UserDefaults.standard.bool(forKey: "network.chinaPortalFallback"))
+            let fallback = fallback(china: useAlternative || UserDefaults.standard.bool(forKey: "network.chinaPortalFallback"))
             let response = await fetch(fallback, timeout: timeout)
             switch response.answer {
             case .success: return PortalCheck(state: .open)
             case .intercepted(let url): return PortalCheck(state: .portal, url: url, hintMinutes: hint(in: response.body))
             case .failed: return PortalCheck(state: .offline)
             }
+        }
+    }
+
+    public static func alternativeCheck(timeout: TimeInterval = 5) async -> PortalCheck {
+        let response = await fetch(.xiaomi, timeout: timeout)
+        switch response.answer {
+        case .success: return PortalCheck(state: .open)
+        case .intercepted(let url): return PortalCheck(state: .portal, url: url)
+        case .failed: return PortalCheck(state: .offline)
         }
     }
 
