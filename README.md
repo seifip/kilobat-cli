@@ -46,7 +46,7 @@ Run `kilobat --help` or `kilobat <command> --help` for more options. Commands th
 
 Prefer a view you can glance at? [Kilobat](https://kilobat.app) puts live traffic in your menu bar and brings diagnostics, usage history, Wi-Fi tools, and app-level network controls into a native Mac app.
 
-<a href="https://kilobat.app"><img src="docs/images/kilobat-app.png" alt="Kilobat for Mac: Wi-Fi networks and the menu-bar dashboard with live traffic, data budget, and per-app controls" width="1000"></a>
+<a href="https://kilobat.app"><img src="docs/images/kilobat-radar-showcase.png" alt="Kilobat for Mac: Wi-Fi networks and the menu-bar dashboard with live traffic, data budget, and per-app controls" width="1000"></a>
 
 **[Explore the Mac app →](https://kilobat.app)**
 
