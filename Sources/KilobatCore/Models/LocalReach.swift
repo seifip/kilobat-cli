@@ -28,6 +28,56 @@ public struct LocalService: Codable, Sendable, Equatable, Hashable {
     var mac: Bool { kind == .airPlay && (model?.hasPrefix("Mac") == true || model?.hasPrefix("iMac") == true) }
 }
 
+/// One device as a person thinks of it: a TV that speaks Google Cast and AirPlay is one TV, not two rows.
+public struct LocalDevice: Sendable, Equatable, Identifiable {
+    public enum Kind: String, Sendable { case tv, appleTV, laptop, desktop, speaker, homePod, printer }
+    public var id: String { name.lowercased() }
+    public let name: String
+    public let kind: Kind
+    /// What it offers, in the words the person sees on their devices: "Google Cast · AirPlay", "AirPrint".
+    public let offers: [LocalServiceKind]
+
+    /// Groups services by exact device name: a TV offering Google Cast and AirPlay under one name is one device. A
+    /// "(4)" suffix stays: it's how macOS told two same-named devices apart, and often the name the device now has.
+    public static func group(_ services: [LocalService]) -> [LocalDevice] {
+        var order: [String] = [], members: [String: [LocalService]] = [:], names: [String: String] = [:]
+        for service in services where service.kind != .companion {
+            let name = service.name.trimmingCharacters(in: .whitespaces), key = name.lowercased()
+            if members[key] == nil { order.append(key); names[key] = name }
+            members[key, default: []].append(service)
+        }
+        return order.map { key in
+            let group = members[key] ?? []
+            let offers = Array(Set(group.map(\.kind))).sorted()
+            return LocalDevice(name: names[key] ?? key, kind: kind(group), offers: offers)
+        }
+    }
+
+    static func kind(_ group: [LocalService]) -> Kind {
+        if group.contains(where: { $0.kind == .printer }) { return .printer }
+        let models = group.compactMap(\.model)
+        if models.contains(where: { $0.hasPrefix("AppleTV") }) { return .appleTV }
+        if models.contains(where: { $0.hasPrefix("AudioAccessory") }) { return .homePod }
+        if models.contains(where: { $0.hasPrefix("MacBook") }) { return .laptop }
+        if models.contains(where: { $0.hasPrefix("iMac") || $0.hasPrefix("Mac") }) { return .desktop }
+        let audio = models.contains { model in ["audio", "speaker", "nest mini", "home mini", "sonos", "soundbar"].contains { model.lowercased().contains($0) } }
+        if audio { return .speaker }
+        return .tv
+    }
+
+    /// "Google Cast · AirPlay", "AirPrint".
+    public var label: String {
+        offers.map { kind -> String in
+            switch kind {
+            case .cast: "Google Cast"
+            case .airPlay: "AirPlay"
+            case .printer: String(localized: "Printer", comment: "Casting and printing: what a device on the network offers")
+            case .companion: ""
+            }
+        }.filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+}
+
 /// The Bonjour types the check browses, and how their records name a device.
 public enum LocalServiceCatalog {
     public static let types: [(type: String, kind: LocalServiceKind)] = [
@@ -155,6 +205,15 @@ public struct LocalReachCheck: Codable, Sendable, Equatable {
     }
 
     public var targets: [LocalService] { services.filter { $0.kind != .companion } }
+    /// The devices to cast or print to, one per device.
+    public var devices: [LocalDevice] { LocalDevice.group(targets) }
+    /// The verdict without the device list, for a panel that lists the devices under it.
+    public var title: String {
+        guard verdict == .works else { return headline }
+        if !casting.isEmpty && !printers.isEmpty { return String(localized: "Casting and printing should work", comment: "Local network check, above the list of devices found") }
+        return casting.isEmpty ? String(localized: "Printing should work", comment: "Local network check, above the list of printers found")
+                               : String(localized: "Casting should work", comment: "Local network check, above the list of TVs and speakers found")
+    }
     public var casting: [LocalService] { services.filter(\.kind.casting) }
     public var printers: [LocalService] { services.filter { $0.kind == .printer } }
 
@@ -177,7 +236,7 @@ public struct LocalReachCheck: Codable, Sendable, Equatable {
     public var headline: String {
         switch verdict {
         case .works:
-            let names = Self.list(targets.map(\.name))
+            let names = Self.list(devices.map(\.name))
             if !casting.isEmpty && !printers.isEmpty {
                 return String(localized: "Casting and printing should work: found \(names)", comment: "Local network check; the argument lists devices such as “Living Room TV, HP LaserJet”")
             }

@@ -47,6 +47,24 @@ import Testing
         await #expect(throws: RouterAPIError.notLocal) { _ = try await session.send(URLRequest(url: URL(string: "http://127.0.0.1:9/")!)) }
     }
 
+    @Test func aReplyPastTheLimitIsRefused() async throws {
+        let router = try FakeRouter { _ in .init(200, String(repeating: "a", count: 100_000)) }
+        await router.start()
+        defer { router.stop() }
+        let request = URLRequest(url: router.base)
+        await #expect(throws: (any Error).self) { _ = try await loopback.send(request, limit: 65_536) }
+        let (data, response) = try await loopback.send(request, limit: 200_000)
+        #expect(data.count == 100_000 && response.statusCode == 200)
+    }
+
+    @Test func aRedirectIsNotFollowed() async throws {
+        let router = try FakeRouter { _ in .init(302, "", headers: ["Location": "http://127.0.0.1:1/elsewhere"]) }
+        await router.start()
+        defer { router.stop() }
+        let (_, response) = try await loopback.send(URLRequest(url: router.base), limit: 65_536)
+        #expect(response.statusCode == 302 && router.requests.count == 1)
+    }
+
     // MARK: FRITZ!Box TR-064
 
     @Test func tr064ParsesAnswersFaultsServicesAndTheHostList() throws {
@@ -66,6 +84,10 @@ import Testing
         #expect(monitor.down == 3_200_000 && monitor.up == 210_000)
         let link = TR064.utilization(TR064.parse(Data(RouterFixtures.linkProperties.utf8)).values)
         #expect(link.down == 1_500_000 && link.up == 60_000)
+        let monitorMax = TR064.monitorMax(TR064.parse(Data(RouterFixtures.onlineMonitor.utf8)).values)
+        #expect(monitorMax.down == 13_900_000 && monitorMax.up == 5_000_000)
+        let linkMax = TR064.linkMax(TR064.parse(Data(RouterFixtures.linkProperties.utf8)).values)
+        #expect(linkMax.down == 13_750_000 && linkMax.up == 5_000_000)
     }
 
     /// A FRITZ!Box: 401 with a digest challenge, then answers once the response hash is right.
@@ -97,6 +119,8 @@ import Testing
             case "X_AVM-DE_GetOnlineMonitor": return .init(200, RouterFixtures.onlineMonitor)
             case "GetCommonLinkProperties": return .init(200, RouterFixtures.linkProperties)
             case "GetHostNumberOfEntries": return .init(200, RouterFixtures.hostCount)
+            case "X_AVM-DE_GetDSLInfo": return .init(200, RouterFixtures.dslInfo)
+            case "X_AVM-DE_GetDSLDiagnoseInfo": return .init(200, RouterFixtures.dslDiagnose)
             case "GetGenericHostEntry":
                 let index = Int(request.text.components(separatedBy: "<NewIndex>").last?.prefix { $0.isNumber } ?? "0") ?? 0
                 return .init(200, RouterFixtures.genericHost(index))
@@ -112,13 +136,14 @@ import Testing
         let poll = try await box.poll()
         #expect(poll.model == "FRITZ!Box 7590" && poll.firmware == "154.08.00" && poll.uptime == 86400)
         #expect(poll.clients.count == 3 && !poll.perDevice && poll.missing.isEmpty)
-        #expect(poll.wan == RouterWAN(down: 4_294_967_000, up: 123_456_789, downRate: 3_200_000, upRate: 210_000, bits: 32))
+        #expect(poll.wan == RouterWAN(down: 4_294_967_000, up: 123_456_789, downRate: 3_200_000, upRate: 210_000, bits: 32, downMax: 13_900_000, upMax: 5_000_000))
+        #expect(poll.dsl == RouterDSLLine(downKbps: 98_200, upKbps: 36_100, marginDownTenths: 81, marginUpTenths: 64, crcErrors: 12))
         // The first SOAP request goes without credentials and gets the challenge (URLSession itself may try it once more
         // unsigned); every request after the first signed one carries the digest from the start.
         let soap = server.requests.filter { $0.method == "POST" && $0.headers["soapaction"]?.contains("GetSecurityPort") == false }
         let unsigned = soap.prefix { $0.headers["authorization"] == nil }
         #expect((1...2).contains(unsigned.count) && unsigned.allSatisfy { $0.headers["soapaction"]?.contains("#GetInfo") == true })
-        #expect(soap.dropFirst(unsigned.count).allSatisfy { $0.headers["authorization"]?.hasPrefix("Digest ") == true } && soap.count == unsigned.count + 6)
+        #expect(soap.dropFirst(unsigned.count).allSatisfy { $0.headers["authorization"]?.hasPrefix("Digest ") == true } && soap.count == unsigned.count + 8)
         #expect(!server.requests.contains { $0.text.contains("secret") || ($0.headers["authorization"] ?? "").contains("secret") })
         // The box's own firmware check, read and never acted on.
         #expect(poll.update == RouterFirmware(product: "FRITZ!OS", installed: "8.00", available: "8.10", updateAvailable: true, url: "http://127.0.0.1"))
@@ -375,6 +400,37 @@ import Testing
         let gap = meter.step("a", down: 12_000, up: 700, at: now.addingTimeInterval(7210))
         let jump = meter.step("a", down: 100_000_012_000, up: 700, at: now.addingTimeInterval(7220))
         #expect(gap == nil && jump == nil)
+    }
+
+    @Test func aResetIsNotAWrapWhenTheLineCouldNotHaveCarriedIt() {
+        // A wrap would be 1.3 GB; at most 100 MB could have moved: the counter was reset.
+        #expect(RouterMeter.delta(from: 3_000_000_000, to: 5_000_000, bits: 32, limit: 100_000_000) == 5_000_000)
+    }
+
+    @Test func aWrapWithinTheLimitCounts() {
+        #expect(RouterMeter.delta(from: 4_294_967_000, to: 704, bits: 32, limit: 100_000_000) == 1_000)
+    }
+
+    @Test func aWrapFromTheLowerHalfCountsWhenItFits() {
+        #expect(RouterMeter.delta(from: 1_000_000_000, to: 500, bits: 32, limit: 4_000_000_000) == 3_294_967_796)
+        #expect(RouterMeter.delta(from: 1_000_000_000, to: 500, bits: 32) == 500)
+    }
+
+    @Test func theMeterUsesTheLinesMaximum() {
+        var meter = RouterMeter()
+        #expect(meter.step("home", down: 3_000_000_000, up: 0, at: now, bits: 32, downMax: 1_000_000, upMax: 1_000_000) == nil)
+        let limited = meter.step("home", down: 5_000_000, up: 0, at: now.addingTimeInterval(60), bits: 32, downMax: 1_000_000, upMax: 1_000_000)
+        #expect(limited?.down == 5_000_000)
+        var plain = RouterMeter()
+        #expect(plain.step("home", down: 3_000_000_000, up: 0, at: now, bits: 32) == nil)
+        #expect(plain.step("home", down: 5_000_000, up: 0, at: now.addingTimeInterval(60), bits: 32)?.down == 1_299_967_296)
+    }
+
+    @Test func wrapSafeIntervalFollowsTheLine() {
+        #expect(abs(RouterMeter.wrapSafeInterval(capacity: 13_900_000) - 154.5) < 0.1)
+        #expect(abs(RouterMeter.wrapSafeInterval(capacity: 125_000_000) - 17.18) < 0.1)
+        #expect(RouterMeter.wrapSafeInterval(capacity: nil) == RouterMeter.wrapSafeInterval(capacity: 125_000_000))
+        #expect(RouterMeter.wrapSafeInterval(capacity: 0) == RouterMeter.wrapSafeInterval(capacity: 125_000_000))
     }
 
     @Test func ledgerKeepsTodaysTotalsPerDeviceFor30Days() {
@@ -718,12 +774,32 @@ import Testing
     @Test func detectionRecognisesEachRouter() async throws {
         #expect(RouterDetect.guess(vendor: "AVM Audiovisuelles Marketing und Computersysteme") == .fritzbox)
         #expect(RouterDetect.guess(vendor: "Ubiquiti Inc") == .unifi && RouterDetect.guess(vendor: "Routerboard.com") == .mikrotik && RouterDetect.guess(vendor: nil) == nil)
-        #expect(RouterDetect.recognise(RouterFixtures.tr64desc, port: 49000) == .fritzbox)
-        #expect(RouterDetect.recognise("<title>UniFi OS</title>", port: nil) == .unifi)
-        #expect(RouterDetect.recognise("<title>RouterOS router configuration page</title>", port: nil) == .mikrotik)
-        #expect(RouterDetect.recognise("<meta http-equiv=\"refresh\" content=\"0; URL=cgi-bin/luci/\" />", port: nil) == .openwrt)
-        #expect(RouterDetect.recognise("<html>Welcome</html>", port: nil) == nil)
+        #expect(RouterDetect.recognise(RouterFixtures.tr64desc, as: .fritzbox, port: 49000))
+        #expect(!RouterDetect.recognise(RouterFixtures.tr64desc, as: .fritzbox, port: 80))
+        #expect(RouterDetect.recognise("<title>UniFi OS</title>", as: .unifi, port: nil))
+        #expect(RouterDetect.recognise("<title>RouterOS router configuration page</title>", as: .mikrotik, port: nil))
+        #expect(RouterDetect.recognise("<link rel=\"stylesheet\" href=\"/luci-static/bootstrap/cascade.css\"><title>OpenWrt - LuCI</title>", as: .openwrt, port: nil))
+        for kind in RouterKind.allCases { #expect(!RouterDetect.recognise("<html>Welcome</html>", as: kind, port: nil)) }
         // Public addresses are never probed.
         #expect(await RouterDetect.detect(gateway: "203.0.113.1", vendor: nil) == nil)
+    }
+
+    @Test func ordinaryWordsDoNotNameARouter() {
+        #expect(!RouterDetect.recognise("A unified dashboard for your home network", as: .unifi, port: nil))
+        #expect(!RouterDetect.recognise("Welcome to Unifi broadband. Unifi Home router", as: .unifi, port: nil))
+        #expect(!RouterDetect.recognise("body { font-family: \"Lucida Grande\", Lucida, sans-serif }", as: .openwrt, port: nil))
+        #expect(!RouterDetect.recognise("The requested URL /cgi-bin/luci/ was not found on this server.", as: .openwrt, port: nil))
+        #expect(!RouterDetect.recognise("<title>UniFi OS</title>", as: .mikrotik, port: nil))
+        #expect(!RouterDetect.recognise("<title>UniFi OS</title>", as: .openwrt, port: nil))
+        #expect(!RouterDetect.recognise("WebFig", as: .unifi, port: nil))
+        #expect(!RouterDetect.recognise("<meta refresh=\"cgi-bin/luci/\">", as: .openwrt, port: nil))
+    }
+
+    @Test func looserSpellingsOfTheRealProductsStillMatch() {
+        #expect(RouterDetect.recognise("<title>UniFi</title>", as: .unifi, port: nil))
+        #expect(RouterDetect.recognise("<link href=\"/unifi-os/app.css\">", as: .unifi, port: nil))
+        #expect(RouterDetect.recognise("<title>UniFi Network</title>", as: .unifi, port: nil))
+        #expect(RouterDetect.recognise("<title>LuCI - Lua Configuration Interface</title>", as: .openwrt, port: nil))
+        #expect(RouterDetect.recognise("<title>OpenWrt</title>", as: .openwrt, port: nil))
     }
 }

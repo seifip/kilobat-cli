@@ -3,6 +3,7 @@ import Foundation
 // The smart-home check: Thread networks and their border routers, Matter and HomeKit devices, and whether the
 // network is ready for Matter. Everything here is read from Bonjour advertisements and this Mac's own network
 // state; nothing is commissioned, paired or controlled. Pure, so it can be tested with made-up TXT records.
+// Sources for every key and rule: Release/RESEARCH-DECISIONS.md, "Smart home".
 
 /// One DNS-SD service instance as the browse resolved it.
 public struct BonjourInstance: Sendable, Equatable {

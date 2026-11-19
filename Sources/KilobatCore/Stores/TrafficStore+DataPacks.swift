@@ -37,10 +37,30 @@ public extension TrafficStore {
 
     /// Adds a pack, ending or shortening others on the same networks. Returns the ones it ended.
     @discardableResult func addPack(_ pack: DataPack, now: Date = Date()) -> [DataPack] {
-        var packs = DataPacks.pruned(dataPacks, now: now)
+        var pack = pack, packs = DataPacks.pruned(dataPacks, now: now)
+        if pack.holdUploads == nil, dataPacks.last?.holdUploads == true { pack.holdUploads = true }
         let ended = DataPacks.add(pack, to: &packs, known: knownNetworks)
         preferences.dataPacks = packs
         return ended
+    }
+
+    /// Whether Send later holds big uploads while on a prepaid pack: kept on each pack, set on every running and
+    /// upcoming one at once, and carried over to packs added later.
+    var holdsUploadsOnPacks: Bool {
+        get {
+            let live = dataPacks.filter { $0.finish > Date() }
+            return live.isEmpty ? dataPacks.last?.holdUploads == true : live.allSatisfy { $0.holdUploads == true }
+        }
+        set {
+            let now = Date(), live = Set(dataPacks.filter { $0.finish > now }.map(\.id)), latest = dataPacks.last?.id
+            guard !dataPacks.isEmpty else { return }
+            preferences.dataPacks = dataPacks.map { pack in
+                guard live.contains(pack.id) || (live.isEmpty && pack.id == latest) else { return pack }
+                var next = pack
+                next.holdUploads = newValue ? true : nil
+                return next
+            }
+        }
     }
 
     /// Replaces a pack after it was edited, keeping the others to one pack per network.
@@ -56,6 +76,7 @@ public extension TrafficStore {
         let mac = DataPacks.macBytes(pack, packs: dataPacks, usage: usage, names: { self.networkName(of: $0) },
                                      pending: networkKey == "unknown" ? nil : (networkKey, pendingBytes), to: now)
         try DataPacks.correct(&pack, leftBytes: leftBytes, macBytes: mac, now: now)
+        flush(at: now)
         preferences.dataPacks = dataPacks.map { $0.id == id ? pack : $0 }
     }
 

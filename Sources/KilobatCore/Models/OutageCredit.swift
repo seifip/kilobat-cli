@@ -158,6 +158,13 @@ public struct CreditOutage: Codable, Sendable, Equatable, Identifiable {
     public let dishOutages: Int
     /// Still down when the tally was made.
     public let ongoing: Bool
+    /// The whole outage this is the in-period part of, set only when the period's edge cut it. A provider's
+    /// threshold is judged on these; `start`, `end` and `seconds` stay the part inside the period.
+    public var wholeStart: Date? = nil
+    public var wholeEnd: Date? = nil
+    public var judgedStart: Date { wholeStart ?? start }
+    public var judgedEnd: Date { wholeEnd ?? end }
+    public var judgedSeconds: TimeInterval { judgedEnd.timeIntervalSince(judgedStart) }
     public var id: Date { start }
     public var seconds: TimeInterval { end.timeIntervalSince(start) }
 }
@@ -193,7 +200,7 @@ public struct CreditTally: Codable, Sendable, Equatable {
                             network: String?, from: Date, to: Date, now: Date = Date()) -> CreditTally {
         let end = min(to, now)
         var local = 0.0, unproven = 0.0, asleep = 0.0, portal = 0.0
-        struct Piece { var start: Date; var end: Date; var sources: Set<CreditOutage.Source>; var checks: Int; var answered: Int; var dish: Int; var ongoing: Bool }
+        struct Piece { var start: Date; var end: Date; var sources: Set<CreditOutage.Source>; var checks: Int; var answered: Int; var dish: Int; var ongoing: Bool; var wholeStart: Date; var wholeEnd: Date }
         var pieces: [Piece] = []
         func awake(_ interval: DateInterval) -> [DateInterval] {
             var parts = [interval]
@@ -201,6 +208,17 @@ public struct CreditTally: Codable, Sendable, Equatable {
                 parts = parts.flatMap { part -> [DateInterval] in
                     guard let overlap = part.intersection(with: sleep), overlap.duration > 0 else { return [part] }
                     asleep += overlap.duration
+                    return [DateInterval(start: part.start, end: overlap.start), DateInterval(start: overlap.end, end: part.end)].filter { $0.duration > 0 }
+                }
+            }
+            return parts
+        }
+        /// Like `awake`, but for the whole outage: out-of-period sleep is never added to the asleep total.
+        func awakeOnly(_ interval: DateInterval) -> [DateInterval] {
+            var parts = [interval]
+            for sleep in sleeps {
+                parts = parts.flatMap { part -> [DateInterval] in
+                    guard let overlap = part.intersection(with: sleep), overlap.duration > 0 else { return [part] }
                     return [DateInterval(start: part.start, end: overlap.start), DateInterval(start: overlap.end, end: part.end)].filter { $0.duration > 0 }
                 }
             }
@@ -227,16 +245,22 @@ public struct CreditTally: Codable, Sendable, Equatable {
                 continue
             }
             // A sleep splits the outage; each part gets its share of the checks, so none are counted twice.
+            let wholeParts = awakeOnly(DateInterval(start: event.start, end: max(event.start, min(event.end ?? now, now))))
             pieces += parts.map { part in
                 let share = seconds > 0 ? part.duration / seconds : 1
+                let container = wholeParts.first { $0.start <= part.start && $0.end >= part.end } ?? part
                 return Piece(start: part.start, end: part.end, sources: [.kilobat], checks: Int((Double(checks) * share).rounded()), answered: Int((Double(answered) * share).rounded()),
-                             dish: 0, ongoing: event.end == nil && part.end >= stop && stop >= now)
+                             dish: 0, ongoing: event.end == nil && part.end >= stop && stop >= now, wholeStart: container.start, wholeEnd: container.end)
             }
         }
         for outage in starlink where outage.side == .network {
             let start = max(outage.start, from), stop = min(outage.start.addingTimeInterval(outage.seconds), end)
             guard stop > start else { continue }
-            pieces += awake(DateInterval(start: start, end: stop)).map { Piece(start: $0.start, end: $0.end, sources: [.starlink], checks: 0, answered: 0, dish: 1, ongoing: false) }
+            let wholeParts = awakeOnly(DateInterval(start: outage.start, end: max(outage.start, min(outage.start.addingTimeInterval(outage.seconds), now))))
+            pieces += awake(DateInterval(start: start, end: stop)).map { part in
+                let container = wholeParts.first { $0.start <= part.start && $0.end >= part.end } ?? part
+                return Piece(start: part.start, end: part.end, sources: [.starlink], checks: 0, answered: 0, dish: 1, ongoing: false, wholeStart: container.start, wholeEnd: container.end)
+            }
         }
         // Kilobat's outage and the dish's log of the same minutes count once.
         var merged: [Piece] = []
@@ -244,11 +268,13 @@ public struct CreditTally: Codable, Sendable, Equatable {
             if var last = merged.last, piece.start <= last.end {
                 last.end = max(last.end, piece.end); last.sources.formUnion(piece.sources)
                 last.checks += piece.checks; last.answered += piece.answered; last.dish += piece.dish; last.ongoing = last.ongoing || piece.ongoing
+                last.wholeStart = min(last.wholeStart, piece.wholeStart); last.wholeEnd = max(last.wholeEnd, piece.wholeEnd)
                 merged[merged.count - 1] = last
             } else { merged.append(piece) }
         }
         let outages = merged.map { CreditOutage(start: $0.start, end: $0.end, sources: [CreditOutage.Source.kilobat, .starlink].filter($0.sources.contains),
-                                                routerChecks: $0.checks, routerAnswered: $0.answered, dishOutages: $0.dish, ongoing: $0.ongoing) }
+                                                routerChecks: $0.checks, routerAnswered: $0.answered, dishOutages: $0.dish, ongoing: $0.ongoing,
+                                                wholeStart: $0.wholeStart == $0.start ? nil : $0.wholeStart, wholeEnd: $0.wholeEnd == $0.end ? nil : $0.wholeEnd) }
         return CreditTally(from: from, to: to, network: network, outages: outages, localSeconds: local, unprovenSeconds: unproven, asleepSeconds: asleep, portalSeconds: portal)
     }
 
@@ -282,6 +308,8 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
     /// The last day to ask about the earliest qualifying outage, when the rule limits it.
     public let askBy: Date?
 
+    /// A threshold is judged on the whole outage; a credit day belongs to the period it starts in, and pro rata time to
+    /// the period it fell in, so the months never count the same day twice.
     public static func make(policy: CreditPolicy?, tally: CreditTally, monthlyPrice: Double?, capDays: Int? = nil, calendar: Calendar = .current) -> CreditEstimate {
         guard let policy else {
             return CreditEstimate(policy: nil, qualifies: false, amount: nil, atLeast: false, currency: nil, days: nil, qualifying: [], crossed: [], needsPrice: false, askBy: nil)
@@ -302,7 +330,7 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
         } else {
             for outage in tally.outages {
                 let deadline = self.deadline(for: outage, threshold: threshold, calendar: calendar)
-                let passed = if let hours = threshold.hours { outage.seconds >= hours * 3600 } else if (threshold.days ?? 0) == 0 { true } else { outage.end > deadline }
+                let passed = if let hours = threshold.hours { outage.judgedSeconds >= hours * 3600 } else if (threshold.days ?? 0) == 0 { true } else { outage.judgedEnd > deadline }
                 if passed, outage.seconds > 0 { qualifying.append(outage); crossed.append(deadline) }
             }
         }
@@ -311,10 +339,15 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
         case .daily, .tiered:
             for outage in qualifying {
                 let deadline = self.deadline(for: outage, threshold: threshold, calendar: calendar)
-                var count = Int(ceil(max(0, outage.end.timeIntervalSince(deadline)) / 86_400 - 1e-9))
-                if let capDays { count = min(count, capDays) }
+                let all = Int(ceil(max(0, outage.judgedEnd.timeIntervalSince(deadline)) / 86_400 - 1e-9))
+                let capped = capDays.map { min(all, $0) } ?? all
                 let first = (threshold.days ?? 0) + 1
-                for day in first..<(first + count) {
+                var count = 0
+                for block in 0..<capped {
+                    let starts = deadline.addingTimeInterval(Double(block) * 86_400)
+                    guard starts >= tally.from, starts < tally.to else { continue }
+                    let day = first + block
+                    count += 1
                     if credit.kind == .daily { amount = amount.map { $0 + (credit.amount ?? 0) } }
                     else if let tier = credit.tiers?.last(where: { $0.fromDay <= day }) {
                         let share = price.map { $0 * tier.percent / 100 }
@@ -328,12 +361,18 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
             let down = qualifying.reduce(0.0) { $0 + $1.seconds }
             amount = price.map { min($0, $0 * down / monthSeconds) }
         case .fullDay:
-            for outage in qualifying { days += 1 + Int(ceil(max(0, outage.seconds - 86_400) / 86_400 - 1e-9)) }
+            for outage in qualifying {
+                let all = 1 + Int(ceil(max(0, outage.judgedSeconds - 86_400) / 86_400 - 1e-9))
+                for block in 0..<all {
+                    let starts = outage.judgedStart.addingTimeInterval(Double(block) * 86_400)
+                    if starts >= tally.from, starts < tally.to { days += 1 }
+                }
+            }
             amount = price.map { price in min(credit.capMonthly == true ? price : .infinity, price / daysInMonth * Double(days)) }
         }
         let needsPrice = price == nil && (credit.kind == .proRata || credit.kind == .fullDay)
         let qualifies = !qualifying.isEmpty && (amount ?? 1) > 0
-        let askBy = policy.claim.windowDays.flatMap { window in qualifying.map(\.end).min().map { $0.addingTimeInterval(Double(window) * 86_400) } }
+        let askBy = policy.claim.windowDays.flatMap { window in qualifying.map(\.judgedEnd).min().map { $0.addingTimeInterval(Double(window) * 86_400) } }
         return CreditEstimate(policy: policy.id, qualifies: qualifies, amount: qualifies ? amount.map { ($0 * 100).rounded() / 100 } : nil, atLeast: atLeast && qualifies,
                               currency: credit.currency, days: credit.kind == .proRata ? nil : days, qualifying: qualifying.map(\.start), crossed: crossed,
                               needsPrice: needsPrice && qualifies, askBy: qualifies ? askBy : nil)
@@ -342,10 +381,10 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
     /// When the provider's deadline passes for an outage, if it was reported as it started. A day rule ends at
     /// midnight after the last of its days, counted after the day of the report; working days skip weekends.
     public static func deadline(for outage: CreditOutage, threshold: CreditPolicy.Threshold, calendar: Calendar = .current) -> Date {
-        if let hours = threshold.hours { return outage.start.addingTimeInterval(hours * 3600) }
+        if let hours = threshold.hours { return outage.judgedStart.addingTimeInterval(hours * 3600) }
         let days = threshold.days ?? 0
-        guard days > 0 else { return outage.start }
-        var day = calendar.startOfDay(for: outage.start), counted = 0
+        guard days > 0 else { return outage.judgedStart }
+        var day = calendar.startOfDay(for: outage.judgedStart), counted = 0
         while counted < days {
             day = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
             if threshold.workingDays != true || !calendar.isDateInWeekend(day) { counted += 1 }
@@ -498,7 +537,14 @@ public enum CreditText {
         let sameDay = Calendar.current.isDate(outage.start, inSameDayAs: outage.end)
         let end = outage.ongoing ? String(localized: "still down", comment: "Outage credit: the end of an outage that hasn’t ended")
             : sameDay ? outage.end.formatted(date: .omitted, time: .shortened) : outage.end.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())
-        return "\(start) – \(end) (\(duration(outage.seconds)))"
+        var text = "\(start) – \(end) (\(duration(outage.seconds)))"
+        if outage.wholeStart != nil || outage.wholeEnd != nil {
+            let format = Date.FormatStyle.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()
+            let wholeStartText = outage.judgedStart.formatted(format)
+            let wholeEndText = outage.ongoing ? String(localized: "still down", comment: "Outage credit: the end of an outage that hasn’t ended") : outage.judgedEnd.formatted(format)
+            text += " " + String(localized: "(part of an outage of \(duration(outage.judgedSeconds)) from \(wholeStartText) to \(wholeEndText))", comment: "Outage credit: after an outage the month's edge cut; a length and the whole outage's start and end")
+        }
+        return text
     }
 }
 
@@ -582,7 +628,9 @@ public enum CreditAlert {
 
 // MARK: Settings
 
-/// The provider, monthly price and network the user confirmed, kept where the app and the CLI both read them.
+/// The provider setup the user confirmed once: provider, country, plan, monthly price and network, kept where the app
+/// and the CLI both read them. Outage credit, Plan check, the complaint and the provider report all read it; the plan's
+/// download speed stays per network in `PlanSpeeds`.
 public struct CreditSettings: Codable, Sendable, Equatable {
     public static let key = "credit.settings"
     /// A provider id from the table; nil for one Kilobat doesn't know.
@@ -594,6 +642,17 @@ public struct CreditSettings: Codable, Sendable, Equatable {
     /// The network the provider serves, by the name the journal records and by key for the Starlink log.
     public var networkName: String?
     public var networkKey: String?
+    /// The provider's name as the user typed it, for one Kilobat doesn't know.
+    public var otherProvider: String? = nil
+    /// The plan's upload speed, and the minimum download the contract guarantees when it names one.
+    public var uploadMbps: Double? = nil
+    public var minimumMbps: Double? = nil
+    /// The plan's wording, copied from the contract, for the complaint.
+    public var planWording: String? = nil
+    /// The typed provider name, trimmed; nil when empty.
+    public var typedProvider: String? {
+        otherProvider.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+    }
     public init(provider: String? = nil, country: String? = nil, monthlyPrice: Double? = nil, networkName: String? = nil, networkKey: String? = nil) {
         self.provider = provider; self.country = country; self.monthlyPrice = monthlyPrice; self.networkName = networkName; self.networkKey = networkKey
     }
@@ -625,8 +684,10 @@ public struct CreditReport: Codable, Sendable {
                             interval: DateInterval, now: Date = Date()) -> CreditReport {
         let name = settings?.networkName ?? samples.last?.networkName
         let key = settings?.networkKey ?? samples.last?.networkKey
-        let starlink = dish.network != nil && dish.network == key ? dish.outages : []
-        let tally = CreditTally.make(events: events, samples: samples, starlink: starlink, sleeps: sleeps, network: name, from: interval.start, to: interval.end, now: now)
+        let starlink = dish.outages(on: key)
+        let scopedEvents = key.map { key in events.filter { $0.networkKey == key } } ?? []
+        let scopedSamples = key.map { key in samples.filter { $0.networkKey == key } } ?? []
+        let tally = CreditTally.make(events: scopedEvents, samples: scopedSamples, starlink: starlink, sleeps: sleeps, network: name, from: interval.start, to: interval.end, now: now)
         return make(settings: settings, tally: tally)
     }
 
@@ -638,14 +699,15 @@ public struct CreditReport: Codable, Sendable {
 
     public static func make(settings: CreditSettings?, tally: CreditTally, table: OutageCreditTable = .bundled) -> CreditReport {
         let provider = table.provider(settings?.provider)
-        let name = provider?.name ?? String(localized: "your provider", comment: "Outage credit: stands in for a provider Kilobat doesn't know")
+        let typed = provider == nil ? settings?.typedProvider : nil
+        let name = provider?.name ?? typed ?? String(localized: "your provider", comment: "Outage credit: stands in for a provider Kilobat doesn't know")
         let policy = table.policy(for: provider, country: settings?.country)
         let estimate = CreditEstimate.make(policy: policy, tally: tally, monthlyPrice: settings?.monthlyPrice, capDays: provider?.capDays)
-        return CreditReport(provider: provider, providerName: provider?.name ?? String(localized: "Your provider", comment: "Outage credit: a provider Kilobat doesn't know, at the start of a sentence"),
+        return CreditReport(provider: provider, providerName: provider?.name ?? typed ?? String(localized: "Your provider", comment: "Outage credit: a provider Kilobat doesn't know, at the start of a sentence"),
                             country: provider?.country ?? settings?.country, policy: policy, monthlyPrice: settings?.monthlyPrice, tally: tally, estimate: estimate,
                             verdict: CreditText.verdict(estimate, tally: tally, provider: name, policy: policy), terms: policy.map(CreditText.terms),
                             excluded: CreditText.excluded(tally),
-                            claim: .draft(provider: provider?.name, policy: policy, tally: tally, estimate: estimate, monthlyPrice: settings?.monthlyPrice))
+                            claim: .draft(provider: provider?.name ?? typed, policy: policy, tally: tally, estimate: estimate, monthlyPrice: settings?.monthlyPrice))
     }
 
     /// Where to ask: the provider's page, else the policy's.

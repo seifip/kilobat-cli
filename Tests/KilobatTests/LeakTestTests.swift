@@ -15,7 +15,7 @@ struct LeakTestTests {
         seen.dnsSeen = [.init(address: "198.51.100.53", asn: "AS39351", org: "31173 Services AB", country: "se")]
         seen.ipv6Interface = "utun4"
         seen.physical = "en0"; seen.physicalPort = "Wi-Fi"
-        seen.udpAsked = true; seen.udpDefault = "198.51.100.7:40211"
+        seen.udpAsked = true; seen.udpInterfaces = ["en0", "en5"]; seen.udpDefault = "198.51.100.7:40211"
         return seen
     }
     private func status(_ result: LeakTest, _ id: String) -> LeakTest.Status? { result.checks.first { $0.id == id }?.status }
@@ -45,7 +45,7 @@ struct LeakTestTests {
         // Without bash.ws only the local check runs, and it says so.
         var offline = clean(); offline.dnsSeen = nil
         let unseen = LeakTest.evaluate(offline)
-        #expect(status(unseen, "dns") == .pass && unseen.checks[0].detail.contains("bash.ws didn’t answer") && !unseen.services.contains("bash.ws"))
+        #expect(status(unseen, "dns") == .warning && unseen.checks[0].detail.contains("bash.ws didn’t answer") && !unseen.services.contains("bash.ws"))
     }
 
     @Test func ipv6AroundTheTunnel() {
@@ -56,6 +56,8 @@ struct LeakTestTests {
         var unreachable = bare; unreachable.ipv6Address = nil
         #expect(status(LeakTest.evaluate(unreachable), "ipv6") == .warning)
         var none = clean(); none.ipv6Interface = nil
+        #expect(status(LeakTest.evaluate(none), "ipv6") == .warning)
+        none.ipv6RouteAbsent = true
         #expect(status(LeakTest.evaluate(none), "ipv6") == .pass)
     }
 
@@ -65,17 +67,44 @@ struct LeakTestTests {
         #expect(status(around, "udp") == .fail && around.checks[2].detail.contains("197.253.204.229") && around.checks[2].fix?.contains("Lockdown mode") == true)
         #expect(around.checks[2].fix?.contains("media.peerconnection.enabled") == true)
         var other = clean(); other.udpDefault = "203.0.113.9:5000"
-        #expect(status(LeakTest.evaluate(other), "udp") == .fail)
-        // A neighbouring address of the same provider isn't another way out.
+        #expect(status(LeakTest.evaluate(other), "udp") == .warning)
+        // A neighbouring address alone cannot establish VPN egress.
         var neighbour = clean(); neighbour.udpDefault = "198.51.7.20:5000"
-        #expect(status(LeakTest.evaluate(neighbour), "udp") == .pass)
+        #expect(status(LeakTest.evaluate(neighbour), "udp") == .warning)
         var silent = clean(); silent.udpDefault = nil
         #expect(status(LeakTest.evaluate(silent), "udp") == .skipped)
     }
 
+    @Test func aSecondAdapterCanBypassTheTunnel() async {
+        let result = await LeakTest.probeUDP(interfaces: ["en0", "en5"]) { name in
+            switch name {
+            case nil: "198.51.100.7:40211"
+            case "en5": "203.0.113.9:40211"
+            default: nil
+            }
+        }
+        #expect(result.normal == "198.51.100.7:40211")
+        #expect(result.bypass?.interface == "en5")
+        var seen = clean()
+        seen.udpDefault = result.normal; seen.physical = result.bypass?.interface; seen.udpPhysical = result.bypass?.mapped
+        #expect(status(LeakTest.evaluate(seen), "udp") == .fail)
+    }
+
+    @Test func incompleteAndIPv6ResolverRoutes() {
+        let empty = LeakTest.evaluate(.init(exit: mullvad))
+        #expect(!empty.passed && empty.summary.hasPrefix("Leak check incomplete"))
+        var seen = clean()
+        let server = "fe80::1%en5"
+        seen.resolvers = [.init(servers: [server])]
+        #expect(LeakTest.resolverRouteArguments(server) == ["-n", "get", "-inet6", server])
+        #expect(status(LeakTest.evaluate(seen), "dns") == .warning)
+        seen.resolverRoutes[server] = "en5"
+        #expect(status(LeakTest.evaluate(seen), "dns") == .fail)
+    }
+
     @Test func needsAVPNCarryingEverything() {
         let off = LeakTest.evaluate(LeakTest.Observations(exit: ExitPath(interface: "en0")))
-        #expect(off.checks.allSatisfy { $0.status == .skipped } && off.passed && off.summary.contains("Connect your VPN"))
+        #expect(off.checks.allSatisfy { $0.status == .skipped } && !off.passed && off.summary.contains("Connect your VPN"))
         let split = LeakTest.evaluate(LeakTest.Observations(exit: ExitPath(interface: "en0", connected: ["Tailscale"])))
         #expect(split.vpnState == "partial" && split.summary.contains("default route doesn’t use it"))
     }

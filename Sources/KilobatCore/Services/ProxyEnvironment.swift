@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import SystemConfiguration
 
 /// Proxy clients on this Mac and the system proxy: Clash and its forks (mihomo, Clash Verge, ClashX, Mihomo Party,
 /// FlClash), Surge, sing-box, Stash, V2Ray and Xray, Shadowsocks and the like. Kilobat only reads them: it never
@@ -52,24 +54,61 @@ public struct ProxyEnvironment: Codable, Sendable, Equatable {
     // MARK: Reading
 
     public static func current(home: URL = FileManager.default.homeDirectoryForCurrentUser) async -> ProxyEnvironment {
-        async let proxy = CommandRunner.run("/usr/sbin/scutil", ["--proxy"])
-        async let processes = CommandRunner.run("/bin/ps", ["-axo", "pid=,comm="])
-        async let listening = CommandRunner.run("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], timeout: 5)
-        var system = systemProxy(await proxy.output)
-        let table = Self.processes(await processes.output)
-        let listeners = Self.listeners(await listening.output)
+        await current(home: home, sources: .live)
+    }
+
+    /// Where the readings come from, so a test can count what a refresh asks for without launching anything.
+    struct Sources: Sendable {
+        var system: @Sendable () -> SystemProxy
+        var processes: @Sendable () -> [(pid: Int32, path: String)]
+        var listeners: @Sendable () async -> String
+        var listens: @Sendable (String) async -> Bool
+        static let live = Sources(
+            system: { systemProxy(values: (SCDynamicStoreCopyProxies(nil) as? [String: Any]) ?? [:]) },
+            processes: { processTable() },
+            listeners: { await CommandRunner.run("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], timeout: 5).output },
+            listens: { await ProxyEnvironment.listens(port: $0) })
+    }
+
+    static func current(home: URL, sources: Sources) async -> ProxyEnvironment {
+        var system = sources.system()
+        let table = sources.processes()
         var clients = known.compactMap { client($0, home: home, processes: table) }
-        // A client that runs but whose config Kilobat doesn't know is still found by the ports it listens on.
-        for (port, process) in listeners where system.localPorts.contains(port) && !clients.contains(where: { $0.ports.contains(port) }) {
-            clients.append(Client(name: process, running: true, controller: nil, secret: nil, ports: [port], mode: nil, tun: nil, version: nil))
+        // lsof only helps to name a client behind a local system proxy that no known client claims.
+        let unclaimed = system.localPorts.filter { port in !clients.contains { $0.ports.contains(port) } }
+        if !unclaimed.isEmpty {
+            let listeners = Self.listeners(await sources.listeners())
+            // A client that runs but whose config Kilobat doesn't know is still found by the ports it listens on.
+            for (port, process) in listeners where unclaimed.contains(port) && !clients.contains(where: { $0.ports.contains(port) }) {
+                clients.append(Client(name: process, running: true, controller: nil, secret: nil, ports: [port], mode: nil, tun: nil, version: nil))
+            }
         }
         // A system proxy on this Mac with nobody listening breaks every app that follows it.
         if !system.localPorts.isEmpty {
             var reachable = false
-            for port in system.localPorts where await Self.listens(port: port) { reachable = true }
+            for port in system.localPorts where await sources.listens(port) { reachable = true }
             system.dead = !reachable
         }
         return ProxyEnvironment(date: Date(), system: system, clients: clients, carriers: carriers(table))
+    }
+
+    /// The same reading as `systemProxy(_ output:)`, from the dictionary macOS keeps (SCDynamicStoreCopyProxies).
+    public static func systemProxy(values: [String: Any]) -> SystemProxy {
+        func text(_ key: String) -> String? { (values[key] as? String) ?? (values[key] as? NSNumber)?.stringValue }
+        func proxy(_ kind: String) -> String? {
+            guard text(kind + "Enable") == "1", let host = text(kind + "Proxy"), let port = text(kind + "Port") else { return nil }
+            return host + ":" + port
+        }
+        let pac = text("ProxyAutoConfigEnable") == "1" ? text("ProxyAutoConfigURLString") : nil
+        return SystemProxy(http: proxy("HTTP"), https: proxy("HTTPS"), socks: proxy("SOCKS"), pac: pac)
+    }
+
+    /// Every process's pid and executable path, read from the kernel; nothing is launched.
+    static func processTable() -> [(pid: Int32, path: String)] {
+        var pids = [Int32](repeating: 0, count: 8192)
+        let count = Int(proc_listallpids(&pids, Int32(pids.count * MemoryLayout<Int32>.size)))
+        guard count > 0 else { return [] }
+        return pids.prefix(count).compactMap { pid in pid > 0 ? ProcessOwnership.executablePath(pid: pid).map { (pid, $0) } : nil }
     }
 
     /// `scutil --proxy`: HTTPEnable, HTTPProxy, HTTPPort and the same for HTTPS and SOCKS, plus a PAC URL.
@@ -238,4 +277,11 @@ public final class ProxyRouting: @unchecked Sendable {
     }
     public func isProxyPort(_ port: String) -> Bool { lock.lock(); defer { lock.unlock() }; return ports.contains(port) }
     public func isCarrier(_ pid: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; return carrierPIDs.contains(pid) }
+}
+
+/// When the app runs the full proxy and VPN check: on a change, or once a minute while someone can see it or a client's routes are shown.
+public enum ProxyCheckSchedule {
+    public static func due(changed: Bool, visible: Bool, clientRunning: Bool, sinceLast: TimeInterval) -> Bool {
+        changed || ((visible || clientRunning) && sinceLast >= 60)
+    }
 }

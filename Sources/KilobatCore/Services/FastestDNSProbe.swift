@@ -103,6 +103,7 @@ public enum FastestDNSMeter {
 public protocol DNSSystem: Sendable {
     /// The service's manual DNS servers; empty when it uses the network's own.
     func serviceServers(_ service: String) async -> [String]
+    func verifiedServiceServers(_ service: String) async -> [String]?
     /// The network's own resolvers from DHCP on `interface`.
     func dhcpServers(interface: String) async -> [String]
     /// A profile, an encrypted-DNS app or a DNS proxy decides lookups.
@@ -111,11 +112,20 @@ public protocol DNSSystem: Sendable {
     func gateway() async -> String?
 }
 
+public extension DNSSystem {
+    func verifiedServiceServers(_ service: String) async -> [String]? { await serviceServers(service) }
+}
+
 public struct SystemDNS: DNSSystem {
     public init() {}
     public func serviceServers(_ service: String) async -> [String] {
-        guard !service.isEmpty, !service.hasPrefix("-") else { return [] }
-        return DNSHelperRequest.servers(await CommandRunner.run("/usr/sbin/networksetup", ["-getdnsservers", service], timeout: 4).output)
+        await verifiedServiceServers(service) ?? []
+    }
+    public func verifiedServiceServers(_ service: String) async -> [String]? {
+        guard !service.isEmpty, !service.hasPrefix("-") else { return nil }
+        let result = await CommandRunner.run("/usr/sbin/networksetup", ["-getdnsservers", service], timeout: 4)
+        guard result.status == 0 else { return nil }
+        return DNSHelperRequest.verifiedServers(result.output)
     }
     public func dhcpServers(interface: String) async -> [String] {
         guard interface.range(of: #"^[a-z]+[0-9]+$"#, options: .regularExpression) != nil else { return [] }
@@ -137,4 +147,10 @@ public struct SystemDNS: DNSSystem {
     var available: Bool { get }
     /// Empty `servers` puts automatic DNS back.
     func apply(servers: [String], service: String) async throws
+    func apply(servers: [String], service: String, expecting: [String]) async throws
+}
+public extension DNSApplying {
+    func apply(servers: [String], service: String, expecting: [String]) async throws {
+        try await apply(servers: servers, service: service)
+    }
 }

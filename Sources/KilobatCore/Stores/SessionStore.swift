@@ -203,6 +203,8 @@ public enum AgentCatalog {
     /// Above this share of one core, an agent's processes are working even with little traffic.
     static let busyCores = 0.05
     var probe = ProcessProbe.live
+    /// The sockets of these processes, in one launch; tests swap in a counted fake.
+    var socketReader: @Sendable ([Int32]) async throws -> [SocketDestination] = { try await ExpertTools.destinations(pids: $0) }
     var readPower: () -> PowerState = { PowerState.read() }
     /// Off in tests, which report activations and power changes themselves.
     var observesWorkspace = true
@@ -224,8 +226,6 @@ public enum AgentCatalog {
     private var pids: [String: Int32] = [:]
     /// Each hooked run's last event, which tells a session nobody has prompted yet from a stalled one.
     private var lastKinds: [String: AgentEvent.Kind] = [:]
-    /// Agents whose hooks report their runs; their traffic no longer starts runs of its own.
-    private var hooked: Set<String> = []
     /// Each process's CPU time at the last tick, and each run's CPU seconds per tick over the quiet window.
     private var cpuTimes: [Int32: UInt64] = [:]
     private var cpuWindows: [String: [(Date, Double)]] = [:]
@@ -255,9 +255,25 @@ public enum AgentCatalog {
         awakeOnPower = defaults.bool(forKey: "awake.power")
         powerSuppressed = (defaults.object(forKey: "awake.powerOff") as? Date).map { $0 > Date() - ProcessInfo.processInfo.systemUptime } ?? false
         webhook = defaults.string(forKey: "awake.webhook") ?? ""
-        if let directory, let data = try? Data(contentsOf: directory.appendingPathComponent("sessions.json")) {
-            history = ((try? JSONDecoder().decode([WorkSession].self, from: data)) ?? []).filter { !$0.isBlip }
+        if let directory { history = Self.loadHistory(directory) }
+    }
+
+    /// The saved runs. An entry that no longer decodes is skipped instead of taking the rest with it, and then (or when
+    /// the file isn't a list at all) a copy is kept as sessions.json.corrupt, because the next save rewrites the file.
+    static func loadHistory(_ directory: URL) -> [WorkSession] {
+        struct Entry: Decodable {
+            let session: WorkSession?
+            init(from decoder: Decoder) throws { session = try? WorkSession(from: decoder) }
         }
+        let url = directory.appendingPathComponent("sessions.json")
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let entries = try? JSONDecoder().decode([Entry].self, from: data)
+        if entries == nil || entries?.contains(where: { $0.session == nil }) == true {
+            let aside = url.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: aside)
+            try? FileManager.default.copyItem(at: url, to: aside)
+        }
+        return (entries ?? []).compactMap(\.session).filter { !$0.isBlip }
     }
 
     public var holdingAwake: Bool { assertion != nil || frontmostAssertion != nil }
@@ -386,7 +402,6 @@ public enum AgentCatalog {
         guard event.valid else { return }
         let agent = AgentCatalog.name(event.agent) ?? event.agent, now = event.time
         let key = Self.key(agent, session: event.session, cwd: event.cwd)
-        hooked.insert(agent)
         // A run first seen in traffic becomes the hooked one.
         if agents[key] == nil, key != agent, let run = agents[agent], run.hooks != true { agents[agent] = nil; agents[key] = run }
         // Only a start or a new turn begins a run; waiting or done after it ended changes nothing.
@@ -413,11 +428,10 @@ public enum AgentCatalog {
             change(key, to: .waitingForYou, detail: event.message, now: now)
         case .done:
             // The turn is over, but subagents or background shells it started may still be at work.
-            if let busy = busyTasks[key], busy > 0 {
-                finishing[key] = now
-                agents[key]?.state = .working
-                agents[key]?.note = Self.background(busy)
-            } else { finishAgent(key, reason: "Finished", now: now) }
+            // Wait for a fresh process/traffic sample, even when no previous poll saw children.
+            finishing[key] = now
+            agents[key]?.state = .working
+            if let busy = busyTasks[key], busy > 0 { agents[key]?.note = Self.background(busy) }
         case .failed: finishAgent(key, reason: "Failed" + (event.message.map { ": " + $0 } ?? ""), now: now)
         }
         if agents[key] != nil { lastKinds[key] = event.kind }
@@ -442,7 +456,7 @@ public enum AgentCatalog {
             if runs.isEmpty {
                 // Without hooks, the agent's traffic is the run.
                 let alive = entries.contains { $0.processIDs.contains(where: probe.alive) }
-                if !hooked.contains(agent), alive, entries.reduce(0, { $0 + $1.rate }) >= Self.agentActiveRate {
+                if alive, entries.reduce(0, { $0 + $1.rate }) >= Self.agentActiveRate {
                     var run = WorkSession(kind: .agent, title: agent, start: now, batteryStart: power.batteryPercent, peakThermal: power.thermal, lastActive: now, state: .working)
                     if let pid = entries.first(where: { $0.id.hasPrefix("process:") })?.processIDs.first, let path = probe.path(pid) { run.describe(AgentInstall.describe(path)) }
                     agents[agent] = run; started.insert(agent)
@@ -502,8 +516,12 @@ public enum AgentCatalog {
             if let since = finishing[key] {
                 let busy = busyTasks[key] ?? 0
                 if busy > 0 { finishing[key] = now; agents[key]?.note = Self.background(busy) }
+                else if let root = pids[key], probe.family(probe.children(root)).contains(where: { times[$0] != nil && usage[$0] == nil }) {
+                    // A new child only has a CPU baseline this tick. Sample it again before deciding.
+                    finishing[key] = now
+                }
                 // A few quiet seconds, so a task pausing between steps doesn't end the run.
-                else if now.timeIntervalSince(since) >= 10 || pids[key].map(probe.alive) == false { finishAgent(key, reason: "Finished", now: since) }
+                else if now.timeIntervalSince(since) >= 10 { finishAgent(key, reason: "Finished", now: since) }
                 continue
             }
             let silent = now.timeIntervalSince(max(run.lastActive, run.lastEvent ?? run.start)), idle = silent >= quiet && !cpuBusy
@@ -756,9 +774,19 @@ public enum AgentCatalog {
             let content = UNMutableNotificationContent(); content.title = title; content.body = body
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
-        guard let url = URL(string: webhook.trimmingCharacters(in: .whitespaces)), url.scheme == "https", url.host != nil else { return }
+        guard let request = Self.webhookRequest(webhook, title: title, body: body, session: session) else { return }
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
+    /// "ntfy+https" opts a self-hosted topic into the same format as ntfy.sh.
+    nonisolated static func webhookRequest(_ destination: String, title: String, body: String, session: WorkSession? = nil) -> URLRequest? {
+        guard var components = URLComponents(string: destination.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.host != nil else { return nil }
+        let explicitNtfy = components.scheme?.lowercased() == "ntfy+https"
+        if explicitNtfy { components.scheme = "https" }
+        guard let url = components.url, url.scheme?.lowercased() == "https" else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 10); request.httpMethod = "POST"
-        if url.host?.hasSuffix("ntfy.sh") == true || url.path.split(separator: "/").count == 1 {
+        if explicitNtfy || url.host?.lowercased() == "ntfy.sh" {
             // ntfy: plain text with the title in a header.
             request.setValue(title, forHTTPHeaderField: "Title"); request.setValue("bat", forHTTPHeaderField: "Tags")
             request.httpBody = Data(body.utf8)
@@ -768,19 +796,29 @@ public enum AgentCatalog {
             if let session, let data = try? JSONEncoder().encode(session), let json = try? JSONSerialization.jsonObject(with: data) { payload["session"] = json }
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         }
-        URLSession.shared.dataTask(with: request).resume()
+        return request
     }
 
+    /// Each run's own rows: those of its family's pids, in pid order and then by connection.
+    nonisolated static func attribute(_ rows: [SocketDestination], to families: [String: Set<Int32>]) -> [String: [SocketDestination]] {
+        let byPID = Dictionary(grouping: rows, by: \.pid)
+        return families.mapValues { family in family.sorted().flatMap { (byPID[$0] ?? []).sorted { $0.id < $1.id } } }
+    }
+
+    /// One pass: every agent's family is read with a single lsof launch, then each agent keeps the rows of its own pids.
     private func sampleDestinations(apps: [AppTraffic]) async {
+        var families: [String: Set<Int32>] = [:]
         for (key, run) in agents {
             // A run's own processes, or the agent's when it is the agent's only run.
             let roots = pids[key].map { [$0] } ?? (agents.values.filter { $0.title == run.title }.count == 1 ? apps.filter { AgentCatalog.agent(for: $0) == run.title }.flatMap(\.processIDs) : [])
+            families[key] = probe.family(roots)
+        }
+        let rows = (try? await socketReader(families.values.reduce(into: Set<Int32>()) { $0.formUnion($1) }.sorted())) ?? []
+        for (key, sockets) in Self.attribute(rows, to: families) {
             var hosts: [String] = []
-            for pid in probe.family(roots) {
-                for socket in (try? await ExpertTools.destinations(pid: pid)) ?? [] {
-                    guard let (host, port) = socket.remoteHostAndPort else { continue }
-                    hosts.append((await name(for: host)) + ":" + port)
-                }
+            for socket in sockets {
+                guard let (host, port) = socket.remoteHostAndPort else { continue }
+                hosts.append((await name(for: host)) + ":" + port)
             }
             guard var session = agents[key] else { continue }
             for host in hosts where !session.destinations.contains(host) && session.destinations.count < 60 { session.destinations.append(host) }

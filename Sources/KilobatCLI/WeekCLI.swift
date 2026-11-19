@@ -30,7 +30,7 @@ enum WeekCLI {
         let schedule = DigestSchedule.load(KilobatCLI.appDefaults)
         if schedule.enabled, options.weeksAgo == 0 {
             let day = Calendar.current.weekdaySymbols[schedule.weekday - 1]
-            print(Terminal.dim("\nThe app sends this every \(day) at \(schedule.hour):00 (Settings › Monitoring › Weekly digest)."))
+            print(Terminal.dim("\nThe app sends this every \(day) at \(schedule.hour):00 (Settings › Notifications › Weekly digest)."))
         }
     }
 }

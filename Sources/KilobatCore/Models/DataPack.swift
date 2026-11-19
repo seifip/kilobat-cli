@@ -1,9 +1,10 @@
 import Foundation
 
-/// A prepaid data pack, such as a travel eSIM: so many gigabytes for so many days from a start date, on the networks
-/// that reach the Mac through it (the phone's hotspot, a travel router's Wi-Fi). Unlike a budget it doesn't start
-/// over: it ends. Kilobat counts only this Mac, so the forecast says so, and a correction re-syncs it with the
-/// figure in the carrier's app. Several packs can be kept over time; on each network the newest one that has started counts.
+/// A prepaid data pack, such as a travel eSIM: a budget of the “Prepaid pack” kind, so many gigabytes for so many days
+/// from a start date, on the networks that reach the Mac through it (the phone's hotspot, a travel router's Wi-Fi).
+/// While it runs it is those networks' budget; unlike a repeating one it doesn't start over: it ends. Kilobat counts
+/// only this Mac, so the forecast says so, and a correction re-syncs it with the figure in the carrier's app. Several
+/// packs can be kept over time; on each network the newest one that has started counts.
 public struct DataPack: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     /// What the person calls it, such as “Japan eSIM”.
@@ -21,16 +22,20 @@ public struct DataPack: Codable, Equatable, Identifiable, Sendable {
     public var alerts: [Int]?
     /// While on this pack, Send later holds big uploads until an unmetered network.
     public var holdUploads: Bool?
+    /// Alert only or Block, as for any budget. Nil is Alert only: packs saved before they were budgets only notified.
+    public var mode: NetworkBudgetMode?
 
     public static let defaultAlerts = [50, 80, 95]
     public static let maximumBytes: UInt64 = 10_000_000_000_000
     public static let maximumDays = 400
 
     public init(id: UUID = UUID(), name: String, bytes: UInt64, start: Date, end: Date, networks: DataPackNetworks, correction: DataPackCorrection? = nil,
-                ended: Date? = nil, alerts: [Int]? = nil, holdUploads: Bool? = nil) {
+                ended: Date? = nil, alerts: [Int]? = nil, holdUploads: Bool? = nil, mode: NetworkBudgetMode? = nil) {
         self.id = id; self.name = name; self.bytes = bytes; self.start = start; self.end = end; self.networks = networks
-        self.correction = correction; self.ended = ended; self.alerts = alerts; self.holdUploads = holdUploads
+        self.correction = correction; self.ended = ended; self.alerts = alerts; self.holdUploads = holdUploads; self.mode = mode
     }
+
+    public var budgetMode: NetworkBudgetMode { mode ?? .alert }
 
     /// A pack of `gb` gigabytes valid for `days` days from `start`, or until `until`. Days follow the calendar, so a
     /// clock change can't move the end off the hour it started.
@@ -79,6 +84,7 @@ public struct DataPackCorrection: Codable, Equatable, Sendable {
     public var at: Date
     public var leftBytes: UInt64
     public var macBytes: UInt64
+    var after: Date { Date(timeIntervalSinceReferenceDate: at.timeIntervalSinceReferenceDate.nextUp) }
     public init(at: Date, leftBytes: UInt64, macBytes: UInt64) { self.at = at; self.leftBytes = leftBytes; self.macBytes = macBytes }
 }
 
@@ -201,7 +207,7 @@ public enum DataPacks {
 
     /// The pack that counts on a network at `date`: of the packs that match it and are running then, the one that started last.
     public static func owner(of key: String, name: String?, at date: Date, in packs: [DataPack], calendar: Calendar = .current) -> DataPack? {
-        packs.filter { $0.counts(at: date, calendar: calendar) && $0.networks.matches(key: key, name: name) }.max { $0.start < $1.start }
+        packs.filter { $0.active(at: date) && $0.networks.matches(key: key, name: name) }.max { $0.start < $1.start }
     }
 
     /// What this Mac used on `pack` from `from` (by default its start) to `to`: each usage entry counts for the one pack
@@ -233,8 +239,9 @@ public enum DataPacks {
         let mac = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending, to: now, calendar: calendar)
         let used: UInt64
         if let correction = pack.correction {
-            let since = mac > correction.macBytes ? mac - correction.macBytes : 0
-            used = min(pack.bytes, (pack.bytes > correction.leftBytes ? pack.bytes - correction.leftBytes : 0) + since)
+            let since = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending,
+                                 from: correction.after, to: now, calendar: calendar)
+            used = pack.bytes - min(pack.bytes, correction.leftBytes - min(correction.leftBytes, since))
         } else {
             used = min(pack.bytes, mac)
         }
@@ -327,7 +334,7 @@ public struct DataPackAlert: Equatable, Sendable {
 
     public static func due(_ statuses: [DataPackStatus], ledger: inout AlertLedger, now: Date = Date(), calendar: Calendar = .current) -> [DataPackAlert] {
         var alerts: [DataPackAlert] = []
-        for status in statuses where status.state == .active || status.state == .usedUp {
+        for status in statuses where (status.state == .active || status.state == .usedUp) && status.pack.budgetMode != .off {
             let pack = status.pack, id = pack.id.uuidString
             let key = "pack|\(id)|\(Int(pack.start.timeIntervalSince1970))"
             let crossed = ledger.crossed(pack.thresholds, fraction: status.fraction, key: key, now: now)
@@ -348,7 +355,8 @@ public struct DataPackAlert: Equatable, Sendable {
             }()
             let left = String(localized: "\(TrafficFormat.bytes(status.left)) left by this Mac’s count.", comment: "Data pack alert, such as “2 GB left by this Mac’s count.”")
             if let threshold = crossed.max() {
-                let body = left + (forecast.map { " " + $0.sentenceStart + "." } ?? "")
+                let stops = status.left == 0 && pack.budgetMode == .block ? " " + String(localized: "New connections stop while the network filter is on.") : ""
+                let body = left + (forecast.map { " " + $0.sentenceStart + "." } ?? "") + stops
                 alerts.append(DataPackAlert(pack: pack.id, kind: .threshold(threshold), title: String(localized: "\(threshold)% of \(pack.name) used", comment: "Data pack alert title"),
                                             body: body, offerHold: offer && status.early))
                 if status.early, let runsOut = status.runsOut { ledger.seen[earlyKey] = now; ledger.seen[earlyDate] = runsOut }

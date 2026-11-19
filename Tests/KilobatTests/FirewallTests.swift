@@ -1,8 +1,20 @@
 import Foundation
+import Network
 import Testing
 @testable import KilobatCore
 
 struct FirewallTests {
+    @Test func theRouterIsPingedWithTheToolForItsFamily() throws {
+        let v6 = NWEndpoint.hostPort(host: .ipv6(try #require(IPv6Address("fe80::1"))), port: 0)
+        let v4 = NWEndpoint.hostPort(host: .ipv4(try #require(IPv4Address("192.168.1.1"))), port: 0)
+        let both = try #require(ConnectionDoctor.routerPing([v6, v4], interface: "en0"))
+        #expect(both.address == "192.168.1.1" && both.tool == "/sbin/ping" && both.arguments == ["-c", "1", "-t", "2", "192.168.1.1"])
+        let linkLocal = try #require(ConnectionDoctor.routerPing([v6], interface: "en0"))
+        #expect(linkLocal.tool == "/sbin/ping6" && linkLocal.arguments.last == "fe80::1%en0" && linkLocal.address == "fe80::1")
+        let global = NWEndpoint.hostPort(host: .ipv6(try #require(IPv6Address("2001:db8::1"))), port: 0)
+        #expect(ConnectionDoctor.routerPing([global], interface: "en0")?.arguments.last == "2001:db8::1")
+        #expect(ConnectionDoctor.routerPing([], interface: "en0") == nil)
+    }
     @Test func blocklistTakesWildcardsAddressesAndRanges() throws {
         let list = """
         *.ads.example

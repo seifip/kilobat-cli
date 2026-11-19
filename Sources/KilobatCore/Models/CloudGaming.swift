@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The cloud gaming services Kilobat recognises, and what it can see of each from the Mac: a Mac app by its name, or a
 /// browser tab by the hosts the browser talks to while a heavy, one-way UDP stream (WebRTC) comes in. Kilobat never sees
@@ -42,7 +43,17 @@ public struct CloudGamingService: Sendable, Equatable, Identifiable {
     static func normalized(_ name: String) -> String { name.lowercased().filter { $0.isLetter || $0.isNumber } }
 
     /// The service whose Mac app this is, by bundle ID, app or process name, or the .app it lives in.
+    /// Asked about every app once a second; an app's answer never changes, so it's worked out once.
     public static func app(id: String, name: String, path: String? = nil) -> CloudGamingService? {
+        let key = id + "\u{0}" + name + "\u{0}" + (path ?? "")
+        if let known = matches.withLock({ $0[key] }) { return known.isEmpty ? nil : service(known) }
+        let found = match(id: id, name: name, path: path)
+        matches.withLock { if $0.count >= 4_096 { $0.removeAll() }; $0[key] = found?.id ?? "" }
+        return found
+    }
+    /// Service ID by app, "" for none.
+    private static let matches = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
+    private static func match(id: String, name: String, path: String?) -> CloudGamingService? {
         let bundle = id.hasPrefix("process:") ? nil : id.lowercased()
         // AppTraffic can give us an executable inside the bundle, rather than the bundle URL itself.
         let appName = path.flatMap { URL(fileURLWithPath: $0).pathComponents.first { $0.lowercased().hasSuffix(".app") } }

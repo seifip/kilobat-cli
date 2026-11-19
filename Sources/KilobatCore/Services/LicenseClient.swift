@@ -92,16 +92,18 @@ public struct ReferralStatus: Codable, Sendable, Equatable {
     public let friends: Int
     /// Purchases still inside the refund window.
     public let pending: Int
-    /// Mac slots added to the license, one for each friend.
+    /// Macs earned, one for each friend.
     public let extraMacs: Int
     /// Single-use checkout codes for a free license, one for every third friend.
     public let gifts: [String]
+    /// One-Mac license keys, one for each friend since these replaced raising the license's own limit. Nil from an older server.
+    public let macKeys: [String]?
     public static let friendsPerGift = 3
     public var friendsToNextGift: Int { Self.friendsPerGift - friends % Self.friendsPerGift }
     /// The link without its scheme, for posts and the app's link field: kilobat.app/r/<code>.
     public var shortURL: String { url.host().map { $0 + url.path() } ?? url.absoluteString }
-    public init(code: String, url: URL, friends: Int, pending: Int, extraMacs: Int, gifts: [String]) {
-        self.code = code; self.url = url; self.friends = friends; self.pending = pending; self.extraMacs = extraMacs; self.gifts = gifts
+    public init(code: String, url: URL, friends: Int, pending: Int, extraMacs: Int, gifts: [String], macKeys: [String]? = nil) {
+        self.code = code; self.url = url; self.friends = friends; self.pending = pending; self.extraMacs = extraMacs; self.gifts = gifts; self.macKeys = macKeys
     }
 }
 

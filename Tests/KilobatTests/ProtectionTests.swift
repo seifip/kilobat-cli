@@ -2,6 +2,52 @@ import Foundation
 import Testing
 @testable import KilobatCore
 
+struct ProtectionActivityTests {
+    private func block(_ date: Date, _ kind: ProtectionDetail.Kind? = nil) -> FilterEvent {
+        FilterEvent(date: date, app: "com.example.App", endpoint: "site.example:443", direction: "outgoing",
+                    reason: "Block", protection: kind.map { ProtectionDetail(kind: $0, list: "Sample", host: "site.example") })
+    }
+
+    @Test func lastSevenCalendarDaysCountOnlyRecordedProtectionBlocks() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "America/New_York"))
+        let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 3, hour: 12)))
+        let today = calendar.startOfDay(for: now)
+        let first = try #require(calendar.date(byAdding: .day, value: -6, to: today))
+        let activity = ProtectionActivity(events: [block(first, .tracker), block(today, .phishing), block(now, .agentGuard),
+                                                   block(now), block(first.addingTimeInterval(-1), .scam),
+                                                   block(now.addingTimeInterval(1), .malware)], now: now, calendar: calendar)
+        #expect(activity.days.count == 7)
+        #expect(activity.days.first?.date == first)
+        #expect(activity.days.map(\.total) == [1, 0, 0, 0, 0, 0, 2])
+        #expect(activity.total == 3)
+        #expect(ProtectionActivity.Group.allCases.map(activity.count) == [1, 1, 1])
+    }
+
+    @Test func historyLimitsCountsAndDaysToTheSelectedPeriod() {
+        let now = Date(timeIntervalSinceReferenceDate: 100_000)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let start = now.addingTimeInterval(-3_600), end = now.addingTimeInterval(-1)
+        let activity = ProtectionActivity(events: [block(start, .malware), block(end, .scam), block(start.addingTimeInterval(-1), .agentGuard)],
+                                          interval: DateInterval(start: start, end: end), now: now, calendar: calendar)
+        #expect(activity.days.map(\.date) == [calendar.startOfDay(for: now)])
+        #expect(activity.count(.threats) == 1)
+        #expect(activity.count(.agentGuard) == 0)
+    }
+
+    @Test func midnightClockChangeKeepsEarlierBlocks() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "America/Sao_Paulo"))
+        let now = try #require(calendar.date(from: DateComponents(year: 2018, month: 11, day: 4, hour: 12)))
+        let yesterday = try #require(calendar.date(from: DateComponents(year: 2018, month: 11, day: 3)))
+        let activity = ProtectionActivity(events: [block(yesterday, .tracker)], now: now, calendar: calendar)
+        #expect(activity.days.count == 7)
+        #expect(activity.days.dropLast().last?.date == yesterday)
+        #expect(activity.days.dropLast().last?.total == 1)
+    }
+}
+
 /// Sample hosts only (.example, .test and documentation addresses): no real malware domain appears in these tests.
 struct ProtectionParsingTests {
     @Test func parsesHostsFiles() {
@@ -296,10 +342,94 @@ struct FlowSnifferTests {
         #expect(FlowSniffer.sniff(Array(hello.prefix(40))) == .needMore(hello.count))
     }
 
+    @Test func readsTheSameServerNameAcrossTLSRecords() {
+        let hello = Self.clientHello("malware.example")
+        let handshake = Array(hello.dropFirst(5))
+        func record(_ bytes: ArraySlice<UInt8>) -> [UInt8] {
+            [0x16, 3, 1, UInt8(bytes.count >> 8), UInt8(bytes.count & 255)] + bytes
+        }
+        for split in 1..<handshake.count {
+            let first = record(handshake.prefix(split))
+            let second = record(handshake.dropFirst(split))
+            #expect(FlowSniffer.sniff(first) == .needMore(first.count + 5))
+            #expect(FlowSniffer.sniff(first + second) == .name("malware.example"))
+        }
+        #expect(FlowSniffer.sniff([0x16, 3, 1, 0xff, 0xff]) == .tooLarge)
+    }
+
     @Test func readsTheHostHeader() {
         #expect(FlowSniffer.sniff(Array("GET / HTTP/1.1\r\nHost: Tracker.Example:8080\r\nAccept: */*\r\n\r\n".utf8)) == .name("tracker.example"))
         #expect(FlowSniffer.sniff(Array("POST /x HTTP/1.1\r\nHost: 203.0.113.9\r\n\r\n".utf8)) == .address)
         #expect(FlowSniffer.sniff(Array("SSH-2.0-OpenSSH_9.6\r\n".utf8)) == .unknown)
+    }
+}
+
+struct InspectionTableTests {
+    private func state(_ table: InspectionTable<String, Int>, _ key: String) -> String {
+        switch table.lookup(key) {
+        case .active(let value): "active \(value)"
+        case .expired: "expired"
+        case .unknown: "unknown"
+        }
+    }
+
+    @Test func theInspectionTableMakesRoomByAgeThenByOldest() {
+        var table = InspectionTable<String, Int>(capacity: 3, maxAge: 60)
+        for (time, key) in ["a", "b", "c"].enumerated() { #expect(table.insert(time, for: key, now: TimeInterval(time)) == 0) }
+        #expect(table.insert(3, for: "d", now: 3) == 1)
+        #expect(state(table, "a") == "expired")
+        #expect(state(table, "b") == "active 1" && state(table, "c") == "active 2" && state(table, "d") == "active 3")
+        #expect(table.count == 3)
+    }
+
+    @Test func staleEntriesAllGoAtOnce() {
+        var table = InspectionTable<String, Int>(capacity: 3, maxAge: 60)
+        for (time, key) in ["a", "b", "c"].enumerated() { table.insert(time, for: key, now: TimeInterval(time)) }
+        #expect(table.insert(9, for: "d", now: 100) == 3)
+        #expect(table.count == 1)
+        #expect(["a", "b", "c"].allSatisfy { state(table, $0) == "expired" })
+        #expect(state(table, "d") == "active 9")
+    }
+
+    @Test func belowCapacityNothingIsEverPushedOut() {
+        var table = InspectionTable<Int, Int>(capacity: 4_096, maxAge: 300)
+        for key in 0..<1_000 { #expect(table.insert(key, for: key, now: TimeInterval(key) * 10_000) == 0) }
+        #expect(table.count == 1_000)
+    }
+
+    @Test func removeForgetsActiveAndExpired() {
+        var table = InspectionTable<String, Int>(capacity: 1, maxAge: 60)
+        table.insert(1, for: "a", now: 0)
+        table.insert(2, for: "b", now: 1)
+        #expect(state(table, "a") == "expired")
+        table.remove("a"); table.remove("b")
+        #expect(state(table, "a") == "unknown" && state(table, "b") == "unknown")
+        #expect(table.count == 0)
+    }
+
+    @Test func theExpiredListIsBoundedToo() {
+        var table = InspectionTable<String, Int>(capacity: 2, maxAge: 60)
+        let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6"]
+        for (time, key) in keys.enumerated() { table.insert(time, for: key, now: TimeInterval(time)) }
+        // k0…k4 were pushed out; only the last two of them are still remembered.
+        #expect(keys[0...2].allSatisfy { state(table, $0) == "unknown" })
+        #expect(keys[3...4].allSatisfy { state(table, $0) == "expired" })
+        #expect(keys[5...6].allSatisfy { state(table, $0).hasPrefix("active") })
+    }
+
+    @Test func reinsertingAnExpiredKeyMakesItActive() {
+        var table = InspectionTable<String, Int>(capacity: 1, maxAge: 60)
+        table.insert(1, for: "a", now: 0)
+        table.insert(2, for: "b", now: 1)
+        #expect(table.insert(3, for: "a", now: 2) == 1)
+        #expect(state(table, "a") == "active 3" && state(table, "b") == "expired")
+    }
+
+    @Test func reinsertingAnActiveKeyPushesNothingOut() {
+        var table = InspectionTable<String, Int>(capacity: 2, maxAge: 60)
+        table.insert(1, for: "a", now: 0); table.insert(2, for: "b", now: 1)
+        #expect(table.insert(3, for: "a", now: 2) == 0)
+        #expect(state(table, "a") == "active 3" && state(table, "b") == "active 2")
     }
 }
 

@@ -69,6 +69,10 @@ struct ResearchFeatureTests {
         let profile = try #require(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
         let content = try #require(profile["PayloadContent"] as? [[String: Any]])
         #expect(content.first?["PayloadType"] as? String == "com.apple.dnsSettings.managed")
+        // From macOS 26.1 a DNS settings profile without a System scope is reported to fail to install.
+        #expect(profile["PayloadScope"] as? String == "System")
+        let settings = try #require(content.first?["DNSSettings"] as? [String: Any])
+        #expect(settings["DNSProtocol"] as? String == "HTTPS" && settings["ServerURL"] as? String == "https://dns.example/dns-query")
     }
 }
 

@@ -12,6 +12,16 @@ public enum NetworkTools {
     public static func flushDNS() async throws {
         _ = try await administrator("/usr/bin/dscacheutil -flushcache && /usr/bin/killall -HUP mDNSResponder")
     }
+    /// Removes `name` from the Mac's known Wi-Fi networks and its saved password, as Wi-Fi Settings' Forget does.
+    public static func forgetWiFi(_ name: String, interface: String) async throws {
+        guard let command = forgetCommand(name, interface: interface) else { throw DiagnosticError(String(localized: "Kilobat couldn’t find the Wi-Fi interface.")) }
+        _ = try await administrator(command, prompt: String(localized: "Kilobat wants to forget the Wi-Fi network “\(name)”."))
+    }
+    /// The shell command, with the name single-quoted; nil for an interface that isn't a plain BSD name such as en0.
+    static func forgetCommand(_ name: String, interface: String) -> String? {
+        guard !name.isEmpty, interface.range(of: #"^[a-z]+[0-9]+$"#, options: .regularExpression) != nil else { return nil }
+        return "/usr/sbin/networksetup -removepreferredwirelessnetwork \(interface) '" + name.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    }
 }
 
 /// One AWDL pause: how long it may last and what ends it. Pure, so the restore rules are testable.
@@ -35,6 +45,12 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
         if appPID != nil && !appRunning { return .appQuit }
         return nil
     }
+    /// Runs `script` in the background from an administrator shell, in a session of its own. `nohup` isn't enough: a
+    /// process started that way from macOS's administrator prompt never ran, measured on macOS 27.
+    public static func detached(_ script: String) -> String {
+        "/usr/bin/perl -MPOSIX -e " + DNSService.shellQuote("POSIX::setsid(); exec @ARGV or die") + " /bin/sh -c " + DNSService.shellQuote(script) + " </dev/null >/dev/null 2>&1 &"
+    }
+
     /// Two-second watchdog ticks before the hard limit.
     public var ticks: Int { Int((expires.timeIntervalSince(started) / 2).rounded(.up)) }
     public func label(now: Date = Date()) -> String {
@@ -122,11 +138,17 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
               i=$((i+1))
             done
             """
-            let command = "/usr/bin/nohup /bin/sh -c " + DNSService.shellQuote(script) + " </dev/null >/dev/null 2>&1 &"
+            let command = LowLatencyHold.detached(script)
             hold.saveMarker()
             try await NetworkTools.administrator(command)
-            try await Task.sleep(for: .seconds(1))
-            guard await Self.isUp() == false else { throw DiagnosticError(String(localized: "AWDL did not pause. No low-latency mode is active.")) }
+            // macOS raises a busy link again at once and the root loop takes it down every two seconds, so one look can
+            // catch it up. It's paused if it's seen down at all in these few seconds.
+            var paused = false
+            for _ in 0..<6 where !paused {
+                try await Task.sleep(for: .seconds(1))
+                paused = await Self.isUp() == false
+            }
+            guard paused else { throw DiagnosticError(String(localized: "AirDrop’s link (AWDL) did not pause, so AirDrop is not paused.")) }
             active = true; self.hold = hold
             watcher = Task { [weak self] in
                 var up = 0
@@ -186,7 +208,7 @@ public struct LowLatencyHold: Codable, Sendable, Equatable {
         case .none: return
         case .clear: LowLatencyHold.clearMarker()
         case .restore:
-            do { try await Self.forceRestore(reason: String(localized: "Kilobat restores AirDrop (AWDL), which stayed paused after an earlier low-latency session ended unexpectedly.")) }
+            do { try await Self.forceRestore(reason: String(localized: "Kilobat resumes AirDrop (AWDL), which stayed paused after an earlier pause ended unexpectedly.")) }
             catch { self.error = error.localizedDescription }
         }
     }

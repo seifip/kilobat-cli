@@ -100,7 +100,7 @@ public struct StreamReport: Codable, Identifiable, Sendable, Equatable {
             case .otherDevice: String(localized: "Pause downloads and uploads on other devices while you stream, or give this Mac priority in your router’s QoS settings.", comment: "Stream report advice")
             case .wifi: weakSignal == true ? String(localized: "Stream over Ethernet, or move closer to the router.", comment: "Stream report advice")
                                            : String(localized: "Stream over Ethernet: Wi-Fi stalls drop frames even on a fast plan.", comment: "Stream report advice")
-            case .airDrop: String(localized: "Turn on low latency before you stream; it pauses AirDrop until you turn it off.", comment: "Stream report advice")
+            case .airDrop: String(localized: "Pause AirDrop before you stream, from the AirDrop switch in Wi-Fi & Bluetooth.", comment: "Stream report advice")
             case .portal: String(localized: "Sign in again on the Wi-Fi’s page before you go live.", comment: "Stream report advice after a hotel or café Wi-Fi's sign-in ran out")
             case .starlink: CallSamples.Dish.advice(dish)
             case .beyondRouter: String(localized: "Pick a closer ingest server in OBS › Settings › Stream, or turn on “Dynamically change bitrate” in OBS › Settings › Advanced › Network so OBS lowers the bitrate instead of dropping frames.", comment: "Stream report advice; OBS's menu names")

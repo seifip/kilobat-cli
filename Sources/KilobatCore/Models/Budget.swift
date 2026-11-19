@@ -1,16 +1,36 @@
 import Foundation
 
-/// When a network's data budget starts over. Session is the original behaviour: only a manual reset.
+/// What a budget or an app limit does once reached; budgets and app limits share these modes.
+public enum NetworkBudgetMode: String, Codable, CaseIterable, Sendable {
+    case off, alert, block
+
+    public var title: String {
+        switch self {
+        case .off: String(localized: "Off")
+        case .alert: String(localized: "Alert only")
+        case .block: String(localized: "Block new connections")
+        }
+    }
+}
+
+/// When a network's data budget starts over. `session`, stored under its old name, counts everything on the network
+/// until the count is reset by hand; app limits need a calendar, so they never use it.
 public enum BudgetPeriod: String, Codable, CaseIterable, Identifiable, Sendable {
     case session, daily, weekly, monthly
     public var id: String { rawValue }
+    /// For “Counts: Each month”.
     public var title: String {
-        switch self { case .session: String(localized: "Until reset"); case .daily: String(localized: "Daily"); case .weekly: String(localized: "Weekly"); case .monthly: String(localized: "Monthly") }
+        switch self {
+        case .session: String(localized: "In total", comment: "Budget period: everything on this network until the count is reset")
+        case .daily: String(localized: "Each day"); case .weekly: String(localized: "Each week"); case .monthly: String(localized: "Each month")
+        }
     }
     /// "this month", for "1.2 of 5 GB this month".
     public var phrase: String {
-        switch self { case .session: String(localized: "this session"); case .daily: String(localized: "today"); case .weekly: String(localized: "this week"); case .monthly: String(localized: "this month") }
+        switch self { case .session: String(localized: "on this network"); case .daily: String(localized: "today"); case .weekly: String(localized: "this week"); case .monthly: String(localized: "this month") }
     }
+    /// The periods an app limit can count in.
+    public static let calendar: [BudgetPeriod] = [.daily, .weekly, .monthly]
 }
 
 /// A budget's reset cycle and the percentages that notify.
@@ -55,19 +75,36 @@ public struct BudgetCycle: Codable, Equatable, Sendable {
         }
     }
 
-    /// App quotas need a calendar, so with a session budget they start over each day.
-    public func quotaInterval(containing date: Date, calendar: Calendar = .current) -> DateInterval {
+    /// App limits need a calendar, so a total cycle counts by the day for them.
+    public func limitInterval(containing date: Date, calendar: Calendar = .current) -> DateInterval {
         interval(containing: date, calendar: calendar) ?? calendar.dateInterval(of: .day, for: date) ?? DateInterval(start: date, duration: 86_400)
     }
 
-    /// "Monthly from the 5th", "Weekly from Monday", "Daily", "Until reset".
+    /// "Each month from day 5", "Each week from Monday", "Each day", "In total".
     public func summary(calendar: Calendar = .current) -> String {
         switch period {
         case .session, .daily: return period.title
-        case .weekly: return String(localized: "Weekly from \(calendar.weekdaySymbols[min(7, max(1, anchor ?? calendar.firstWeekday)) - 1])")
-        case .monthly: return String(localized: "Monthly from day \(min(31, max(1, anchor ?? 1)))")
+        case .weekly: return String(localized: "Each week from \(calendar.weekdaySymbols[min(7, max(1, anchor ?? calendar.firstWeekday)) - 1])")
+        case .monthly: return String(localized: "Each month from day \(min(31, max(1, anchor ?? 1)))")
         }
     }
+
+    /// When it starts over, worded the same for budgets and app limits: "starts over each day", "starts over each
+    /// Monday", "starts over on day 5 of each month"; a total counts until it is reset. Written to follow “·”.
+    public func resets(calendar: Calendar = .current) -> String {
+        switch period {
+        case .session: return String(localized: "counts until you reset it", comment: "A total budget; follows “·”")
+        case .daily: return String(localized: "starts over each day", comment: "A budget or app limit; follows “·”")
+        case .weekly:
+            return String(localized: "starts over each \(calendar.weekdaySymbols[min(7, max(1, anchor ?? calendar.firstWeekday)) - 1])", comment: "A budget or app limit, such as “starts over each Monday”; follows “·”")
+        case .monthly: return String(localized: "starts over on day \(min(31, max(1, anchor ?? 1))) of each month", comment: "A budget or app limit; follows “·”")
+        }
+    }
+
+    /// The limits offered everywhere a budget or an app limit is set, in GB; any other amount can be typed.
+    public static let limitChoices: [Double] = [1, 2, 5, 10, 20, 50, 100]
+    /// The alert percentages offered for budgets, packs and app limits.
+    public static let alertChoices = [50, 80, 95, 100]
 
     /// "1.2 of 5 GB this month · resets 1 Nov"; a session budget has no reset date.
     public func progress(used: UInt64, limitGB: Double, now: Date = Date(), calendar: Calendar = .current) -> String {
@@ -90,28 +127,47 @@ public struct BudgetCycle: Codable, Equatable, Sendable {
     }
 }
 
-/// A data limit for one app per cycle. Usage is sampled, so the app may run a little over before it stops.
-public struct AppQuota: Codable, Equatable, Identifiable, Sendable {
+/// An app limit: how much one app may use each day, week or month, on one network or every network. Usage is
+/// sampled, so the app may run a little over before it stops. Saved under `quotas`, its name before limits had modes.
+public struct AppLimit: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     /// The app as usage history names it; helpers count under the app that owns them.
     public var name: String
-    /// Rule keys (bundle IDs or process:<name>) the filter stops once the quota is used up.
+    /// Rule keys (bundle IDs or process:<name>) the filter stops once a blocking limit is used up.
     public var apps: [String]
     public var bytes: UInt64
     public var uploadOnly: Bool
-    /// The network key the quota counts on; nil counts every network.
+    /// The network key the limit counts on; nil counts every network.
     public var network: String?
+    /// Alert only or Block. Nil is Block: every limit saved before modes, as a quota, blocked.
+    public var mode: NetworkBudgetMode?
+    /// Its own period and alerts. Nil, as quotas were saved, follows its network's budget period (each day for a
+    /// total budget) and notifies only once it is used up.
+    public var cycle: BudgetCycle?
 
-    public init(name: String, apps: [String], bytes: UInt64, uploadOnly: Bool = false, network: String? = nil) {
+    public init(name: String, apps: [String], bytes: UInt64, uploadOnly: Bool = false, network: String? = nil, mode: NetworkBudgetMode? = nil, cycle: BudgetCycle? = nil) {
         self.id = UUID(); self.name = name; self.apps = apps; self.bytes = bytes; self.uploadOnly = uploadOnly; self.network = network
+        self.mode = mode; self.cycle = cycle
     }
 
-    /// Whether the quota counts traffic on `network`.
+    public var effectiveMode: NetworkBudgetMode { mode ?? .block }
+    /// Whether the filter stops the app's new connections once the limit is used up.
+    public var blocks: Bool { effectiveMode == .block }
+
+    /// Whether the limit counts traffic on `network`.
     public func applies(to network: String) -> Bool { self.network == nil || self.network == network }
 
-    /// Bytes the app used in the cycle containing `now`.
-    public func used(_ usage: [UsageEntry], cycle: BudgetCycle, now: Date = Date(), calendar: Calendar = .current) -> UInt64 {
-        BudgetCycle.used(usage, in: cycle.quotaInterval(containing: now, calendar: calendar), network: network, app: name, uploadOnly: uploadOnly)
+    /// The cycle it counts in: its own, or else its network's budget period with an alert when used up. Never a total,
+    /// which follows no calendar: that counts by the day.
+    public func resolvedCycle(budget: BudgetCycle) -> BudgetCycle {
+        var resolved = cycle ?? BudgetCycle(period: budget.period, anchor: budget.anchor, alerts: [100])
+        if resolved.period == .session { resolved.period = .daily; resolved.anchor = nil }
+        return resolved
+    }
+
+    /// Bytes the app used in the cycle containing `now`; `budget` is the budget cycle of the network it counts on.
+    public func used(_ usage: [UsageEntry], budget: BudgetCycle, now: Date = Date(), calendar: Calendar = .current) -> UInt64 {
+        BudgetCycle.used(usage, in: resolvedCycle(budget: budget).limitInterval(containing: now, calendar: calendar), network: network, app: name, uploadOnly: uploadOnly)
     }
 }
 

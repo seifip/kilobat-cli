@@ -68,8 +68,8 @@ struct KillSwitchPolicyTests {
         #expect(filter(blockLAN).decide(lan, now: now).reason == .killSwitch)
         // Allowed past the kill switch, the app's own rule still applies.
         #expect(filter(down, allow: ["com.apple.Safari": false]).decide(lan, now: now).verdict == .block)
-        // DHCP keeps the Mac on the network either way.
-        #expect(filter(blockLAN).decide(flow(nil, address: "255.255.255.255", port: "67"), now: now).verdict == .allow)
+        // A port number alone cannot prove the flow is DHCP.
+        #expect(filter(blockLAN).decide(flow(nil, address: "255.255.255.255", port: "67"), now: now).verdict == .block)
         for address in ["10.0.0.1", "172.20.1.1", "192.168.0.10", "169.254.3.4", "224.0.0.251", "fe80::1", "fd00::5", "ff02::fb"] {
             #expect(KillSwitchPolicy.isLocal(host: nil, address: address), "\(address)")
         }
@@ -131,14 +131,56 @@ struct KillSwitchStateTests {
 
     @Test func armsOnlyOnceTheVPNHasBeenUpThisBoot() {
         // Turning it on with no VPN never cuts the Mac off.
-        #expect(KillSwitchState.arm(armedBoot: nil, boot: 100, enabled: true, vpnUp: false) == nil)
-        #expect(KillSwitchState.arm(armedBoot: nil, boot: 100, enabled: true, vpnUp: true) == 100)
+        #expect(KillSwitchState.arm(armedBoot: nil, boot: "A", enabled: true, vpnUp: false) == nil)
+        #expect(KillSwitchState.arm(armedBoot: nil, boot: "A", enabled: true, vpnUp: true) == "A")
         // Once armed it stays armed through drops and network changes on the same boot.
-        #expect(KillSwitchState.arm(armedBoot: 100, boot: 100, enabled: true, vpnUp: false) == 100)
+        #expect(KillSwitchState.arm(armedBoot: "A", boot: "A", enabled: true, vpnUp: false) == "A")
         // A restart or turning it off forgets it.
-        #expect(KillSwitchState.arm(armedBoot: 100, boot: 200, enabled: true, vpnUp: false) == nil)
-        #expect(KillSwitchState.arm(armedBoot: 100, boot: 100, enabled: false, vpnUp: true) == nil)
+        #expect(KillSwitchState.arm(armedBoot: "A", boot: "B", enabled: true, vpnUp: false) == nil)
+        #expect(KillSwitchState.arm(armedBoot: "A", boot: "A", enabled: false, vpnUp: true) == nil)
         #expect(KillSwitchState.bootTime() > 0)
+    }
+
+    @Test func theRouteIsReadOnAnEventAndOtherwiseEveryThirtySeconds() {
+        #expect(KillSwitchState.readDue(changed: true, hasReading: true, sinceLast: 0))
+        #expect(KillSwitchState.readDue(changed: false, hasReading: false, sinceLast: 0))
+        #expect(!KillSwitchState.readDue(changed: false, hasReading: true, sinceLast: 29))
+        #expect(KillSwitchState.readDue(changed: false, hasReading: true, sinceLast: 30))
+        // A clock set back doesn't hold the next reading off.
+        #expect(KillSwitchState.readDue(changed: false, hasReading: true, sinceLast: -5))
+        #expect(KillSwitchState.fallbackRead == 30)
+    }
+
+    @Test func armedStateSurvivesTheMoveToBootSessions() {
+        // A session saved by this version is kept as it is; `arm` then decides whether it is this boot.
+        #expect(KillSwitchState.armedSession(saved: "A", boot: "B", bootTime: 5) == "A")
+        #expect(KillSwitchState.arm(armedBoot: KillSwitchState.armedSession(saved: "A", boot: "B", bootTime: 5), boot: "B", enabled: true, vpnUp: false) == nil)
+        // A boot time saved by an older version carries over only when it is still this boot's.
+        #expect(KillSwitchState.armedSession(saved: 100.0, boot: "A", bootTime: 100) == "A")
+        #expect(KillSwitchState.armedSession(saved: 100.0, boot: "A", bootTime: 101) == nil)
+        #expect(KillSwitchState.armedSession(saved: nil, boot: "A", bootTime: 100) == nil)
+    }
+
+    @Test func thisBootHasAnIdentity() {
+        let session = KillSwitchState.bootSession()
+        #expect(!session.isEmpty && session == KillSwitchState.bootSession())
+        // The kernel's session identifier, not the boot-time fallback.
+        #expect(UUID(uuidString: session) != nil)
+    }
+
+    @Test func aLapseIsOnlyProEndingOrTheFilterGoingOff() {
+        func state(_ status: KillSwitchState.Status) -> KillSwitchState { KillSwitchState(status: status, enabled: status != .off) }
+        #expect(KillSwitchState.lapse(wasArmed: true, next: state(.needsPro)) == .needsPro)
+        #expect(KillSwitchState.lapse(wasArmed: true, next: state(.needsFilter)) == .needsFilter)
+        #expect(KillSwitchState.lapse(wasArmed: false, next: state(.needsPro)) == nil)
+        #expect(KillSwitchState.lapse(wasArmed: true, next: nil) == nil)
+        for status in [KillSwitchState.Status.off, .waiting, .protected, .blocking, .allowed] {
+            #expect(KillSwitchState.lapse(wasArmed: true, next: state(status)) == nil)
+        }
+        // What the monitor counts as armed: exactly the states that hand the filter an armed policy.
+        for status in [KillSwitchState.Status.off, .needsPro, .needsFilter, .waiting, .protected, .blocking, .allowed] {
+            #expect(state(status).enforcing == state(status).policy().armed)
+        }
     }
 
     @Test func statusFollowsSettingProFilterArmingAndVPN() {
@@ -199,5 +241,70 @@ struct KillSwitchStateTests {
         store.preferences.killSwitchAllowedUntil = now
         let reloaded = TrafficStore(directory: directory, startMonitoring: false).preferences
         #expect(KillSwitchState.enabled(reloaded) && !KillSwitchState.allowLAN(reloaded) && reloaded.killSwitchAllowedUntil == now)
+    }
+}
+
+
+@Test func ipv4KillSwitchRequiresBothHalvesOnItsTunnel() {
+    let defaultPhysical: (UInt32, UInt32, UInt32) = (0, 0, 4)
+    let lower: (UInt32, UInt32, UInt32) = (0, 0x8000_0000, 7)
+    let upper: (UInt32, UInt32, UInt32) = (0x8000_0000, 0x8000_0000, 7)
+    #expect(!KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical], tunnel: 7))
+    #expect(!KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical, lower], tunnel: 7))
+    #expect(KillSwitchPolicy.ipv4Covered(routes: [defaultPhysical, lower, upper], tunnel: 7))
+    #expect(KillSwitchPolicy.ipv4Covered(routes: [(0, 0, 7)], tunnel: 7))
+}
+
+/// IPv4 route tables as `ipv4Routes()` returns them. Interface 4 is en0; 7 and 9 are tunnels.
+private enum RouteTables {
+    typealias Route = (destination: UInt32, mask: UInt32, interface: UInt32)
+    static let half: UInt32 = 0x8000_0000
+    static let lan: Route = (0xC0A8_0100, 0xFFFF_FF00, 4)            // 192.168.1.0/24 on Wi-Fi
+    static let server: Route = (0xCB00_7105, 0xFFFF_FFFF, 4)         // the VPN server itself, outside the tunnel
+    /// No VPN.
+    static let plain: [Route] = [(0, 0, 4), lan]
+    /// A VPN that replaces the default route.
+    static let fullTunnel: [Route] = [(0, 0, 7), lan, server]
+    /// OpenVPN `redirect-gateway def1` and wg-quick: the default stays, two halves go through the tunnel.
+    static let twoHalves: [Route] = [(0, 0, 4), (0, half, 7), (half, half, 7), lan, server]
+    /// A tunnel that lost one half.
+    static let oneHalf: [Route] = [(0, 0, 4), (0, half, 7), lan]
+    /// Each half on a different tunnel.
+    static let twoTunnels: [Route] = [(0, 0, 4), (0, half, 7), (half, half, 9)]
+    /// A TUN-mode proxy's eight routes (1/8, 2/7, 4/6, 8/5, 16/4, 32/3, 64/2, 128/1): not recognised, on purpose.
+    static let eightRoutes: [Route] = [(0, 0, 4), (0x0100_0000, 0xFF00_0000, 7), (0x0200_0000, 0xFE00_0000, 7), (0x0400_0000, 0xFC00_0000, 7), (0x0800_0000, 0xF800_0000, 7),
+                                       (0x1000_0000, 0xF000_0000, 7), (0x2000_0000, 0xE000_0000, 7), (0x4000_0000, 0xC000_0000, 7), (half, half, 7)]
+    static let all: [[Route]] = [plain, fullTunnel, twoHalves, oneHalf, twoTunnels, eightRoutes, []]
+}
+
+struct IPv4CarrierTests {
+    @Test func theFiltersRuleReadsTheFixturesAsDocumented() {
+        #expect(KillSwitchPolicy.ipv4Covered(routes: RouteTables.twoHalves, tunnel: 7))
+        #expect(KillSwitchPolicy.ipv4Covered(routes: RouteTables.fullTunnel, tunnel: 7))
+        for table in [RouteTables.plain, RouteTables.oneHalf, RouteTables.twoTunnels, RouteTables.eightRoutes] {
+            #expect(!KillSwitchPolicy.ipv4Covered(routes: table, tunnel: 7))
+        }
+    }
+
+    @Test func theCarrierIsTheOneInterfaceCarryingAllOfIPv4() {
+        #expect(KillSwitchPolicy.ipv4Carrier(routes: RouteTables.plain) == 4)
+        #expect(KillSwitchPolicy.ipv4Carrier(routes: RouteTables.fullTunnel) == 7)
+        #expect(KillSwitchPolicy.ipv4Carrier(routes: RouteTables.twoHalves) == 7)
+        for table in [RouteTables.oneHalf, RouteTables.twoTunnels, RouteTables.eightRoutes, []] {
+            #expect(KillSwitchPolicy.ipv4Carrier(routes: table) == nil)
+        }
+    }
+
+    /// The app may never name a carrier the filter's rule would call uncovered, nor miss one it accepts.
+    @Test func theCarrierAgreesWithTheFiltersRule() {
+        for table in RouteTables.all {
+            for index: UInt32 in [4, 7, 9] {
+                #expect((KillSwitchPolicy.ipv4Carrier(routes: table) == index) == KillSwitchPolicy.ipv4Covered(routes: table, tunnel: index))
+            }
+        }
+    }
+
+    @Test func thisMacsRouteTableReads() {
+        #expect(KillSwitchPolicy.ipv4Routes() != nil)
     }
 }

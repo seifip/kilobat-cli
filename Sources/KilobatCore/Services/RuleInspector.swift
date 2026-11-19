@@ -38,7 +38,7 @@ public struct RuleContext: Sendable {
 public struct RuleChange: Codable, Sendable, Equatable {
     public enum Place: String, Codable, Sendable {
         case protection, allowedSites, killSwitch, profiles, destinationRules, blocklist, timedRules, sendLater, callMode, stream, budget,
-             quotas, updaters, appRules, approvals, newApps, appleSoftware, filter
+             quotas, updaters, cloudSync, appRules, approvals, newApps, appleSoftware, filter
     }
     public var place: Place
     /// "Settings › Protection".
@@ -218,15 +218,16 @@ public struct RuleInspector: @unchecked Sendable {
         let target = host ?? String(localized: "this destination", comment: "Rule inspector: a connection without a host name")
         let profile = policy.profile.isEmpty ? String(localized: "this profile", comment: "Rule inspector") : NetworkProfile(rawValue: policy.profile)?.title ?? policy.profile
         func time(_ date: Date) -> String { date.formatted(date: .omitted, time: .shortened) }
-        let killSwitchChange = RuleChange(.killSwitch, String(localized: "Settings › Network › VPN kill switch", comment: "Rule inspector: where to change it"), command: "kilobat settings kill-switch off")
-        let newApps = RuleChange(.newApps, String(localized: "Settings › Network › New apps", comment: "Rule inspector: where to change it"), command: app.map { "kilobat allow \($0)" })
-        let appRules = RuleChange(.appRules, String(localized: "Profiles › \(profile)", comment: "Rule inspector: where to change it, e.g. Profiles › Work"),
+        let killSwitchChange = RuleChange(.killSwitch, String(localized: "Settings › Filter & rules › VPN kill switch", comment: "Rule inspector: where to change it"), command: "kilobat settings kill-switch off")
+        let newApps = RuleChange(.newApps, String(localized: "Settings › Filter & rules › New apps", comment: "Rule inspector: where to change it"), command: app.map { "kilobat allow \($0)" })
+        let rulesList = String(localized: "Connections › Rules", comment: "Rule inspector: where to change it")
+        let appRules = RuleChange(.appRules, rulesList,
                                   command: app.map { "kilobat reset \($0) --profile \(policy.profile.lowercased())" })
         switch match.reason {
         case .filterOff:
             return (String(localized: "Network filter", comment: "Rule inspector source"),
                     String(localized: "the network filter is off, so nothing is blocked", comment: "Rule inspector"),
-                    RuleChange(.filter, String(localized: "Settings › Network › Network filter", comment: "Rule inspector: where to change it")))
+                    RuleChange(.filter, String(localized: "Settings › Filter & rules › Network filter", comment: "Rule inspector: where to change it")))
         case .unrestricted:
             return (String(localized: "Unrestricted", comment: "Rule inspector source: the profile"),
                     String(localized: "the Unrestricted profile allows every connection", comment: "Rule inspector"),
@@ -253,7 +254,7 @@ public struct RuleInspector: @unchecked Sendable {
             if rule.direction != "any" { text += " (" + (rule.direction == "incoming" ? String(localized: "incoming", comment: "Rule inspector") : String(localized: "outgoing", comment: "Rule inspector")) + ")" }
             if let expires = rule.expires { text += " " + String(localized: "until \(time(expires))", comment: "Rule inspector: a rule's end, e.g. until 14:05") }
             return (String(localized: "Destination rule", comment: "Rule inspector source"), text,
-                    RuleChange(.destinationRules, String(localized: "Tools › Destination rules", comment: "Rule inspector: where to change it"), command: "kilobat remove-connection-rule \(rule.id.uuidString)"))
+                    RuleChange(.destinationRules, rulesList, command: "kilobat remove-connection-rule \(rule.id.uuidString)"))
         case .protection(let detail):
             let allow = RuleChange(.protection, String(localized: "Settings › Protection", comment: "Rule inspector: where to change it"), command: "kilobat protect allow \(detail.host)")
             switch detail.kind {
@@ -286,7 +287,8 @@ public struct RuleInspector: @unchecked Sendable {
             return (String(localized: "Blocklist", comment: "Rule inspector source"),
                     entry == target ? String(localized: "\(target) is on your blocklist", comment: "Rule inspector")
                                     : String(localized: "\(target) matches \(entry) on your blocklist", comment: "Rule inspector"),
-                    RuleChange(.blocklist, String(localized: "Tools › Blocklist", comment: "Rule inspector: where to change it"),
+                    // A host blocked by hand is listed with the other rules; an imported list stays in Tools.
+                    RuleChange(.blocklist, hand ? rulesList : String(localized: "Tools › Blocklist", comment: "Rule inspector: where to change it"),
                                command: hand ? "kilobat unblock-host \(entry)" : "kilobat blocklist status"))
         case .temporaryRule(let rule):
             switch app.flatMap({ context.holders[$0] }) {
@@ -302,31 +304,35 @@ public struct RuleInspector: @unchecked Sendable {
             case .callMode?:
                 return (String(localized: "Call mode", comment: "Rule inspector source"),
                         String(localized: "\(name) is held while you’re on a call", comment: "Rule inspector"),
-                        RuleChange(.callMode, String(localized: "Settings › Network › Call mode", comment: "Rule inspector: where to change it")))
+                        RuleChange(.callMode, String(localized: "Settings › Calls, streaming & Awake › Call mode", comment: "Rule inspector: where to change it")))
             case .stream?:
                 return (String(localized: "Going live", comment: "Rule inspector source: holds while streaming"),
                         String(localized: "\(name) is held while you stream", comment: "Rule inspector"),
-                        RuleChange(.stream, String(localized: "Settings › Streaming", comment: "Rule inspector: where to change it")))
+                        RuleChange(.stream, String(localized: "Settings › Calls, streaming & Awake › Streaming", comment: "Rule inspector: where to change it")))
             case nil:
                 return (String(localized: "Timed rule", comment: "Rule inspector source"),
                         rule.allowed ? String(localized: "\(name) is allowed until \(time(rule.expires))", comment: "Rule inspector")
                                      : String(localized: "\(name) is blocked until \(time(rule.expires))", comment: "Rule inspector"),
-                        RuleChange(.timedRules, String(localized: "Profiles › Timed rules", comment: "Rule inspector: where to change it"), command: app.map { "kilobat reset \($0)" }))
+                        RuleChange(.timedRules, rulesList, command: app.map { "kilobat reset \($0)" }))
             }
         case .budget:
             return (String(localized: "Data budget", comment: "Rule inspector source"),
                     String(localized: "this network’s data budget is used up, which stops new connections", comment: "Rule inspector"),
-                    RuleChange(.budget, String(localized: "Settings › Budget", comment: "Rule inspector: where to change it"), command: "kilobat limit"))
+                    RuleChange(.budget, String(localized: "Settings › Data & budgets", comment: "Rule inspector: where to change it"), command: "kilobat limit"))
         case .quota(let key):
-            return (String(localized: "App quota", comment: "Rule inspector source"),
-                    String(localized: "\(context.name(key)) used up its data quota for this cycle", comment: "Rule inspector"),
-                    RuleChange(.quotas, String(localized: "Settings › Budget › App quotas", comment: "Rule inspector: where to change it"), command: "kilobat quota \(key) --remove"))
+            return (String(localized: "App limit", comment: "Rule inspector source"),
+                    String(localized: "\(context.name(key)) used up its data limit for now", comment: "Rule inspector"),
+                    RuleChange(.quotas, String(localized: "Settings › Data & budgets › App limits", comment: "Rule inspector: where to change it"), command: "kilobat quota \(key) --remove"))
         case .updaterPaused(let helper):
             let text = context.focusPausesUpdaters && !context.metered
                 ? String(localized: "\(helper) is an updater, paused while your Focus is on", comment: "Rule inspector")
                 : String(localized: "\(helper) is an updater, paused while this network is metered", comment: "Rule inspector")
             return (String(localized: "Paused updaters", comment: "Rule inspector source"), text,
-                    RuleChange(.updaters, String(localized: "Settings › Network › Pause updaters", comment: "Rule inspector: where to change it"), command: "kilobat updaters off"))
+                    RuleChange(.updaters, String(localized: "Settings › Filter & rules › Pause updaters", comment: "Rule inspector: where to change it"), command: "kilobat updaters off"))
+        case .syncPaused(let client):
+            return (String(localized: "Paused cloud sync", comment: "Rule inspector source"),
+                    String(localized: "\(client) syncs files, paused while this network is metered", comment: "Rule inspector"),
+                    RuleChange(.cloudSync, String(localized: "Settings › Filter & rules › Pause cloud sync", comment: "Rule inspector: where to change it"), command: "kilobat wifi set pause-cloud-sync off"))
         case .appRule(let allowed):
             var text = allowed ? String(localized: "\(name) is allowed in \(profile)", comment: "Rule inspector: an app rule, e.g. Slack is allowed in Work")
                                : String(localized: "\(name) is blocked in \(profile)", comment: "Rule inspector: an app rule, e.g. Slack is blocked in Travel")
@@ -335,11 +341,11 @@ public struct RuleInspector: @unchecked Sendable {
         case .recentDecision(let allowed):
             return (String(localized: "Approval", comment: "Rule inspector source"),
                     allowed ? String(localized: "you allowed \(name) when Kilobat asked", comment: "Rule inspector") : String(localized: "you blocked \(name) when Kilobat asked", comment: "Rule inspector"),
-                    RuleChange(.approvals, String(localized: "Profiles › \(profile)", comment: "Rule inspector: where to change it, e.g. Profiles › Work"), command: app.map { "kilobat reset \($0)" }))
+                    RuleChange(.approvals, rulesList, command: app.map { "kilobat reset \($0)" }))
         case .appleSoftware:
             return (String(localized: "Apple software", comment: "Rule inspector source"),
                     String(localized: "\(name) is Apple software, which \(profile) lets through", comment: "Rule inspector"),
-                    RuleChange(.appleSoftware, String(localized: "Settings › Network › Allow Apple software", comment: "Rule inspector: where to change it"), command: "kilobat settings apple-software off"))
+                    RuleChange(.appleSoftware, String(localized: "Settings › Filter & rules › Allow Apple software", comment: "Rule inspector: where to change it"), command: "kilobat settings apple-software off"))
         case .askNewApps:
             return (String(localized: "New apps", comment: "Rule inspector source"),
                     String(localized: "\(name) has no rule, so Kilobat asks before it connects", comment: "Rule inspector"), newApps)
@@ -354,10 +360,25 @@ public struct RuleInspector: @unchecked Sendable {
                                : String(localized: "\(name) has no rule, and \(profile) blocks apps without one", comment: "Rule inspector")
             if context.autoTravel { text += String(localized: ", which Kilobat switched to for this metered network", comment: "Rule inspector: after 'Slack is blocked in Travel'") }
             return (String(localized: "Profile default", comment: "Rule inspector source"), text, newApps)
+        case .subscribedList(let entry, let list):
+            return (String(localized: "Blocklist subscription", comment: "Rule inspector source"),
+                    entry == target ? String(localized: "\(target) is on \(list), a list you subscribed to", comment: "Rule inspector")
+                                    : String(localized: "\(target) matches \(entry) on \(list), a list you subscribed to", comment: "Rule inspector"),
+                    RuleChange(.blocklist, String(localized: "Settings › Protection › Blocklist subscriptions", comment: "Rule inspector: where to change it"),
+                               command: "kilobat blocklists"))
+        case .teamRule(let team, let allowed):
+            return (String(localized: "Developer rule", comment: "Rule inspector source: a rule for everything one developer signed"),
+                    allowed ? String(localized: "everything signed by Team \(team) is allowed in \(profile), and \(name) has no rule of its own", comment: "Rule inspector")
+                            : String(localized: "everything signed by Team \(team) is blocked in \(profile), and \(name) has no rule of its own", comment: "Rule inspector"),
+                    RuleChange(.appRules, rulesList, command: "kilobat reset team:\(team)"))
+        case .askNewDestination:
+            return (String(localized: "New destinations", comment: "Rule inspector source"),
+                    String(localized: "\(name) asks before it reaches a destination its rules don’t cover", comment: "Rule inspector"),
+                    RuleChange(.destinationRules, rulesList, command: app.map { "kilobat ask-destinations off \($0)" }))
         case .noAppRule:
             return (String(localized: "No app", comment: "Rule inspector source"),
                     String(localized: "Kilobat couldn’t tell which app this is, and no rule for every app applies", comment: "Rule inspector"),
-                    RuleChange(.newApps, String(localized: "Settings › Network › New apps", comment: "Rule inspector: where to change it")))
+                    RuleChange(.newApps, String(localized: "Settings › Filter & rules › New apps", comment: "Rule inspector: where to change it")))
         }
     }
 }

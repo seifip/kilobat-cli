@@ -40,12 +40,28 @@ public struct InterfaceReading: Codable, Identifiable, Sendable {
     public var vpn: Bool { name.hasPrefix("utun") || name.hasPrefix("ppp") || name.hasPrefix("ipsec") }
 }
 public enum ExpertTools {
+    public typealias CommandLauncher = @Sendable (String, [String], Double) async -> CommandResult
+    /// Most pids handed to one lsof launch, well inside the argument limit.
+    static let lsofChunk = 200
+
     public static func destinations(pid: Int32? = nil) async throws -> [SocketDestination] {
-        var args = ["+c", "0", "-nP", "-iTCP", "-iUDP", "-FpcPfnT"]
-        if let pid { args += ["-a", "-p", String(pid)] }
-        let result = await CommandRunner.run("/usr/sbin/lsof", args, timeout: 8)
+        if let pid { return try await destinations(pids: [pid]) }
+        let result = await CommandRunner.run("/usr/sbin/lsof", ["+c", "0", "-nP", "-iTCP", "-iUDP", "-FpcPfnT"], timeout: 8)
         guard result.status == 0 || result.status == 1 else { throw DiagnosticError(String(localized: "Socket inventory unavailable: \(result.output)")) }
         return parseSockets(result.output)
+    }
+    /// The sockets of every listed process in one lsof launch (one per 200 pids). A pid that has exited just has no rows:
+    /// lsof still prints the others and exits 1.
+    public static func destinations(pids: [Int32], launch: CommandLauncher = { await CommandRunner.run($0, $1, timeout: $2) }) async throws -> [SocketDestination] {
+        let unique = Array(Set(pids)).sorted()
+        var rows: [SocketDestination] = []
+        for start in stride(from: 0, to: unique.count, by: lsofChunk) {
+            let list = unique[start..<min(start + lsofChunk, unique.count)].map(String.init).joined(separator: ",")
+            let result = await launch("/usr/sbin/lsof", ["+c", "0", "-nP", "-iTCP", "-iUDP", "-FpcPfnT", "-a", "-p", list], 8)
+            guard result.status == 0 || result.status == 1 else { throw DiagnosticError(String(localized: "Socket inventory unavailable: \(result.output)")) }
+            rows += parseSockets(result.output)
+        }
+        return rows
     }
     public static func parseSockets(_ output: String, date: Date = Date()) -> [SocketDestination] {
         var pid: Int32 = 0, process = "", proto = "", endpoint = "", state = ""
@@ -94,27 +110,33 @@ public enum ExpertTools {
         let result = await CommandRunner.run("/usr/bin/dns-sd", ["-B", "_services._dns-sd._udp", "local."], timeout: 5)
         return result.output.isEmpty ? String(localized: "No Bonjour service types observed. Local Network permission may be required.") : result.output
     }
-    /// `queries` probes per hop: 1 for a quick look, 3 for the repeated traces route history compares.
+    /// `queries` probes per hop: 1 for a quick look, 3 for the repeated traces route history compares. 30 hops, UDP.
     public static func route(to host: String, queries: Int = 1) async throws -> String {
-        guard validHost(host) else { throw DiagnosticError(String(localized: "Enter a hostname or IP address, without a URL or options.")) }
-        let queries = min(max(queries, 1), 3)
-        let result = await CommandRunner.run("/usr/sbin/traceroute", ["-n", "-m", "12", "-q", String(queries), "-w", "1", host], timeout: Double(12 * queries + 6))
-        return result.output + "\n" + String(localized: "Intermediate routers may ignore probes; * alone is not evidence of packet loss.")
+        try await route(to: host, queries: queries, options: .standard)
     }
     /// Several traces in a row with three probes per hop, handing each one over as it finishes so it can be saved.
-    public static func routeRounds(to host: String, rounds: Int, each: @escaping @MainActor (String) -> Void) async throws {
+    public static func routeRounds(to host: String, rounds: Int, options: TraceOptions = .standard, each: @escaping @MainActor (String) -> Void) async throws {
         for round in 0..<min(max(rounds, 1), 10) {
             try Task.checkCancellation()
             if round > 0 { try await Task.sleep(for: .seconds(2)) }
-            let output = try await route(to: host, queries: 3)
+            let output = try await route(to: host, queries: 3, options: options)
             await each(output)
         }
     }
     public static func validHost(_ host: String) -> Bool {
         !host.isEmpty && host.count <= 253 && host.first != "-" && host.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:").contains($0) }
     }
-    public static func benchmarkDNS() async -> [ResolverTiming] { await ResolverBenchmark.run() }
+    /// The system resolver against the resolvers Fastest DNS times: `candidates`, from the person's settings.
+    public static func benchmarkDNS(candidates: [DNSResolverChoice] = DNSResolverChoice.candidates(excluded: [], extra: [])) async -> [ResolverTiming] {
+        await ResolverBenchmark.run(resolvers: ResolverBenchmark.resolvers(candidates))
+    }
+    /// The kernel's 64-bit counters when it gave them; getifaddrs' own wrap every 4 GB.
+    static func reading(name: String, up: Bool, narrow: ByteCount, wide: [String: ByteCount]?) -> InterfaceReading {
+        let bytes = wide?[name] ?? narrow
+        return InterfaceReading(name: name, received: bytes.received, sent: bytes.sent, up: up)
+    }
     public static func interfaces() -> [InterfaceReading] {
+        let wide = InterfaceCounters.read()
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let first = head else { return [] }
         defer { freeifaddrs(head) }
@@ -123,7 +145,7 @@ public enum ExpertTools {
             let item = pointer.pointee; cursor = item.ifa_next
             guard item.ifa_addr?.pointee.sa_family == UInt8(AF_LINK), let data = item.ifa_data else { continue }
             let counters = data.assumingMemoryBound(to: if_data.self).pointee
-            rows.append(InterfaceReading(name: String(cString: item.ifa_name), received: UInt64(counters.ifi_ibytes), sent: UInt64(counters.ifi_obytes), up: item.ifa_flags & UInt32(IFF_UP) != 0))
+            rows.append(reading(name: String(cString: item.ifa_name), up: item.ifa_flags & UInt32(IFF_UP) != 0, narrow: ByteCount(received: UInt64(counters.ifi_ibytes), sent: UInt64(counters.ifi_obytes)), wide: wide))
         }
         return rows.sorted { $0.name < $1.name }
     }
@@ -142,10 +164,12 @@ public enum ExpertTools {
             throw DiagnosticError(result.output.isEmpty ? String(localized: "The LAN test failed. Check that iperf3 -s runs on \(host) and its firewall lets port 5201 in.") : result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
+    /// `PayloadScope` System: from macOS 26.1, a DNS settings profile without it is reported to fail to install with a
+    /// "VPN Service" payload error, and setting the scope to System is the fix people report.
     public static func encryptedDNSProfile(url: String) throws -> Data {
         guard let endpoint = URL(string: url), endpoint.scheme == "https", endpoint.host != nil, endpoint.user == nil, endpoint.password == nil else { throw DiagnosticError(String(localized: "Enter an HTTPS DNS-over-HTTPS endpoint.")) }
         let payload: [String: Any] = ["PayloadType": "com.apple.dnsSettings.managed", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns.settings", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "DNSSettings": ["DNSProtocol": "HTTPS", "ServerURL": url]]
-        let profile: [String: Any] = ["PayloadType": "Configuration", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "PayloadDescription": String(localized: "DNS-over-HTTPS. Review and install in System Settings. Remove this profile to restore previous DNS behavior. VPN/split DNS and captive portals may require disabling it."), "PayloadContent": [payload]]
+        let profile: [String: Any] = ["PayloadType": "Configuration", "PayloadVersion": 1, "PayloadIdentifier": "co.seifi.kilobat.dns", "PayloadUUID": UUID().uuidString, "PayloadDisplayName": "Kilobat encrypted DNS", "PayloadScope": "System", "PayloadDescription": String(localized: "DNS-over-HTTPS. Review and install in System Settings. Remove this profile to restore previous DNS behavior. VPN/split DNS and captive portals may require disabling it."), "PayloadContent": [payload]]
         return try PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
     }
 }
@@ -170,11 +194,6 @@ public enum ExpertTools {
     public var sockets: [SocketDestination] = []
     public private(set) var currentSocketIDs: Set<String> = []
     public var devices: [LANDevice] = []
-    public var resolverProgress = ResolverBenchmark.resolvers.map { ResolverProgress(resolver: $0) }
-    public private(set) var benchmarking = false
-    public private(set) var benchmarkCancelled = false
-    private var benchmarkTask: Task<Void, Never>?
-    public var resolverTimes: [ResolverTiming] = []
     public var output = ""
     public var busy = false
     public var names: [String: String] = UserDefaults.standard.dictionary(forKey: "deviceNames") as? [String: String] ?? [:]
@@ -196,21 +215,4 @@ public enum ExpertTools {
         } catch { output = error.localizedDescription }
     }
     public func discover() async { busy = true; defer { busy = false }; devices = await ExpertTools.devices(); output = await ExpertTools.bonjour() }
-    public func startBenchmark() {
-        guard !benchmarking else { return }
-        benchmarking = true; benchmarkCancelled = false; resolverTimes = []
-        resolverProgress = ResolverBenchmark.resolvers.map { ResolverProgress(resolver: $0) }
-        benchmarkTask = Task { [weak self] in
-            let results = await ResolverBenchmark.run { [weak self] row in
-                await self?.updateResolver(row)
-            }
-            guard let self else { return }
-            self.resolverTimes = results; self.benchmarking = false; self.benchmarkTask = nil
-        }
-    }
-    private func updateResolver(_ row: ResolverProgress) {
-        if let i = resolverProgress.firstIndex(where: { $0.resolver == row.resolver }) { resolverProgress[i] = row }
-    }
-    public func cancelBenchmark() { benchmarkCancelled = true; benchmarkTask?.cancel() }
-
 }

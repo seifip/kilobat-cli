@@ -1,7 +1,7 @@
 import Foundation
 import UserNotifications
 
-/// Budget thresholds, app quotas and unusual uploads, checked every half minute while the app runs. Each
+/// Budget thresholds, app limits and unusual uploads, checked every half minute while the app runs. Each
 /// alert goes out once per cycle (an upload once per app a day), remembered in alerts.json across relaunches.
 @MainActor public final class BudgetWatch {
     public private(set) var ledger: AlertLedger
@@ -17,7 +17,7 @@ import UserNotifications
     /// Posts a data pack's alert; the app adds the button that holds big uploads. Without it, a plain notification.
     public var packAlert: (@MainActor (DataPackAlert) -> Void)?
 
-    /// `budgets` says whether budget, quota and data pack alerts are on (they are Pro); upload alerts follow their own setting.
+    /// `budgets` says whether budget, app limit and data pack alerts are on (they are Pro); upload alerts follow their own setting.
     public func start(_ store: TrafficStore, budgets: @escaping @MainActor () -> Bool) {
         guard task == nil else { return }
         task = Task { [weak self, weak store] in
@@ -48,31 +48,40 @@ import UserNotifications
     public func check(_ store: TrafficStore, budgets: Bool = true, now: Date = Date()) -> [(title: String, body: String)] {
         var alerts: [(String, String)] = []
         let before = ledger
-        if budgets, store.networkKey != "unknown" {
+        // A running pack is this network's budget instead; its alerts come from `checkPacks`.
+        if budgets, store.networkKey != "unknown", store.currentPack == nil, store.preferences.budgetMode(for: store.networkKey) != .off {
             let cycle = store.budgetCycle, interval = cycle.interval(containing: now)
-            let key = "budget|\(store.networkKey)|" + (interval.map { String(Int($0.start.timeIntervalSince1970)) } ?? "session")
+            let key = "budget|\(store.networkKey)|" + (interval.map { String(Int($0.start.timeIntervalSince1970)) } ?? store.budgetSession.map { "session-" + $0.uuidString } ?? "session")
             let used = store.budgetUsed(on: store.networkKey, now: now)
-            let fraction = Double(used) / Double(max(1, store.limit))
+            let fraction = Double(used) / max(1, store.preferences.limitGB * 1_000_000_000)
             if let threshold = ledger.crossed(cycle.thresholds, fraction: fraction, key: key, now: now).max() {
                 let limit = "\(store.preferences.limitGB.formatted()) GB"
                 let resets = interval.map { " " + String(localized: "It resets \($0.end.formatted(.dateTime.day().month())).") } ?? ""
                 let name = store.networkName, phrase = cycle.period.phrase
                 alerts.append(threshold >= 100
                     ? (String(localized: "Data budget used up"), (cycle.period == .session ? String(localized: "\(name) has used its \(limit) budget.") : String(localized: "\(name) has used its \(limit) budget for \(phrase).")) + resets)
-                    : (String(localized: "\(threshold)% of your data budget"), String(localized: "\(TrafficFormat.bytes(used)) of \(limit) used on \(name) \(phrase).") + resets))
+                    : (String(localized: "\(threshold)% of your data budget"),
+                       (cycle.period == .session ? String(localized: "\(TrafficFormat.bytes(used)) of \(limit) used on \(name).") : String(localized: "\(TrafficFormat.bytes(used)) of \(limit) used on \(name) \(phrase).")) + resets))
             }
         }
         if budgets {
-            for quota in store.preferences.quotas ?? [] where quota.applies(to: store.networkKey) {
-                let start = store.quotaCycle(quota).quotaInterval(containing: now).start
-                let used = store.quotaUsed(quota, now: now)
-                if !ledger.crossed([100], fraction: Double(used) / Double(max(1, quota.bytes)), key: "quota|\(quota.id)|\(Int(start.timeIntervalSince1970))", now: now).isEmpty {
-                    let bytes = TrafficFormat.bytes(used)
-                    alerts.append((String(localized: "\(quota.name) reached its quota"), quota.uploadOnly ? String(localized: "It used \(bytes) of uploads. New connections stop while the network filter is on.") : String(localized: "It used \(bytes). New connections stop while the network filter is on.")))
+            for limit in store.preferences.quotas ?? [] where limit.effectiveMode != .off && limit.applies(to: store.networkKey) {
+                let cycle = store.limitCycle(limit), start = cycle.limitInterval(containing: now).start
+                let used = store.limitUsed(limit, now: now)
+                // Keyed as quotas were, so a limit used up before an update doesn't notify again.
+                guard let threshold = ledger.crossed(cycle.thresholds, fraction: Double(used) / Double(max(1, limit.bytes)), key: "quota|\(limit.id)|\(Int(start.timeIntervalSince1970))", now: now).max() else { continue }
+                let bytes = TrafficFormat.bytes(used), size = TrafficFormat.bytes(limit.bytes)
+                if threshold >= 100 {
+                    let stops = limit.blocks ? " " + String(localized: "New connections stop while the network filter is on.") : ""
+                    alerts.append((String(localized: "\(limit.name) reached its limit"),
+                                   (limit.uploadOnly ? String(localized: "It uploaded \(bytes) of its \(size) limit.") : String(localized: "It used \(bytes) of its \(size) limit.")) + stops))
+                } else {
+                    alerts.append((String(localized: "\(threshold)% of \(limit.name)’s limit"),
+                                   limit.uploadOnly ? String(localized: "It uploaded \(bytes) of \(size) \(cycle.period.phrase).") : String(localized: "It used \(bytes) of \(size) \(cycle.period.phrase).")))
                 }
             }
         }
-        if store.preferences.uploadAlerts == true, let day = Calendar.current.dateInterval(of: .day, for: now)?.start {
+        if store.preferences.uploadAlerts != false, let day = Calendar.current.dateInterval(of: .day, for: now)?.start {
             for anomaly in store.uploadAnomalies(now: now) where ledger.once("upload|\(anomaly.app)|\(Int(day.timeIntervalSince1970))", now: now) {
                 alerts.append((String(localized: "Unusual upload"), anomaly.message))
             }

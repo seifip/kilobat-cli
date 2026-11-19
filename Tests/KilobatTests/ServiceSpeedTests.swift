@@ -47,6 +47,20 @@ struct ServiceSpeedTests {
         #expect(transfer.otherMbps == 0)
     }
 
+    @Test func aSampleDeliveredTwiceCountsOnce() {
+        var tracker = ServiceFlowTracker(), ended: [(key: String, transfer: ServiceTransfer)] = []
+        // The same ten seconds as parallelConnectionsToOneServiceAreOneTransfer, every sample delivered twice.
+        for second in 0...10 {
+            let bytes = UInt64(second) * 1_000_000 + 400_000
+            let snapshot = sample(second, [connection("140.82.121.4:443", bytes, port: 50_001), connection("140.82.121.5:443", bytes, port: 50_002)])
+            for _ in 0..<2 { ended += tracker.ingest(snapshot, identify: github) }
+        }
+        #expect(ended.isEmpty)
+        for second in 11...20 { for _ in 0..<2 { ended += tracker.ingest(sample(second, []), identify: github) } }
+        #expect(ended.count == 1)
+        #expect(ended[0].transfer.bytes == 20_000_000 && ended[0].transfer.seconds == 10)
+    }
+
     @Test func smallUploadsAndPacedFlowsDontCount() {
         // 3 MB: under the 5 MB floor.
         var tracker = ServiceFlowTracker(), ended: [(key: String, transfer: ServiceTransfer)] = []
@@ -99,7 +113,7 @@ struct ServiceSpeedTests {
     // MARK: Naming
 
     @Test func networksByAddress() throws {
-        let packed = try Data(contentsOf: GeoIP.resources.first!.appendingPathComponent("networks.deflate"))
+        let packed = try RepoFiles.data("Assets/GeoIP/networks.deflate")
         let owners = NetworkOwners(packed: packed)
         #expect(owners.available)
         #expect(owners.owner("140.82.121.4") == "github")
@@ -293,6 +307,53 @@ struct ServiceSpeedTests {
     }
 
     // MARK: CLI and storage
+
+    @Test @MainActor func persistedNetworkIsNotTheLiveNetwork() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var saved = ServiceSpeedLog()
+        saved.add(transfer(Date(), 78), key: "github", network: "hotel", name: "Previous hotel")
+        saved.current = "hotel"
+        try JSONEncoder().encode(saved).write(to: directory.appendingPathComponent(ServiceSpeedWatch.fileName))
+        let watch = ServiceSpeedWatch(directory: directory)
+        watch.refresh()
+        #expect(watch.report == nil)
+        #expect(watch.log.current == "hotel") // Historical queries still retain their saved scope.
+        watch.consume(TrafficSnapshot(timestamp: Date(), processes: []), network: "office", name: "Office", vpn: false)
+        #expect(watch.report?.network == "office" && watch.report?.networkName == "Office")
+        #expect(watch.report?.rows.isEmpty == true && watch.report?.capacity == nil)
+    }
+
+    @Test(arguments: ["vpn", "unknown", "pause"]) @MainActor
+    func unavailableNetworkClearsReportEvenAfterRefresh(_ reason: String) async {
+        let watch = ServiceSpeedWatch(directory: nil)
+        let snapshot = TrafficSnapshot(timestamp: Date(), processes: [])
+        watch.consume(snapshot, network: "hotel", name: "Hotel", vpn: false)
+        watch.runTest = { _, _ in self.transfer(Date(), 78) }
+        await watch.test(ServiceSpeedTarget.all[0], metered: false)
+        #expect(watch.report?.capacity?.mbps == 78)
+        if reason == "pause" { watch.pause() }
+        else { watch.consume(snapshot, network: reason == "unknown" ? "unknown" : "hotel", name: "Wi-Fi", vpn: reason == "vpn") }
+        #expect(watch.report == nil)
+        watch.refresh() // Opening Health or completing an earlier status request must not revive it.
+        #expect(watch.report == nil)
+        watch.consume(snapshot, network: "office", name: "Office", vpn: false)
+        #expect(watch.report?.network == "office" && watch.report?.rows.isEmpty == true)
+        watch.consume(snapshot, network: "hotel", name: "Hotel", vpn: false)
+        #expect(watch.report?.capacity?.mbps == 78)
+    }
+
+    @Test @MainActor func newlyCompletedSpeedTestRefreshesCapacityWithoutWaitingFiveMinutes() {
+        let watch = ServiceSpeedWatch(directory: nil), now = Date()
+        var tests = [speedTest(now.addingTimeInterval(-60), 78)]
+        watch.speedTests = { tests }
+        watch.consume(TrafficSnapshot(timestamp: now, processes: []), network: "home", name: "Home", vpn: false)
+        #expect(watch.report?.capacity?.mbps == 78)
+        tests.append(speedTest(now, 34))
+        watch.consume(TrafficSnapshot(timestamp: now.addingTimeInterval(1), processes: []), network: "home", name: "Home", vpn: false)
+        #expect(watch.report?.capacity?.mbps == 34)
+    }
 
     @Test func cliOptions() throws {
         #expect(try ServiceSpeedReport.Options.parse([]) == ServiceSpeedReport.Options())

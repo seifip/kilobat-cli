@@ -28,15 +28,17 @@ import Observation
     /// The apps call mode holds right now.
     public private(set) var holding: [String] = []
     @ObservationIgnored private var heldSince: [String: Date] = [:]
-    @ObservationIgnored private var blocked: [String] = []
+    @ObservationIgnored private var blocked: [String: TrafficStore.OwnedTemporary] = [:]
     /// App IDs this call holds with a timed block, for the rule inspector.
-    public var heldBlocks: [String] { blocked }
+    public var heldBlocks: [String] { blocked.values.map(\.id).sorted() }
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var airDropHeld = false
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
+    @ObservationIgnored private var holdDeadline: Task<Void, Never>?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
     private let file: URL
+    private let ledger: URL
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var candidate: (call: CallDetector.Call, since: Date)?
     @ObservationIgnored private var silentSince: Date?
@@ -44,18 +46,22 @@ import Observation
     /// A call this short isn't worth a card; mic tests and voice messages are.
     static let shortest: TimeInterval = 60
 
-    public init(directory: URL? = nil) {
+    public init(directory: URL? = nil, ledger: URL = CallMode.ledgerURL) {
+        self.ledger = ledger
         let folder = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         file = folder.appendingPathComponent("calls.json")
         reports = StoredJSON.read(file) ?? []
         // A previous run that quit or crashed mid-call never leaves anything suspended.
-        CallMode.recoverAtLaunch()
+        if ledger == CallMode.ledgerURL { CallMode.recoverAtLaunch() }
     }
 
     #if DEBUG
     /// Made-up calls for screenshots and layout checks; debug builds only.
-    public func preview(_ reports: [CallReport]) { self.reports = reports }
+    public func preview(_ reports: [CallReport], live app: String? = nil, since start: Date = Date()) {
+        self.reports = reports
+        live = app.map { (CallDetector.Call(app: $0, browser: false, own: []), start) }
+    }
     #endif
 
     nonisolated public static func load(directory: URL? = nil) -> [CallReport] {
@@ -67,24 +73,26 @@ import Observation
     /// Paired Macs' fresh summaries, from Household Macs; set by the app when it has Kilobat Pro.
     @ObservationIgnored public var peers: () -> [HouseholdLive] = { [] }
 
-    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore) {
+    public func start(traffic: TrafficStore, diagnostics: DiagnosticStore, polling: Bool = true) {
         guard loop == nil else { return }
         self.traffic = traffic; self.diagnostics = diagnostics
+        guard polling else { return }
         loop = Task { [weak self, weak traffic, weak diagnostics] in
             while !Task.isCancelled {
                 guard let self, let traffic, let diagnostics else { return }
                 await self.tick(traffic: traffic, diagnostics: diagnostics)
-                try? await Task.sleep(for: .seconds(self.live == nil ? 3 : 1))
+                try? await Task.sleep(for: .seconds(self.live == nil ? 3 : 1), tolerance: .milliseconds(200))
             }
         }
     }
 
     private func tick(traffic: TrafficStore, diagnostics: DiagnosticStore) async {
         guard enabled else { return }
+        if !allowed(), !holding.isEmpty || airDropHeld { release() }
         let call = CallDetector.microphoneUsers().flatMap { CallDetector.call(microphone: $0) }
         let now = Date()
         if let live {
-            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); await hold(traffic: traffic, now: now, start: live.start) }
+            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); hold(traffic: traffic, now: now, start: live.start) }
             else if let since = silentSince, now.timeIntervalSince(since) >= 10 { await stop(report: true, end: since, diagnostics: diagnostics) }
             else if silentSince == nil { silentSince = now }
             return
@@ -94,24 +102,40 @@ import Observation
         if candidate?.call != call { candidate = (call, now); return }
         guard let since = candidate?.since, now.timeIntervalSince(since) >= 10 else { return }
         live = (call, since); candidate = nil; silentSince = nil; released = []
+        holdDeadline?.cancel()
+        holdDeadline = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, since.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
+            catch { return }
+            guard let self, self.live?.start == since else { return }
+            self.release()
+        }
         let sampler = LineSampler(start: since, starlink: starlink, peers: peers)
         self.sampler = sampler
         await sampler.begin(diagnostics: diagnostics)
-        await hold(traffic: traffic, now: now, start: since)
-        if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active {
-            await diagnostics.lowLatency.enable(seconds: CallMode.limit)
+        guard live?.start == since else { return }
+        hold(traffic: traffic, now: Date(), start: since)
+        if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active, !diagnostics.lowLatency.busy {
+            let remaining = CallMode.limit - Date().timeIntervalSince(since)
+            guard remaining > 0 else { return }
+            await diagnostics.lowLatency.enable(seconds: remaining)
+            guard live?.start == since, callMode, allowed(), Date().timeIntervalSince(since) < CallMode.limit else {
+                if diagnostics.lowLatency.active { diagnostics.lowLatency.release() }
+                return
+            }
             airDropHeld = diagnostics.lowLatency.active
         }
     }
 
     /// Holds every known app that's running and moving data, and lets go of one the person brings to the front.
-    private func hold(traffic: TrafficStore, now: Date, start: Date) async {
-        guard callMode, allowed() else { return }
-        if now.timeIntervalSince(start) > CallMode.limit { release(); return }
+    func hold(traffic: TrafficStore, now: Date, start: Date) {
+        if !allowed() || now.timeIntervalSince(start) >= CallMode.limit {
+            if !holding.isEmpty || airDropHeld { release() }
+            return
+        }
         if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
             released.insert(name); resume(name)
         }
-        guard now.timeIntervalSince(lastHoldScan) >= 10 else { return }
+        guard callMode, now.timeIntervalSince(lastHoldScan) >= 10 else { return }
         lastHoldScan = now
         let front = NSWorkspace.shared.frontmostApplication
         let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
@@ -123,10 +147,10 @@ import Observation
     }
 
     private func hold(_ app: AppTraffic, name: String, traffic: TrafficStore, now: Date) {
-        guard !holding.contains(name), !CallMode.hold(app.processIDs, app: name).isEmpty else { return }
+        guard !CallMode.hold(app.processIDs, app: name, ledger: ledger).isEmpty, !holding.contains(name) else { return }
         holding.append(name); heldSince[name] = now
         // New connections are refused too, for whatever the suspended processes hand off to a helper.
-        if traffic.temporaryRule(app.id) == nil { traffic.setTemporary(app.id, allowed: false, minutes: Int(CallMode.limit / 60)); blocked.append(app.id) }
+        if traffic.temporaryRule(app.id) == nil { blocked[name] = traffic.holdTemporary(app.id, minutes: Int(CallMode.limit / 60)) }
     }
 
     /// Holds these apps now, from the check before a meeting, until the call ends, or for half an hour if none starts.
@@ -148,16 +172,17 @@ import Observation
         return control
     }
 
-    private func resume(_ name: String) {
-        CallMode.resume(app: name, owner: CallMode.call)
+    func resume(_ name: String) {
+        CallMode.resume(app: name, owner: CallMode.call, ledger: ledger)
+        if let rule = blocked.removeValue(forKey: name) { traffic?.clearTemporary(rule) }
         holding.removeAll { $0 == name }; heldSince[name] = nil
     }
 
     /// Resumes everything call mode holds, but not what a Focus filter holds too; the app also calls this when it quits.
     public func release() {
-        CallMode.resume(owner: CallMode.call)
-        for id in blocked { traffic?.clearTemporary(id) }
-        blocked = []; holding = []; heldSince = [:]
+        CallMode.resume(owner: CallMode.call, ledger: ledger)
+        for rule in blocked.values { traffic?.clearTemporary(rule) }
+        blocked = [:]; holding = []; heldSince = [:]
         if airDropHeld { diagnostics?.lowLatency.release(); airDropHeld = false }
     }
 
@@ -166,6 +191,7 @@ import Observation
     }
 
     private func stop(report: Bool, end: Date = Date(), diagnostics: DiagnosticStore? = nil) async {
+        holdDeadline?.cancel(); holdDeadline = nil
         guard let live, let sampler else { return }
         self.live = nil; self.sampler = nil; silentSince = nil
         let held = holding
@@ -173,7 +199,7 @@ import Observation
         let worth = report && end.timeIntervalSince(live.start) >= Self.shortest
         var samples = await sampler.finish(report: worth, end: end, diagnostics: diagnostics)
         guard worth, !samples.internet.isEmpty else { return }
-        let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        let network = sampler.reportNetwork
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
         // Freezes past the router may be the calling service's own; its status page says whether it knew of trouble.
@@ -197,14 +223,22 @@ import Observation
 /// `ping` once a second for as long as a call lasts; a reply later than a second counts as lost, as the call feels it.
 actor PingStream {
     private let target: String, start: Date
+    private let resolve: @Sendable (String) async throws -> String
     private var process: Process?
+    private var started = false
+    private var stopped = false
+    var isRunning: Bool { process?.isRunning == true }
     private var pings: [CallSamples.Ping] = []
     /// Seconds from the call's start to the first ping; each ping's time comes from its sequence number, since a lost one is only reported later.
     private var offset = 0.0
-    init(target: String, start: Date) { self.target = target; self.start = start }
+    init(target: String, start: Date, resolve: @escaping @Sendable (String) async throws -> String = StutterTest.host(for:)) {
+        self.target = target; self.start = start; self.resolve = resolve
+    }
 
     func start() async {
-        guard let host = try? await StutterTest.host(for: target) else { return }
+        guard !started, !stopped else { return }
+        started = true
+        guard let host = try? await resolve(target), !stopped else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/sbin/ping")
         process.arguments = ["-n", "-i", "1", "-W", "1000", host]
@@ -223,11 +257,15 @@ actor PingStream {
     func current() -> [CallSamples.Ping] { pings.sorted { $0.at < $1.at } }
 
     func stop() -> [CallSamples.Ping] {
-        process?.terminate(); process = nil
+        stopped = true
+        (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        if isRunning { process?.terminate() }
+        process = nil
         return pings.sorted { $0.at < $1.at }
     }
 
     private func ingest(_ text: String) {
+        guard !stopped else { return }
         for line in text.split(separator: "\n").map(String.init) {
             guard let seq = DiagnosticProbe.matches("icmp_seq[= ]([0-9]+)", in: line).first.flatMap(Double.init) else { continue }
             if line.contains("Request timeout") { pings.append(.init(at: offset + seq, ms: nil)) }

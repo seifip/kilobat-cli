@@ -336,4 +336,13 @@ struct StreamReportTests {
         try JSONEncoder().encode([report]).write(to: directory.appendingPathComponent("streams.json"))
         #expect(StreamStore.load(directory: directory) == [report])
     }
+    @Test func aNumberThatIsNoIntIsNil() {
+        #expect(JSONValue.number(42).int == 42)
+        #expect(JSONValue.number(-3.9).int == -3)
+        #expect(JSONValue.number(1e300).int == nil)
+        #expect(JSONValue.number(-1e300).int == nil)
+        #expect(JSONValue.number(.infinity).int == nil)
+        #expect(JSONValue.number(.nan).int == nil)
+        #expect(JSONValue.string("7").int == nil)
+    }
 }

@@ -36,6 +36,25 @@ public struct ServiceStatus: Codable, Sendable, Equatable, Identifiable {
         self.id = id; self.service = service; self.state = state; self.incident = incident; self.started = started; self.page = page; self.checked = checked; self.owner = owner
     }
 
+    /// One row per incident. Services that share a status page (Claude and Claude Code on Anthropic's) report the same
+    /// incident with the same title and link; the list keeps the first of them at the worst state any of them reports,
+    /// so one outage isn't shown twice under two headlines. Order is kept.
+    public static func oneRowPerIncident(_ statuses: [ServiceStatus]) -> [ServiceStatus] {
+        var rows: [ServiceStatus] = [], index: [String: Int] = [:]
+        for status in statuses {
+            guard let incident = status.incident, !incident.isEmpty else { rows.append(status); continue }
+            let key = status.page.absoluteString + "\n" + incident
+            if let at = index[key] {
+                if status.state > rows[at].state {
+                    let kept = rows[at]
+                    rows[at] = ServiceStatus(id: kept.id, service: kept.service, state: status.state, incident: kept.incident,
+                                             started: kept.started ?? status.started, page: kept.page, checked: kept.checked, owner: kept.owner)
+                }
+            } else { index[key] = rows.count; rows.append(status) }
+        }
+        return rows
+    }
+
     /// The page reports something wrong right now, maintenance included.
     public var problem: Bool { state > .operational }
     public var outage: Bool { state >= .partialOutage }
@@ -49,7 +68,7 @@ public struct ServiceStatus: Codable, Sendable, Equatable, Identifiable {
                                          : String(localized: "\(service) is down for everyone", comment: "Status pages; the argument is a service such as Slack")
         case .partialOutage: head = notYou ? String(localized: "Part of \(service) is down for everyone, not you", comment: "Status pages; the argument is a service such as Slack")
                                            : String(localized: "Part of \(service) is down for everyone", comment: "Status pages; the argument is a service such as Slack")
-        case .degraded: head = String(localized: "\(service) reports problems on its side", comment: "Status pages; the argument is a service such as Slack")
+        case .degraded: head = String(localized: "\(service) is having problems", comment: "Status pages: the service's own page reports trouble; the argument is a service such as Slack")
         case .maintenance: head = String(localized: "\(service) is under maintenance", comment: "Status pages; the argument is a service such as Slack")
         case .operational: return owner.map { String(localized: "\($0)’s status page reports no problems with \(service).", comment: "Status pages; the arguments are a company such as Apple and its service such as iCloud") }
             ?? String(localized: "\(service)’s status page reports no problems.", comment: "Status pages; the argument is a service such as Slack")

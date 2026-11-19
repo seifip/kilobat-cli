@@ -9,7 +9,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var scheduleHours = UserDefaults.standard.integer(forKey: "speedScheduleHours") {
         didSet { UserDefaults.standard.set(scheduleHours, forKey: "speedScheduleHours"); nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil }
     }
-    public var automaticTrace = UserDefaults.standard.bool(forKey: "automaticOutageTrace") { didSet { UserDefaults.standard.set(automaticTrace, forKey: "automaticOutageTrace") } }
+    public var automaticTrace = UserDefaults.standard.object(forKey: "automaticOutageTrace") as? Bool ?? true { didSet { UserDefaults.standard.set(automaticTrace, forKey: "automaticOutageTrace") } }
     public var checkInterval = max(12, UserDefaults.standard.integer(forKey: "diagnosticInterval")) { didSet { UserDefaults.standard.set(checkInterval, forKey: "diagnosticInterval") } }
     /// Connections a speed test opens at once: 1, or SpeedTest.parallelStreams.
     public var speedStreams = max(1, UserDefaults.standard.integer(forKey: "speedStreams")) { didSet { UserDefaults.standard.set(speedStreams, forKey: "speedStreams") } }
@@ -25,6 +25,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public private(set) var lookingUp = false
     public private(set) var lookupError: String?
     private var exitNetwork: String?
+    @ObservationIgnored private var refreshingExit = false
+    @ObservationIgnored private var exitRefreshPending = false
+    @ObservationIgnored private var routeRefresh: Task<Void, Never>?
+    @ObservationIgnored private var routeWatch: RouteWatch?
     private var lookupAttempt: Date?
     private var tracedIncident: UUID?
     public var nextScheduledTest: Date?
@@ -39,6 +43,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let journal = NetworkJournal()
     /// The network's sign-in page, when it has one, and how long a sign-in lasts there.
     public let portal = PortalWatch()
+    public let portalAlternative = PortalAlternative()
     /// Router check-up: whether the router has been getting slower over days, from the checks below.
     public let router = RouterWatch()
     /// Off in Lite, which has no router check-up: then no check is kept for it.
@@ -53,7 +58,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var watchesDNS = true
     /// This Mac's network ports' byte total at the previous check, for telling quiet checks from busy ones.
     private var lastPortBytes: (bytes: UInt64, date: Date)?
-    public var snapshot: DiagnosticSnapshot?
+    @ObservationIgnored private(set) var networkRevision = 0
+    public var snapshot: DiagnosticSnapshot? {
+        didSet { if snapshot?.networkKey != oldValue?.networkKey { networkRevision &+= 1 } }
+    }
     public let survey = SurveyJournal()
     /// Each network's devices with the person's names and answers, for the Devices tab and new-device alerts.
     public let knownDevices = DeviceRegistry()
@@ -61,6 +69,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let homeUsage = HomeUsageStore()
     public var radio: RadioSample?
     public var networks: [NearbyNetwork] = []
+    /// When `networks` was last scanned, so a room saved from Radar uses a fresh one.
+    public private(set) var scannedAt: Date?
     public var signalHistory: [Double] = []
     public var bestScore = 0
     public var speakDirections = false
@@ -71,9 +81,18 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public private(set) var radar = false
     public private(set) var visible = false {
         didSet {
-            if visible && !oldValue { radioTask?.cancel(); radioTask = nil; startRadio() }
+            // Health, Speed or Radar just came on screen: a check now when the last one is older than the fast interval.
+            if visible && !oldValue { radioTask?.cancel(); radioTask = nil; startRadio(); checkPause?.cancel() }
         }
     }
+    /// When the background loop last checked (or any check finished), and the loop's current wait, which a surface
+    /// coming on screen cuts short so the next check is worked out again.
+    @ObservationIgnored private var lastCheck = Date.distantPast
+    @ObservationIgnored private var checkPause: Task<Void, Never>?
+    /// macOS's view of the path: nil until it first says, false while there is no usable path at all.
+    @ObservationIgnored private var pathSatisfied: Bool?
+    /// Checks in a row made while there was no path, for backing off.
+    @ObservationIgnored private var offlineChecks = 0
     public var scanning = false
     public var diagnosing = false
     public var speedPhase: SpeedTestUpdate.Phase = .latency
@@ -113,12 +132,24 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let localReach = LocalReachWatch()
     /// AirPlay or a cast tab, and what on the Mac's side can make it stutter.
     public let casting = CastingWatch()
+    /// This Mac's Ethernet ports: the link each negotiated, what the adapter is, and whether it has a service.
+    public let wired = WiredWatch()
+    /// Whether IPv6 connects on this network: a finding after two failed readings, and a note on IPv6-only networks.
+    public let ipv6 = IPv6Watch()
+    /// Mounted network shares, and whether their servers still answer.
+    public let shares = ShareWatch()
     private let probe = DiagnosticProbe()
     private let location = CLLocationManager()
     private var radioTask: Task<Void, Never>?
     private var diagnosticTask: Task<Void, Never>?
     private var speedTask: Task<Void, Never>?
     private var notifications: [NSObjectProtocol] = []
+    /// Off in Lite: the wake watch runs a lookup and a web request after each wake.
+    public var watchesWakes = true
+    /// When the Mac went to sleep and the interface it was using, for the next wake's stage timing.
+    private var sleptAt: Date?
+    private var sleptInterface: (name: String?, wired: Bool)?
+    private var wakeTask: Task<Void, Never>?
 
     public override init() {
         super.init()
@@ -131,10 +162,28 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                                                    : String(localized: "Kilobat put the network’s own DNS back (\(why)).", comment: "History: fastest DNS switched back; the reason")
             self?.journal.record(kind: "DNS", detail: detail, network: change.networkName, date: change.date)
         }
+        // A share that went away goes in History, with an alert under Connection alerts.
+        shares.onChange = { [weak self] check, gone in
+            guard let self else { return }
+            let network = self.snapshot?.networkName ?? String(localized: "This Mac")
+            if gone {
+                self.journal.record(kind: "Share not answering", detail: check.finding?.title ?? check.name, network: network)
+                self.journal.alert(String(localized: "\(check.name) isn’t responding", comment: "Alert: a mounted network share's server went away; the share's name"),
+                                   String(localized: "Finder and Save dialogs may freeze until it’s ejected. Eject it from Health.", comment: "Alert body for a network share that went away"))
+            } else {
+                self.journal.record(kind: "Share answering", detail: String(localized: "\(check.name) answers again.", comment: "History: a network share's server is back"), network: network)
+            }
+        }
         lastSpeed = journal.speedTests.last?.result
         nextScheduledTest = scheduleHours > 0 ? Date().addingTimeInterval(Double(scheduleHours) * 3600) : nil
         scheduleNetwork.start { [weak self] connected, metered, _ in
-            Task { @MainActor in self?.scheduleConnected = connected; self?.scheduleMetered = metered }
+            Task { @MainActor in
+                guard let self else { return }
+                let returned = connected && self.pathSatisfied == false
+                self.scheduleConnected = connected; self.scheduleMetered = metered; self.pathSatisfied = connected
+                // The path is back: check now rather than at the end of an offline wait.
+                if returned { self.lastCheck = .distantPast; self.checkPause?.cancel() }
+            }
         }
         scheduleTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -156,11 +205,33 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         })
         let center = NSWorkspace.shared.notificationCenter
         notifications.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.journal.suspend(); self?.sleeping = true; self?.speedTask?.cancel() }
+            Task { @MainActor in self?.journal.suspend(); self?.portal.interruptObservation(); self?.sleeping = true; self?.speedTask?.cancel(); self?.willSleep() }
         })
         notifications.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.sleeping = false; await self?.diagnose() }
+            let woke = Date()
+            Task { @MainActor in self?.sleeping = false; self?.didWake(woke); await self?.diagnose() }
         })
+    }
+    private func willSleep() {
+        wakeTask?.cancel(); wakeTask = nil
+        sleptAt = Date()
+        sleptInterface = snapshot.map { ($0.wiredInterface ?? $0.radio.interface, $0.wiredInterface != nil) }
+    }
+    /// Times each step of the connection coming back, then keeps it in the journal with the network it came back on.
+    private func didWake(_ woke: Date) {
+        guard watchesWakes else { return }
+        let interface = sleptInterface, slept = sleptAt
+        wakeTask?.cancel()
+        wakeTask = Task { [weak self] in
+            var record = await WakeProbe.watch(woke: woke, slept: slept, interface: interface?.name, wired: interface?.wired ?? false)
+            guard !Task.isCancelled, let self else { return }
+            // The check started on waking has usually finished by now and names the network.
+            for _ in 0..<100 where self.diagnosing { try? await Task.sleep(for: .milliseconds(100)) }
+            if let snapshot = self.snapshot, snapshot.date >= woke {
+                record.network = snapshot.networkName; record.networkKey = snapshot.networkIdentified ? snapshot.networkKey : nil
+            }
+            self.journal.addWake(record)
+        }
     }
     static func scheduledTestDue(next: Date?, hours: Int, connected: Bool, metered: Bool, busy: Bool, now: Date = Date()) -> Bool {
         guard let next else { return false }
@@ -169,8 +240,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public func setSurface(_ id: UUID, radar: Bool?, menuBar: Bool) {
         if let radar { surfaces[id] = (radar, menuBar) }
         else { surfaces.removeValue(forKey: id) }
+        let wasVisible = visible
         refreshVisibility()
         if self.radar { bestScore = max(bestScore, radio?.score ?? 0) }
+        // Opening a menu shows a fresh route, not the last periodic check's.
+        if visible, !wasVisible || radar != nil, Date().timeIntervalSince(exitPath?.date ?? .distantPast) > 3 { Task { [weak self] in await self?.refreshExit() } }
     }
     private func refreshVisibility() {
         radar = surfaces.values.contains { $0.radar }
@@ -219,27 +293,82 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public func start() {
         startRadio()
+        if routeWatch == nil {
+            routeWatch = RouteWatch { [weak self] in Task { @MainActor in self?.routeDidChange() } }
+            routeWatch?.start()
+        }
         starlink.start(visible: { [weak self] in self?.visible ?? false }, network: { [weak self] in self?.snapshot?.networkKey })
         guard diagnosticTask == nil else { return }
         diagnosticTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                let wait = self.nextCheckDelay() - Date().timeIntervalSince(self.lastCheck)
+                if wait > 0 { await self.pauseChecks(seconds: wait); continue }
                 if !self.sleeping { await self.diagnose() }
-                do { try await Task.sleep(for: .seconds(self.visible ? Double(max(12, self.checkInterval)) : ProcessInfo.processInfo.isLowPowerModeEnabled ? 120 : Double(max(60, self.checkInterval)))) } catch { return }
+                // Also when the check was skipped (asleep, or one already running): the wait starts again from now.
+                self.lastCheck = Date()
             }
         }
     }
-    public func stop() { journal.suspend(); scheduleTask?.cancel(); speech.stopSpeaking(at: .immediate); radioTask?.cancel(); diagnosticTask?.cancel(); speedTask?.cancel(); radioTask = nil; diagnosticTask = nil }
+    private func nextCheckDelay() -> Double {
+        let delay = Self.checkDelay(visible: visible, interval: checkInterval, lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+        return pathSatisfied == false && !visible && offlineChecks > 0 ? max(delay, Self.offlineDelay(failures: offlineChecks)) : delay
+    }
+    /// While macOS says there is no usable path: the first three checks keep the usual minute, so an outage is recorded
+    /// as soon as before, then two minutes, then five, until the path comes back.
+    nonisolated static func offlineDelay(failures: Int) -> Double { failures < 3 ? 60 : failures == 3 ? 120 : 300 }
+    /// The gap the journal and the router watch should expect before this check: longer while backing off, so the
+    /// longer waits aren't read as monitoring having paused. `offlineChecks` counts the offline checks before this one too.
+    nonisolated static func expectedGap(offlineChecks: Int, interval: Int) -> Double {
+        let usual = Double(max(60, interval))
+        return offlineChecks > 0 ? max(usual, offlineDelay(failures: offlineChecks)) : usual
+    }
+    /// Seconds until the next background check: the person's interval while Health, Speed or Radar is on screen,
+    /// a minute otherwise, two in Low Power Mode.
+    nonisolated static func checkDelay(visible: Bool, interval: Int, lowPower: Bool) -> Double {
+        visible ? Double(max(12, interval)) : lowPower ? 120 : Double(max(60, interval))
+    }
+    /// Waits `seconds`, or less when `checkPause` is cancelled because what's on screen changed.
+    private func pauseChecks(seconds: Double) async {
+        let pause = Task { _ = try? await Task.sleep(for: .seconds(seconds)) }
+        checkPause = pause
+        await withTaskCancellationHandler { await pause.value } onCancel: { pause.cancel() }
+        if checkPause == pause { checkPause = nil }
+    }
+    public func stop() { journal.suspend(); portal.interruptObservation(); scheduleTask?.cancel(); speech.stopSpeaking(at: .immediate); radioTask?.cancel(); diagnosticTask?.cancel(); speedTask?.cancel(); radioTask = nil; diagnosticTask = nil }
+    /// The latest network proxy check. Runs only when asked: `diagnose` is on a timer, and this spends the person's data.
+    public private(set) var proxyCheck: SplitProxyCheck?
+    public private(set) var checkingProxy = false
+    /// Whether the connection looks like one where the proxy check is worth offering.
+    public var proxyCheckWorthOffering: Bool {
+        guard let snapshot else { return false }
+        return SplitProxyCheck.worthOffering(pingMs: snapshot.internet.average, dnsWorks: snapshot.dnsMilliseconds != nil, vpn: exitPath?.tunnel == true, portal: snapshot.captivePortal == true)
+    }
+    #if DEBUG
+    public func previewProxyCheck(_ check: SplitProxyCheck?) { proxyCheck = check }
+    #endif
+    public func checkForNetworkProxy() async {
+        guard !checkingProxy else { return }
+        checkingProxy = true; defer { checkingProxy = false }
+        let network = snapshot?.networkKey, vpn = exitPath?.tunnel == true, portal = snapshot?.captivePortal == true
+        // Through a tunnel or a sign-in page the handshakes would time the wrong thing, and the data is spent for nothing.
+        let hosts = vpn || portal ? [] : await SplitProxyProbe.measure()
+        proxyCheck = SplitProxyCheck(network: network, hosts: hosts, vpn: vpn, portal: portal)
+    }
     public func diagnose() async {
         guard !diagnosing, !sleeping else { return }
         diagnosing = true
-        async let secondary = DiagnosticProbe.ping("8.8.8.8", count: 2)
+        IdleCounters.bump(visible ? "check visible" : "check hidden")
+        let offline = pathSatisfied == false
+        let gap = Self.expectedGap(offlineChecks: offline ? offlineChecks + 1 : offlineChecks, interval: checkInterval)
+        offlineChecks = offline ? offlineChecks + 1 : 0
+        if offline { IdleCounters.bump("check offline") }
         let before = Self.portBytes(), started = Date()
-        var sample = await probe.snapshot(checkPortal: false)
+        var sample = await probe.snapshot(checkPortal: false, offline: offline)
         let after = Self.portBytes(), finished = Date()
-        let other = await secondary
-        let fallback = sample.internet.average == nil && other.average == nil ? await NetworkJournal.httpFallback() : nil
-        await checkPortal(&sample, internetFailed: fallback == false)
+        let other = sample.secondary ?? PingResult(host: "8.8.8.8", samples: [], lossPercent: nil)
+        let fallback = sample.httpReachable
+        await checkPortal(&sample, internetFailed: fallback == false, reachable: sample.internet.average != nil || other.average != nil || fallback == true)
         if sample.wiredInterface == nil {
             let reachable = sample.internet.average != nil || other.average != nil || fallback == true
             sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable)
@@ -247,31 +376,46 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         snapshot = sample; onSnapshot?(sample)
         localReach.observe(sample, portal: portal.record != nil)
         await refreshExit()
+        // Each throttles itself; neither waits for the other or holds up the next check.
+        Task { [weak self] in await self?.wired.refresh() }
+        Task { [weak self] in await self?.shares.refresh() }
+        Task { [weak self] in await self?.checkIPv6() }
         if !sleeping {
-            journal.ingest(sample, secondary: other, httpReachable: fallback, interval: Double(max(60, checkInterval)))
+            journal.ingest(sample, secondary: other, httpReachable: fallback, interval: gap)
             let since = lastPortBytes.flatMap { last in after.map { ($0 >= last.bytes ? $0 - last.bytes : 0, finished.timeIntervalSince(last.date)) } }
             let busy = speedRunning || RouterWatch.busy(checkBytes: before.flatMap { b in after.map { $0 >= b ? $0 - b : 0 } } ?? 0, checkSeconds: finished.timeIntervalSince(started),
                                                         sinceBytes: since?.0, sinceSeconds: since?.1)
             lastPortBytes = after.map { ($0, finished) }
             // A device's own Wi-Fi has no internet by design: nothing there to judge a router, mesh or DNS by.
             let device = sample.setupNetwork != nil
-            if watchesRouter && !device { await router.observe(sample, busy: busy, interval: Double(max(60, checkInterval))) }
+            if watchesRouter && !device { await router.observe(sample, busy: busy, interval: gap) }
             if watchesNodes && !device { await nodes.observe(sample, locationAllowed: locationAllowed) }
             if watchesDNS && !device { await fastestDNS.observe(dnsContext(sample, secondary: other, busy: busy)) }
             if automaticTrace, let incident = journal.events.last(where: { $0.kind == "Unreachable" && $0.end == nil }), tracedIncident != incident.id {
                 tracedIncident = incident.id
                 Task { [weak self] in
-                    if let result = try? await ExpertTools.route(to: "1.1.1.1") { self?.survey.saveRoute(host: "1.1.1.1", output: "Automatic outage trace\n" + result) }
+                    if let result = try? await ExpertTools.route(to: "1.1.1.1", options: .background) { self?.survey.saveRoute(host: "1.1.1.1", output: "Automatic outage trace\n" + result) }
                 }
             }
         }
+        lastCheck = Date()
         diagnosing = false
     }
+    /// Reads IPv6 on this network; `forced` (Test again) opens the connections now.
+    public func checkIPv6(forced: Bool = false) async {
+        guard let snapshot else { return }
+        await ipv6.observe(network: snapshot.networkKey, portal: snapshot.captivePortal == true, metered: metered?() ?? true, forced: forced)
+    }
     /// Looks for the network's sign-in page when PortalWatch says it's due, and marks the sample with what it knows.
-    private func checkPortal(_ sample: inout DiagnosticSnapshot, internetFailed: Bool) async {
+    private func checkPortal(_ sample: inout DiagnosticSnapshot, internetFailed: Bool, reachable: Bool) async {
         let key = sample.networkKey
-        if portal.due(network: key, internetFailed: internetFailed) {
-            portal.observe(await CaptivePortal.check(), network: key, name: sample.networkName, identified: sample.networkIdentified)
+        let wifi = sample.wiredInterface == nil && sample.gateway != nil
+        portalAlternative.context(network: key, identified: sample.networkIdentified, wifi: wifi, reachable: reachable)
+        let alternative = portalAlternative.enabled(for: key, identified: sample.networkIdentified)
+        if portal.due(network: key, internetFailed: internetFailed) || (portalAlternative.needsRetry && reachable) {
+            let check = await CaptivePortal.check(useAlternative: alternative)
+            portal.observe(check, network: key, name: sample.networkName, identified: sample.networkIdentified)
+            portalAlternative.observe(check, normal: !alternative && !UserDefaults.standard.bool(forKey: "network.chinaPortalFallback"), reachable: reachable, wifi: wifi)
         }
         portal.tick()
         sample.captivePortal = portal.intercepting
@@ -294,35 +438,66 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     /// Reads the route and VPN list (local), asks Cloudflare for the public address when that's on and due,
     /// and logs a VPN going on or off and a changed public address.
-    public func refreshExit(force: Bool = false) async {
-        guard !lookingUp else { return }
+    /// `routeChanged`: macOS just reported a new route or tunnel, so the public address may have moved even on the same tunnel.
+    public func refreshExit(force: Bool = false, routeChanged: Bool = false) async {
+        guard !refreshingExit else { exitRefreshPending = true; return }
+        refreshingExit = true
+        defer {
+            refreshingExit = false
+            if exitRefreshPending { exitRefreshPending = false; Task { [weak self] in await self?.refreshExit(routeChanged: true) } }
+        }
+        let before = exitPath, previousNetwork = exitNetwork
         var path = await ExitPath.current()
+        // A VPN that seems to have gone must still be gone a moment later: one failed read or a brief reconnect isn't "off".
+        var confirmations = 0
+        while ExitPath.lostTunnel(previous: before, current: path), confirmations < 2 {
+            confirmations += 1
+            do { try await Task.sleep(for: .seconds(1.5)) } catch { return }
+            path = await ExitPath.current()
+        }
         let network = snapshot?.networkKey
         // After a failed lookup (Cloudflare blocked, a captive portal) wait five minutes rather than retrying every check.
         let backingOff = lookupError != nil && lookupAttempt.map { Date().timeIntervalSince($0) < 300 } == true
-        if force || (!backingOff && ExitPath.lookupDue(enabled: publicLookup, previous: exitPath, current: path, network: network, previousNetwork: exitNetwork)) {
-            if publicLookup, path.interface != nil {
-                lookingUp = true; lookupAttempt = Date(); defer { lookingUp = false }
-                do { path.publicAddress = try await ExitPath.publicAddress(); lookupError = nil }
-                catch { lookupError = String(localized: "Couldn’t get the public IP: \(error.localizedDescription)") }
-            }
-        } else if path.interface == exitPath?.interface, path.vpn == exitPath?.vpn { path.publicAddress = exitPath?.publicAddress }
-        // Lookup could have been turned off while Cloudflare answered.
+        let moved = routeChanged && lookupAttempt.map { Date().timeIntervalSince($0) >= 10 } != false
+        let due = publicLookup && path.interface != nil
+            && (force || (!backingOff && (moved || ExitPath.lookupDue(enabled: publicLookup, previous: before, current: path, network: network, previousNetwork: previousNetwork))))
+        if path.interface == before?.interface, path.vpn == before?.vpn { path.publicAddress = before?.publicAddress }
+        // Lookup could have been turned off while the route was read.
         if !publicLookup { path.publicAddress = nil }
-        for change in path.changes(since: exitPath) { journal.record(kind: change.kind, detail: change.detail, network: snapshot?.networkName ?? "Unknown network") }
+        // The route shows at once; Cloudflare's answer can take seconds and follows when it comes.
         exitPath = path; exitNetwork = network
+        if due {
+            lookingUp = true; lookupAttempt = Date(); defer { lookingUp = false }
+            do {
+                let address = try await ExitPath.publicAddress(); lookupError = nil
+                if publicLookup, exitPath?.interface == path.interface { path.publicAddress = address; exitPath?.publicAddress = address }
+            } catch { lookupError = String(localized: "Couldn’t get the public IP: \(error.localizedDescription)") }
+        }
+        for change in path.changes(since: before) { journal.record(kind: change.kind, detail: change.detail, network: snapshot?.networkName ?? "Unknown network") }
+    }
+    /// A route change arrives as a burst of notifications: one read, shortly after the last of them.
+    private func routeDidChange() {
+        routeRefresh?.cancel()
+        routeRefresh = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+            await self?.refreshExit(routeChanged: true)
+        }
     }
     public func scan() async {
         guard !scanning else { return }
         guard locationAllowed else { error = String(localized: "Enable Location access to scan nearby Wi-Fi networks. macOS uses this permission for Wi-Fi names and scanning."); return }
         scanning = true
         defer { scanning = false }
-        do { networks = try await probe.scan(); survey.saveScan(networks) }
+        do { networks = try await probe.scan(); scannedAt = Date(); survey.saveScan(networks) }
         catch { self.error = error.localizedDescription }
     }
     /// `streams` overrides the Single or Parallel choice; `scheduled` marks a test Kilobat started on its own.
-    public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false) {
+    public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false, planCheck: Bool = false) {
         guard !speedRunning else { return }
+        if planCheck {
+            guard let key = snapshot?.networkKey, key != "unknown",
+                  journal.reservePlanCheck(network: key, maximumBytes: maximumBytes) else { return }
+        }
         speedRunning = true
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
         speedDownHistory = []; speedUpHistory = []; speedStarted = Date(); speedBytes = 0
@@ -342,11 +517,24 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                     }
                 }, progress: { [weak self] text in Task { @MainActor in self?.speedProgress = text } })
                 self.lastSpeed = result
-                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled)
+                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled, reservedAttempt: planCheck ? true : nil)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = String(localized: "Test complete.")
             } catch is CancellationError { self.speedProgress = String(localized: "Test cancelled.") }
-            catch { self.speedProgress = Task.isCancelled ? String(localized: "Test cancelled.") : error.localizedDescription }
+            catch {
+                // The internet check doesn't touch the test host, so it can tell "offline" from "this server is blocked".
+                let reach = self.snapshot?.reachability
+                let up: Bool? = reach == .up ? true : reach == .down ? false : nil
+                let kind = SpeedTest.failureKind(error: error, internetReachable: up, bytesTransferred: self.speedBytes)
+                if Task.isCancelled || kind == .cancelled { self.speedProgress = String(localized: "Test cancelled.") }
+                else {
+                    // With the reachability unknown, say what the error said rather than claim a verdict.
+                    self.speedProgress = (up == nil ? nil : SpeedTest.failureMessage(kind)) ?? error.localizedDescription
+                    if scheduled, up == true, kind == .serverUnreachable {
+                        self.journal.record(kind: "Speed test server unreachable", detail: SpeedTest.failureMessage(kind) ?? "", network: testedNetwork?.networkName ?? "Unknown network")
+                    }
+                }
+            }
         }
     }
     public func cancelSpeedTest() { speedTask?.cancel() }
@@ -369,14 +557,22 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         do { try await NetworkTools.flushDNS(); notice = String(localized: "DNS cache flushed."); await diagnose() }
         catch { self.error = error.localizedDescription }
     }
-    public func changeDNS(_ provider: DNSProvider) async {
+    /// The person's pick in Health › DNS. Network DNS over Kilobat's own switch is Undo: back through the helper,
+    /// without a password, and the fastest-DNS switch off on this network so it stays that way.
+    public func changeDNS(_ choice: DNSResolverChoice) async {
         guard let service = snapshot?.networkService else { error = String(localized: "Could not determine the current network service. Run diagnostics first."); return }
         guard !changingDNS else { return }
         changingDNS = true
         defer { changingDNS = false }
+        if choice.isNetwork, fastestDNS.applied != nil {
+            await fastestDNS.undo()
+            if fastestDNS.applied == nil { notice = String(localized: "\(service) now uses Network DNS.") }
+            await diagnose()
+            return
+        }
         do {
-            try await DNSService.set(provider, service: service)
-            notice = String(localized: "\(service) now uses \(provider.rawValue) DNS.")
+            try await DNSService.set(choice, service: service)
+            notice = choice.isNetwork ? String(localized: "\(service) now uses Network DNS.") : String(localized: "\(service) now uses \(choice.name) for DNS.")
             await diagnose()
         } catch { self.error = error.localizedDescription }
     }

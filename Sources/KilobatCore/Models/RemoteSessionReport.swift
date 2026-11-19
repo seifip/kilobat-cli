@@ -110,7 +110,7 @@ public struct RemoteSessionReport: Codable, Identifiable, Sendable, Equatable {
                 ?? String(localized: "A TV, console or phone on your network was busy. Pause its download or stream, or turn on your router’s QoS.", comment: "Remote session advice")
             case .wifi: weakSignal == true ? String(localized: "Move closer to the router, or use Radar to find a stronger spot.", comment: "Remote session advice")
                                            : String(localized: "Try a cable or the 5 GHz band, or restart the router.", comment: "Remote session advice")
-            case .airDrop: String(localized: "Turn on low latency while you work remotely; it pauses AirDrop until you turn it off.", comment: "Remote session advice")
+            case .airDrop: String(localized: "Pause AirDrop while you work remotely, from the AirDrop switch in Wi-Fi & Bluetooth.", comment: "Remote session advice")
             case .portal: String(localized: "Sign in again on the Wi-Fi’s page. Once Kilobat has seen how long sign-ins last here, it warns you five minutes before the next one runs out.", comment: "Remote session advice after a hotel or café Wi-Fi's sign-in ran out")
             case .starlink: CallSamples.Dish.advice(dish)
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Remote session advice")

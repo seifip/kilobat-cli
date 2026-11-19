@@ -8,6 +8,7 @@ public struct RouteHop: Codable, Sendable, Equatable {
     public var samples: [Double]
     /// Probes sent: replies plus `*`.
     public var probes: Int
+    public init(ttl: Int, addresses: [String], samples: [Double], probes: Int) { self.ttl = ttl; self.addresses = addresses; self.samples = samples; self.probes = probes }
 }
 
 /// Traceroutes to one host over time, hop by hop, like mtr: replies, best, average, worst and last per hop,
@@ -39,10 +40,32 @@ public struct RouteHistory: Codable, Sendable {
     /// Where the delay starts, in words.
     public let verdict: String
 
-    public init(host: String, routes: [SavedRoute]) {
+    /// Where the delay starts: the hop the verdict names, nil when no hop adds lasting delay.
+    public let troubleTTL: Int?
+    /// Rounds that came from watching the route, included in `runs`.
+    public let watchedRuns: Int
+
+    /// Every saved trace and every watched round to `host`, oldest first. A watch's route changes count routers new
+    /// to a hop (`RouteTimeline.changes`), not every flip between two load-balanced paths a single probe lands on.
+    public init(host: String, routes: [SavedRoute], watches: [WatchedRoute] = []) {
         let runs = routes.filter { $0.host == host }.sorted { $0.date < $1.date }
-        let parsed = runs.map { RouteTrace.parse($0.output) }.filter { !$0.isEmpty }
-        self.host = host; self.runs = parsed.count; first = runs.first?.date; last = runs.last?.date
+        let saved = runs.map { ($0.date, RouteTrace.parse($0.output)) }.filter { !$0.1.isEmpty }
+        let watched = watches.filter { $0.host == host }.flatMap { watch in watch.rounds.map { (watch.date($0), watch.hops($0)) } }
+        let savedPaths = saved.map { $0.1.map { Set($0.addresses) } }
+        let changes = zip(savedPaths, savedPaths.dropFirst()).filter { $0 != $1 }.count
+            + watches.filter { $0.host == host }.reduce(0) { $0 + RouteTimeline.changes(in: $1).count }
+        self.init(host: host, runs: (saved + watched).sorted { $0.0 < $1.0 }, pathChanges: changes, watchedRuns: watched.count)
+    }
+
+    /// One watch on its own.
+    public init(watch: WatchedRoute) {
+        self.init(host: watch.host, runs: watch.rounds.map { (watch.date($0), watch.hops($0)) }, pathChanges: RouteTimeline.changes(in: watch).count, watchedRuns: watch.rounds.count)
+    }
+
+    init(host: String, runs dated: [(Date, [RouteHop])], pathChanges: Int, watchedRuns: Int) {
+        let parsed = dated.map(\.1)
+        self.host = host; self.runs = parsed.count; first = dated.first?.0; last = dated.last?.0
+        self.watchedRuns = watchedRuns
         let ttls = Set(parsed.flatMap { $0.map(\.ttl) }).sorted()
         hops = ttls.map { ttl in
             let rows = parsed.compactMap { $0.first { $0.ttl == ttl } }
@@ -56,15 +79,40 @@ public struct RouteHistory: Codable, Sendable {
                        bestMs: samples.min(), averageMs: samples.isEmpty ? nil : samples.reduce(0, +) / Double(samples.count), worstMs: samples.max(),
                        lastMs: latest.flatMap { $0.samples.isEmpty ? nil : $0.samples.reduce(0, +) / Double($0.samples.count) }, changed: sets.count > 1)
         }
-        let paths = parsed.map { $0.map { Set($0.addresses) } }
-        pathChanges = zip(paths, paths.dropFirst()).filter { $0 != $1 }.count
-        verdict = Self.verdict(hops, runs: parsed.count)
+        self.pathChanges = pathChanges
+        let judged = Self.judge(hops, runs: parsed.count)
+        verdict = judged.verdict; troubleTTL = judged.ttl
     }
 
+    /// Verdicts that say the trace showed nothing; findings leave them out.
+    static var noTraces: String { String(localized: "No saved traces to this host.") }
+    static var noHopAnswered: String { String(localized: "No hop answered. Some networks block traceroute probes.") }
+
     /// The first hop where the average rises by 30 ms or more and stays up to the last hop that answers.
-    static func verdict(_ hops: [Hop], runs: Int) -> String {
+    static func verdict(_ hops: [Hop], runs: Int) -> String { judge(hops, runs: runs).verdict }
+
+    /// The verdict and the hop it names.
+    static func judge(_ hops: [Hop], runs: Int) -> (verdict: String, ttl: Int?) {
+        if let ttl = troubleHop(hops) { return (verdict(hops, runs: runs, trouble: ttl), ttl) }
+        return (verdict(hops, runs: runs, trouble: nil), nil)
+    }
+
+    /// The first hop whose average rises 30 ms or more over the hop before and stays within 10 ms of it to the end.
+    static func troubleHop(_ hops: [Hop]) -> Int? {
         let answering = hops.filter { $0.averageMs != nil }
-        guard let end = answering.last, let endMs = end.averageMs else { return runs == 0 ? String(localized: "No saved traces to this host.") : String(localized: "No hop answered. Some networks block traceroute probes.") }
+        guard let endMs = answering.last?.averageMs else { return nil }
+        var previous: Double?
+        for hop in answering {
+            guard let ms = hop.averageMs else { continue }
+            if let before = previous, ms - before >= 30, endMs >= ms - 10 { return hop.ttl }
+            previous = ms
+        }
+        return nil
+    }
+
+    private static func verdict(_ hops: [Hop], runs: Int, trouble: Int?) -> String {
+        let answering = hops.filter { $0.averageMs != nil }
+        guard let end = answering.last, let endMs = end.averageMs else { return runs == 0 ? noTraces : noHopAnswered }
         var previous: Double?
         for hop in answering {
             guard let ms = hop.averageMs else { continue }

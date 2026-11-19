@@ -242,7 +242,7 @@ struct SiriAnswersTests {
         let free = SiriAnswers.preflight(busy, pro: false)
         #expect(free.spoken == "Not quite: Dropbox is uploading and Wi-Fi is weak. Kilobat Pro can pause them until the call ends.")
         #expect(SiriAnswers.preflight(Preflight(date: now, issues: []), pro: false).tone == .good)
-        #expect(SiriAnswers.preflight(Preflight(date: now, issues: [.init(kind: .airDrop)]), pro: false).sentence.hasSuffix("it pauses AirDrop until you turn it off."))
+        #expect(SiriAnswers.preflight(Preflight(date: now, issues: [.init(kind: .airDrop)]), pro: false).sentence.hasSuffix("Pause AirDrop before calls, from the AirDrop switch in Wi-Fi & Bluetooth."))
     }
 
     @Test func speedTestsAreSpokenAsASentence() {
@@ -279,4 +279,36 @@ struct SiriAnswersTests {
 
     /// Apple's rules: at most 10 App Shortcuts, every phrase names the app exactly once and takes at most one parameter,
     /// and all phrases, a parameter's values spelled out, stay under 1,000. Each is a key in AppShortcuts.xcstrings.
+    @Test(.enabled(if: RepoFiles.has("Sources/Kilobat"))) func shortcutPhrasesStayWithinApplesLimits() throws {
+        let source = try String(contentsOf: Self.repository.appendingPathComponent("Sources/Kilobat/Support/KilobatIntents.swift"), encoding: .utf8)
+        let provider = String(source[try #require(source.range(of: "struct KilobatShortcuts")).lowerBound...])
+        let shortcuts = provider.components(separatedBy: "AppShortcut(intent:").dropFirst()
+        #expect(!shortcuts.isEmpty && shortcuts.count <= 10)
+        let quoted = try Regex(#""((?:[^"\\]|\\.)*)""#)
+        var phrases: [String] = []
+        for shortcut in shortcuts {
+            let body = String(shortcut[..<(shortcut.range(of: "shortTitle:")?.lowerBound ?? shortcut.endIndex)])
+            let own = body.matches(of: quoted).map { String(body[$0.range].dropFirst().dropLast()) }
+            #expect(!own.isEmpty)
+            phrases += own
+        }
+        #expect(Set(phrases).count == phrases.count)
+        var expanded = 0
+        for phrase in phrases {
+            #expect(phrase.components(separatedBy: "\\(.applicationName)").count == 2, "\(phrase)")
+            let parameters = phrase.components(separatedBy: "\\(\\.$").count - 1
+            #expect(parameters <= 1, "\(phrase)")
+            expanded += parameters == 0 ? 1 : ServiceCatalog.services.count
+        }
+        #expect(expanded <= 1000)
+        let catalog = try JSONSerialization.jsonObject(with: Data(contentsOf: Self.repository.appendingPathComponent("Sources/Kilobat/AppShortcuts.xcstrings"))) as? [String: Any]
+        let keys = Set(((catalog?["strings"] as? [String: Any]) ?? [:]).keys)
+        let wanted = Set(phrases.map { $0.replacingOccurrences(of: "\\(.applicationName)", with: "${applicationName}").replacingOccurrences(of: "\\(\\.$service)", with: "${service}") })
+        #expect(wanted == keys)
+        // The questions people ask, each answered.
+        for question in ["Why is my internet slow", "Is my connection OK", "Why did my call freeze", "Is \\(\\.$service) down", "What's using my internet",
+                         "How much data have I used", "Is my VPN leaking", "Am I ready for my call"] {
+            #expect(phrases.contains { $0.hasPrefix(question) }, "\(question)")
+        }
+    }
 }

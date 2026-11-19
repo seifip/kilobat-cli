@@ -125,6 +125,8 @@ public enum ProtectionCategory: String, Codable, Sendable, CaseIterable {
     case malware, phishing, scam, threat, tracker
     /// Hosts agents on this Mac already used, from the agent network log: the agent guard's large-upload rule leaves them alone.
     case known
+    /// A blocklist the person subscribed to by URL: blocked for every app like their own blocklist, not a Protection finding.
+    case blocklist
 
     public var kind: ProtectionDetail.Kind? {
         switch self {
@@ -133,7 +135,7 @@ public enum ProtectionCategory: String, Codable, Sendable, CaseIterable {
         case .scam: .scam
         case .threat: .threat
         case .tracker: .tracker
-        case .known: nil
+        case .known, .blocklist: nil
         }
     }
     public static let threats: Set<ProtectionCategory> = [.malware, .phishing, .scam, .threat]
@@ -320,15 +322,20 @@ public struct ProtectionSettings: Sendable, Equatable {
     public var allowed: [String] = []
     /// The digest of the index the app built for these settings.
     public var digest: String?
+    /// Blocklists the person subscribed to by URL, compiled into the same index: blocked for every app.
+    public var blocklists = false
 
-    public init(threats: Bool = false, trackers: Bool = false, agentGuard: Bool = false, uploadLimit: UInt64 = 10_000_000, allowed: [String] = [], digest: String? = nil) {
+    public init(threats: Bool = false, trackers: Bool = false, agentGuard: Bool = false, uploadLimit: UInt64 = 10_000_000, allowed: [String] = [], digest: String? = nil,
+                blocklists: Bool = false) {
         self.threats = threats; self.trackers = trackers; self.agentGuard = agentGuard; self.uploadLimit = uploadLimit; self.allowed = allowed; self.digest = digest
+        self.blocklists = blocklists
     }
     public init(_ configuration: [String: Any]?) {
         guard let configuration else { return }
         threats = configuration["threats"] as? Bool == true
         trackers = configuration["trackers"] as? Bool == true
         agentGuard = configuration["agentGuard"] as? Bool == true
+        blocklists = configuration["blocklists"] as? Bool == true
         uploadLimit = (configuration["uploadLimit"] as? NSNumber)?.uint64Value ?? 10_000_000
         allowed = configuration["allowed"] as? [String] ?? []
         digest = configuration["digest"] as? String
@@ -337,9 +344,10 @@ public struct ProtectionSettings: Sendable, Equatable {
         guard active else { return ["threats": false] }
         var value: [String: Any] = ["threats": threats, "trackers": trackers, "agentGuard": agentGuard, "uploadLimit": NSNumber(value: uploadLimit), "allowed": allowed.sorted()]
         if let digest { value["digest"] = digest }
+        if blocklists { value["blocklists"] = true }
         return value
     }
-    public var active: Bool { threats || trackers || agentGuard }
+    public var active: Bool { threats || trackers || agentGuard || blocklists }
 
     /// Whether "Allow this site" covers the host.
     public func allows(_ host: String?) -> Bool {
@@ -411,6 +419,16 @@ public enum ProtectionCheck {
         return detail(match, agent: nil)
     }
 
+    /// Blocklists subscribed to by URL, for every app: the matched entry and the list's name. The local network,
+    /// Apple's and Kilobat's own domains and allowed sites stay out of reach, so a list's mistake can't break macOS.
+    public static func subscribed(_ flow: FilterPolicy.Flow, settings: ProtectionSettings, index: ProtectionIndex?) -> (entry: String, list: String)? {
+        guard settings.blocklists, let index else { return nil }
+        let (host, address) = names(flow)
+        guard host != nil || address != nil, !exempt(host, address: address, settings: settings),
+              let match = index.match(host: host, address: address, in: [.blocklist]), let list = match.lists.first else { return nil }
+        return (match.entry, list.name)
+    }
+
     /// Only for the rule inspector: the site the person allowed ("Allow this site") that keeps a host one of the lists
     /// in use has, or an agent-guard rule would stop, out of Protection's reach.
     public static func allowedSite(_ flow: FilterPolicy.Flow, settings: ProtectionSettings, index: ProtectionIndex?) -> String? {
@@ -421,6 +439,7 @@ public enum ProtectionCheck {
         var categories: Set<ProtectionCategory> = []
         if settings.threats || settings.agentGuard { categories.formUnion(ProtectionCategory.threats) }
         if settings.trackers { categories.insert(.tracker) }
+        if settings.blocklists { categories.insert(.blocklist) }
         if let index, index.match(host: host, address: address, in: categories) != nil { return site }
         if settings.agentGuard, let host, !HostName.isAddress(host), AgentHostRules.share(host) != nil { return site }
         return nil
@@ -437,6 +456,54 @@ public enum ProtectionCheck {
     }
 }
 
+/// State kept per connection while the filter still reads it, with a ceiling and an age limit, so an entry whose
+/// connection never reports back can't sit there for good. When the table is full, entries older than `maxAge` go
+/// first, then the oldest one; a key pushed out that way is remembered as expired, in a list with the same ceiling,
+/// so the filter can drop that connection if it sends after all instead of letting it past unread.
+public struct InspectionTable<Key: Hashable, Value> {
+    public enum Lookup { case active(Value), expired, unknown }
+    public let capacity: Int
+    public let maxAge: TimeInterval
+    private var entries: [Key: (value: Value, added: TimeInterval)] = [:]
+    private var expiredOrder: [Key] = []
+    private var expiredKeys: Set<Key> = []
+
+    public init(capacity: Int, maxAge: TimeInterval) {
+        self.capacity = max(1, capacity); self.maxAge = maxAge
+    }
+    public var count: Int { entries.count }
+
+    /// Adds `value`. Returns how many entries were pushed out to make room (0 almost always).
+    @discardableResult public mutating func insert(_ value: Value, for key: Key, now: TimeInterval) -> Int {
+        var pushed = 0
+        if entries[key] == nil, entries.count >= capacity {
+            for (stale, entry) in entries where now - entry.added > maxAge { evict(stale); pushed += 1 }
+            if entries.count >= capacity, let oldest = entries.min(by: { $0.value.added < $1.value.added })?.key { evict(oldest); pushed += 1 }
+        }
+        entries[key] = (value, now)
+        if expiredKeys.remove(key) != nil { expiredOrder.removeAll { $0 == key } }
+        return pushed
+    }
+
+    public func lookup(_ key: Key) -> Lookup {
+        if let entry = entries[key] { return .active(entry.value) }
+        return expiredKeys.contains(key) ? .expired : .unknown
+    }
+
+    /// Forgets the key entirely: its entry, or its place among the expired.
+    public mutating func remove(_ key: Key) {
+        entries[key] = nil
+        if expiredKeys.remove(key) != nil { expiredOrder.removeAll { $0 == key } }
+    }
+
+    private mutating func evict(_ key: Key) {
+        entries[key] = nil
+        guard expiredKeys.insert(key).inserted else { return }
+        expiredOrder.append(key)
+        if expiredOrder.count > capacity { expiredKeys.remove(expiredOrder.removeFirst()) }
+    }
+}
+
 /// The server name a connection asks for, from its first bytes: the TLS ClientHello's SNI or an HTTP Host header.
 /// Read only when the filter has no name for a connection, and only those first bytes.
 public enum FlowSniffer {
@@ -446,6 +513,8 @@ public enum FlowSniffer {
         case address
         /// The hello isn't complete yet: wait for this many bytes in all.
         case needMore(Int)
+        /// A recognized header cannot fit in the bounded inspection buffer.
+        case tooLarge
         /// Neither TLS nor HTTP.
         case unknown
     }
@@ -458,16 +527,37 @@ public enum FlowSniffer {
     }
 
     static func tls(_ bytes: [UInt8]) -> Result {
-        guard bytes.count >= 5 else { return .needMore(5) }
-        guard bytes[1] == 3 else { return .unknown }
-        let record = Int(bytes[3]) << 8 | Int(bytes[4])
-        let total = 5 + record
-        guard total <= maximum else { return .unknown }
-        guard bytes.count >= total else { return .needMore(total) }
-        var index = 5
+        var offset = 0
+        var handshake: [UInt8] = []
+        var length: Int?
+        while true {
+            let body = offset + 5
+            guard body <= maximum else { return .tooLarge }
+            guard bytes.count >= body else { return .needMore(body) }
+            guard bytes[offset] == 0x16, bytes[offset + 1] == 3 else { return .unknown }
+            let recordLength = Int(bytes[offset + 3]) << 8 | Int(bytes[offset + 4])
+            let end = body + recordLength
+            guard recordLength > 0 else { return .unknown }
+            guard end <= maximum else { return .tooLarge }
+            guard bytes.count >= end else { return .needMore(end) }
+            handshake.append(contentsOf: bytes[body..<end])
+            if length == nil, handshake.count >= 4 {
+                guard handshake[0] == 1 else { return .unknown }
+                let size = Int(handshake[1]) << 16 | Int(handshake[2]) << 8 | Int(handshake[3])
+                guard size > 0 else { return .unknown }
+                guard size + 9 <= maximum else { return .tooLarge }
+                length = size + 4
+            }
+            if let length, handshake.count >= length { return clientHello(handshake, end: length) }
+            offset = end
+        }
+    }
+
+    /// The server name in a complete ClientHello (handshake header included), also used for QUIC's CRYPTO data.
+    static func clientHello(_ bytes: [UInt8], end total: Int) -> Result {
+        var index = 4
         func byte() -> Int? { guard index < total else { return nil }; defer { index += 1 }; return Int(bytes[index]) }
         func short() -> Int? { guard let a = byte(), let b = byte() else { return nil }; return a << 8 | b }
-        guard byte() == 1, let a = byte(), let b = byte(), let c = byte(), (a << 16 | b << 8 | c) > 0 else { return .unknown }
         index += 2 + 32                                            // version, random
         guard let session = byte() else { return .unknown }; index += session
         guard let suites = short() else { return .unknown }; index += suites
@@ -501,8 +591,10 @@ public enum FlowSniffer {
     static func http(_ bytes: [UInt8]) -> Result {
         let head = String(decoding: bytes.prefix(8_192), as: UTF8.self)
         guard methods.contains(where: { head.hasPrefix($0) || $0.hasPrefix(head) }) else { return .unknown }
-        for line in head.components(separatedBy: "\r\n").dropFirst() {
-            if line.isEmpty { return .address }
+        guard let end = head.range(of: "\r\n\r\n") else {
+            return bytes.count >= 8_192 ? .tooLarge : .needMore(min(8_192, bytes.count + 1_024))
+        }
+        for line in head[..<end.lowerBound].components(separatedBy: "\r\n").dropFirst() {
             guard line.lowercased().hasPrefix("host:") else { continue }
             var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("[") { value = String(value.dropFirst().prefix { $0 != "]" }) }
@@ -510,7 +602,7 @@ public enum FlowSniffer {
             guard let host = HostName.normalize(value) else { return .unknown }
             return HostName.isAddress(host) ? .address : .name(host)
         }
-        return bytes.count >= 8_192 ? .unknown : .needMore(min(8_192, bytes.count + 1_024))
+        return .address
     }
 }
 

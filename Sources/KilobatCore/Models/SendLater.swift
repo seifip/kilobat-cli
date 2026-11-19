@@ -43,9 +43,7 @@ public enum SendLater {
     // MARK: Which apps can be held, and how
 
     /// Browsers: holding one would freeze every tab, so their uploads are only shown.
-    static let browsers = ["com.apple.Safari", "com.apple.WebKit", "com.google.Chrome", "org.chromium.", "company.thebrowser.", "com.microsoft.edgemac",
-                           "org.mozilla.", "com.brave.Browser", "com.operasoftware.", "com.vivaldi.", "app.zen-browser.", "com.kagi.kagimacOS",
-                           "com.duckduckgo.macos.browser", "ai.perplexity.comet", "com.openai.atlas"]
+    static let browsers = BrowserApps.prefixes
     /// Command-line tools whose one open file is what they upload. Only curl was checked; scp and sftp hand the bytes
     /// to an ssh child, and rsync, rclone and git send something other than the file they read.
     static let fileReaders: Set<String> = ["curl"]

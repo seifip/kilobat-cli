@@ -543,11 +543,11 @@ public enum FastestDNS {
             return String(localized: "Your network’s DNS is fastest here (\(network) ms)", comment: "Fastest DNS; the network's own typical lookup time")
         case .learning:
             let days = verdict.days, needed = daysNeeded
-            guard let leader = verdict.leader.flatMap(DNSResolverChoice.from(id:)), let ms = verdict.choiceMs.map({ String(format: "%.0f", locale: Locale.current, $0) }) else {
+            guard let leader = verdict.leader.flatMap(DNSResolverChoice.from(id:)) else {
                 return String(localized: "Measuring: \(days) of \(needed) days", comment: "Fastest DNS: runs on different days so far, of those needed")
             }
-            let name = leader.isNetwork ? String(localized: "your network’s DNS", comment: "Fastest DNS: the network's own resolver, mid-sentence") : leader.name
-            return String(localized: "So far \(name) at \(ms) ms · \(days) of \(needed) days measured", comment: "Fastest DNS while learning; resolver, its lookup time, days so far and needed")
+            let name = leader.isNetwork ? String(localized: "Network DNS", comment: "The network's own resolver, short") : leader.name
+            return String(localized: "\(name) leads · \(days) of \(needed) days measured", comment: "Fastest DNS while learning; the resolver ahead so far, days so far and needed")
         }
     }
 
@@ -557,11 +557,24 @@ public enum FastestDNS {
         case .vpn: String(localized: "Your VPN manages DNS, so Kilobat leaves it alone.", comment: "Fastest DNS guard")
         case .profile: String(localized: "A configuration profile or an app’s encrypted DNS decides lookups here, so Kilobat leaves it alone.", comment: "Fastest DNS guard")
         case .portal: String(localized: "The Wi-Fi sign-in page needs the network’s own DNS. Kilobat waits until you’re signed in.", comment: "Fastest DNS guard")
-        case .ownDNS: String(localized: "You set DNS servers yourself, so Kilobat doesn’t change them. Choose Automatic to let it.", comment: "Fastest DNS guard")
+        case .ownDNS: String(localized: "You set DNS servers yourself, so Kilobat doesn’t change them. Choose Network DNS to let it.", comment: "Fastest DNS guard")
         case .failedRecently: String(localized: "Lookups failed through the faster resolver here, so Kilobat went back to the network’s DNS for a day.", comment: "Fastest DNS watchdog")
         case .needsHelper: String(localized: "Switching without a password uses Kilobat’s helper.", comment: "Fastest DNS: needs the privileged helper")
         case .onFallback: String(localized: "Lookups failed through the faster resolver here, so Kilobat uses your fallback for a day. If that fails too, the network’s DNS comes back.", comment: "Fastest DNS: on the person's fallback resolver")
         case .off, .pro, .noNetwork, .learning, .networkBest, .applied: nil
+        }
+    }
+
+    /// The same, in one line under the switch; `explain` is its tooltip.
+    public static func brief(_ hold: Hold) -> String? {
+        switch hold {
+        case .vpn: String(localized: "Won’t switch while your VPN manages DNS.", comment: "Fastest DNS switch, short reason")
+        case .profile: String(localized: "Won’t switch while a profile or app manages DNS.", comment: "Fastest DNS switch, short reason")
+        case .portal: String(localized: "Waits until you’re signed in to this Wi-Fi.", comment: "Fastest DNS switch, short reason")
+        case .ownDNS: String(localized: "Won’t switch while you use your own DNS servers.", comment: "Fastest DNS switch, short reason")
+        case .failedRecently: String(localized: "On the network’s DNS for a day after failed lookups.", comment: "Fastest DNS switch, short reason")
+        case .onFallback: String(localized: "On your fallback for a day after failed lookups.", comment: "Fastest DNS switch, short reason")
+        case .needsHelper, .off, .pro, .noNetwork, .learning, .networkBest, .applied: nil
         }
     }
 
@@ -585,7 +598,7 @@ public enum FastestDNS {
 // MARK: Who runs a resolver
 
 /// Who runs a public resolver and under which country's law, for the well-known ones Kilobat offers or may see added,
-/// each from the operator's own pages. Anything not
+/// each from the operator's own pages (Release/RESEARCH-DECISIONS.md, "DNS jurisdiction and fallback"). Anything not
 /// here, the network's own included, is "your provider's" or unknown: Kilobat never guesses from an address.
 public struct DNSOperator: Equatable, Sendable {
     /// As shown: "Quad9".
@@ -671,6 +684,33 @@ public struct DNSHistory: Equatable, Sendable {
     public var lookups: Int { answered + failed }
     public var successRate: Double? { lookups > 0 ? Double(answered) / Double(lookups) : nil }
     public var slowRate: Double? { answered > 0 ? Double(slow) / Double(answered) : nil }
+}
+
+/// How one day's lookups went for a resolver; the DNS panel draws each grade with its own shape as well as colour.
+public enum DNSDayGrade: Equatable, Sendable {
+    /// Under 90% answered.
+    case failing
+    /// Under 99% answered.
+    case patchy
+    /// All (or nearly all) answered, but more than one in ten slowly.
+    case slow
+    case fine
+}
+
+extension DNSTally {
+    /// nil on a day without lookups.
+    public var grade: DNSDayGrade? {
+        guard let rate = successRate else { return nil }
+        if rate < 0.9 { return .failing }
+        if rate < 0.99 { return .patchy }
+        if answered > 0 && Double(slow) / Double(answered) > 0.1 { return .slow }
+        return .fine
+    }
+}
+
+extension DNSHistory {
+    /// Answered under 95% of lookups over the days shown: the panel marks its name.
+    public var unreliable: Bool { (successRate ?? 1) < 0.95 }
 }
 
 extension FastestDNS {

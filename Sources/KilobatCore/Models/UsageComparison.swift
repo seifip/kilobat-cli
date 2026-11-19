@@ -71,12 +71,6 @@ public struct UsageComparison: Codable, Equatable, Sendable {
     public enum Preset: String, CaseIterable, Identifiable, Sendable {
         case last24Hours = "last-24-hours", today, yesterday, last7Days = "last-7-days", thisMonth = "this-month", lastMonth = "last-month"
         public var id: String { rawValue }
-        public var title: String {
-            switch self {
-            case .last24Hours: String(localized: "Last 24 hours"); case .today: String(localized: "Today"); case .yesterday: String(localized: "Yesterday")
-            case .last7Days: String(localized: "Last 7 days"); case .thisMonth: String(localized: "This month"); case .lastMonth: String(localized: "Last month")
-            }
-        }
         public func interval(now: Date = Date(), calendar: Calendar = .current) -> DateInterval {
             let today = calendar.startOfDay(for: now)
             func days(_ count: Int, from date: Date) -> Date { calendar.date(byAdding: .day, value: count, to: date) ?? date }

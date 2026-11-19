@@ -96,6 +96,12 @@ public struct GameServerTable: Codable, Sendable, Equatable {
     }()
 
     public func game(_ id: String) -> Game? { games.first { $0.id == id.lowercased() } }
+    /// A running game's name made to fit a small label: its short name, or its own name when that's 9 characters or fewer.
+    public func shortLabel(for name: String?) -> String? {
+        guard let name else { return nil }
+        let short = (games.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?.short ?? name).uppercased()
+        return short.count <= 9 ? short : nil
+    }
     /// Games by how many play them.
     public var popular: [Game] { games.sorted { $0.rank < $1.rank } }
 
@@ -374,6 +380,18 @@ public enum GamePing {
         defer { checkingMatch = false }
         match = await CurrentMatch.check(preferring: lastGame)
     }
+    /// Games from this table that Steam has installed, for the top of the picker.
+    public private(set) var installed: [String] = []
+    /// Reads Steam's files once. Someone who hasn't picked a game starts on one they own.
+    public func loadInstalled() async {
+        guard installed.isEmpty else { return }
+        let table = self.table
+        let found = await Task.detached { SteamLibrary.installedGames(SteamLibrary.apps(), table: table).map(\.id) }.value
+        installed = found
+        if UserDefaults.standard.string(forKey: "games.game") == nil, let first = found.first { game = first }
+    }
+    /// The game closed: its match is over.
+    public func clearMatch() { if match != nil { match = nil } }
     /// Sample results for screenshots and previews.
     public func preview(_ report: GamePingReport) { reports[report.game] = report }
     public func preview(_ check: MatchCheck?) { match = check }

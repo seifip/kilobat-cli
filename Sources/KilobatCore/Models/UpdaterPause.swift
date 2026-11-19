@@ -117,3 +117,27 @@ public enum UpdaterPause {
             .sorted { $0.bytes == $1.bytes ? $0.name < $1.name : $0.bytes > $1.bytes }
     }
 }
+
+/// Pausing cloud storage sync on metered networks, the same way as updaters: the filter refuses the clients in
+/// `CloudSyncClients` while the network costs data, and they catch up on their own once it doesn't.
+public enum CloudSyncPause {
+    /// The setting; on unless turned off.
+    public static func enabled(_ preferences: SavedPreferences) -> Bool { preferences.pauseCloudSync != false }
+    /// Whether the filter pauses sync now. Unrestricted allows every connection, so it never does.
+    public static func active(_ preferences: SavedPreferences, metered: Bool) -> Bool {
+        enabled(preferences) && metered && preferences.profile != .unrestricted
+    }
+    /// The installed clients, by name, for the setting's detail line.
+    public static func installed(in folders: [URL] = [URL(fileURLWithPath: "/Applications"),
+                                                       FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")]) -> [String] {
+        let files = FileManager.default
+        var names: [String] = []
+        for folder in folders {
+            for item in (try? files.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [] where item.pathExtension == "app" {
+                let id = Bundle(url: item)?.bundleIdentifier
+                if let client = CloudSyncClients.client(id), !names.contains(client.name) { names.append(client.name) }
+            }
+        }
+        return names.sorted()
+    }
+}

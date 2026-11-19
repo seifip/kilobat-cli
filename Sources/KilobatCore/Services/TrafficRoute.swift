@@ -30,7 +30,7 @@ public enum TrafficRoute: String, Codable, Sendable {
     }
 
     /// utun (WireGuard, Tailscale, most VPN apps and TUN-mode proxies), ipsec (built-in IKEv2 and IPsec), ppp (L2TP).
-    static func tunnelInterface(_ name: Substring) -> Bool {
+    public static func tunnelInterface(_ name: Substring) -> Bool {
         name.hasPrefix("utun") || name.hasPrefix("ipsec") || name.hasPrefix("ppp") || name.hasPrefix("tun") || name.hasPrefix("tap")
     }
 

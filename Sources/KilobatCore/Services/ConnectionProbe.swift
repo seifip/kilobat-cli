@@ -46,6 +46,17 @@ enum ConnectionProbe {
         var source: String?
         var link: Link?
         var dnsProtocol: NWConnection.EstablishmentReport.Resolution.DNSProtocol?
+        /// How long each handshake took, from the establishment report, on a connection that succeeded.
+        var tcpMs: Int?
+        var tlsMs: Int?
+        /// macOS held the connection back because this process has no Local Network access: the path's unsatisfied
+        /// reason, which Apple's TN3179 names as the way to tell.
+        var localNetworkDenied = false
+        /// "No route to host" (EHOSTUNREACH) within a second: how a denied app's connection to a local address fails.
+        var unreachableAtOnce: Bool {
+            guard case .failed(let message) = outcome else { return false }
+            return message == String(cString: strerror(EHOSTUNREACH)).lowercased() && ms < 1000
+        }
     }
 
     /// The Mac's default path, as macOS sees it now.
@@ -88,15 +99,17 @@ enum ConnectionProbe {
                 guard once.claim() else { return }
                 connection.stateUpdateHandler = nil
                 let path = connection.currentPath
-                let attempt = Attempt(outcome: outcome, ms: Int(Date().timeIntervalSince(started) * 1000),
+                var attempt = Attempt(outcome: outcome, ms: Int(Date().timeIntervalSince(started) * 1000),
                                       address: path?.remoteEndpoint.flatMap(address), source: path?.localEndpoint.flatMap(address), link: path.flatMap { path in path.availableInterfaces.first.map { Link($0, expensive: path.isExpensive) } })
+                attempt.localNetworkDenied = path?.unsatisfiedReason == .localNetworkDenied
                 guard outcome == .connected else { connection.cancel(); continuation.resume(returning: attempt); return }
                 connection.requestEstablishmentReport(queue: queue) { report in
                     connection.cancel()
                     var detailed = attempt
                     detailed.dnsProtocol = report?.resolutions.first?.dnsProtocol
                     // A TLS attempt reports its handshake, not the TCP connect before it.
-                    if tls, let handshake = report?.handshakes.first(where: { $0.definition.name == "tls" }) { detailed.ms = Int(handshake.handshakeDuration * 1000) }
+                    if tls, let handshake = report?.handshakes.first(where: { $0.definition.name == "tls" }) { detailed.ms = Int(handshake.handshakeDuration * 1000); detailed.tlsMs = detailed.ms }
+                    if let handshake = report?.handshakes.first(where: { $0.definition.name == "tcp" }) { detailed.tcpMs = Int(handshake.handshakeDuration * 1000) }
                     continuation.resume(returning: detailed)
                 }
             }

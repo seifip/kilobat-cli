@@ -7,7 +7,7 @@ public enum ServiceSpeedTest {
         case metered, budget
         public var errorDescription: String? {
             switch self {
-            case .metered: String(localized: "This network is metered, so Kilobat won’t download a test file here. Mark it unmetered in Settings › Network if it isn’t.", comment: "Service speed test refused on a metered network")
+            case .metered: String(localized: "This network is metered, so Kilobat won’t download a test file here. Mark it unmetered in Settings › Data & budgets if it isn’t.", comment: "Service speed test refused on a metered network")
             case .budget: String(localized: "A service test downloads 5 to 25 MB.", comment: "Service speed test refused: the data budget is out of range")
             }
         }

@@ -177,6 +177,61 @@ import Testing
         #expect(unpriced.qualifies && unpriced.amount == nil && unpriced.needsPrice)
     }
 
+    private var september: DateInterval { CreditTally.month(of: date(15, 12, month: 9), calendar: utc) }
+    private func septemberTally(_ events: [NetworkEvent]) -> CreditTally {
+        CreditTally.make(events: events, network: "Home", from: september.start, to: september.end, now: date(31, 23, month: 10))
+    }
+
+    @Test func anOutageAcrossTheMonthEdgeIsJudgedWhole() {
+        let events = [outage(date(30, 10, month: 9), date(1, 16))]
+        let oct = tally(events)
+        #expect(oct.outages.count == 1)
+        let part = oct.outages[0]
+        #expect(part.start == date(1, 0) && part.seconds == 16 * 3600)
+        #expect(part.wholeStart == date(30, 10, month: 9) && part.wholeEnd == nil)
+        let octEstimate = estimate("us-xfinity", oct, price: 93)
+        #expect(octEstimate.qualifies && octEstimate.amount == 2.0)
+        let sep = septemberTally(events)
+        #expect(sep.totalSeconds == 14 * 3600 && sep.outages[0].wholeEnd == date(1, 16))
+        let sepEstimate = estimate("us-xfinity", sep, price: 93)
+        #expect(sepEstimate.qualifies && sepEstimate.amount == 1.81)
+    }
+
+    @Test func aShortOutageAcrossTheEdgeStillDoesNotQualify() {
+        let events = [outage(date(30, 14, month: 9), date(1, 9))]
+        #expect(!estimate("us-xfinity", tally(events), price: 93).qualifies)
+        #expect(!estimate("us-xfinity", septemberTally(events), price: 93).qualifies)
+    }
+
+    @Test func creditDaysAreCountedOnceAcrossTheEdge() throws {
+        let events = [outage(date(28, 10, month: 9), date(3, 12))]
+        let policy = try #require(table.policy(id: "uk-ofcom"))
+        let sep = septemberTally(events)
+        #expect(CreditEstimate.deadline(for: sep.outages[0], threshold: policy.threshold, calendar: utc) == date(1, 0))
+        let oct = estimate("uk-ofcom", tally(events))
+        #expect(oct.days == 3 && oct.amount == 31.02)
+        let septemberEstimate = estimate("uk-ofcom", sep)
+        #expect(septemberEstimate.days == 0 && !septemberEstimate.qualifies)
+    }
+
+    @Test func aFullDayCreditIsNotPaidTwiceAcrossTheEdge() {
+        let events = [outage(date(30, 20, month: 9), date(2, 2))]
+        #expect(estimate("us-att", septemberTally(events), price: 62).days == 1)
+        #expect(estimate("us-att", tally(events), price: 62).days == 1)
+    }
+
+    @Test func anOutageInsideTheMonthCarriesNoWholeExtent() throws {
+        let part = try #require(tally([outage(date(6, 9), date(6, 11))]).outages.first)
+        #expect(part.wholeStart == nil && part.wholeEnd == nil)
+        let json = String(decoding: try JSONEncoder().encode(part), as: UTF8.self)
+        #expect(!json.contains("wholeStart") && !json.contains("wholeEnd"))
+    }
+
+    @Test func theSpanOfACutOutageNamesTheWholeOutage() throws {
+        let part = try #require(tally([outage(date(30, 10, month: 9), date(1, 16))]).outages.first)
+        #expect(CreditText.span(part).contains(CreditText.duration(30 * 3600)))
+    }
+
     @Test func attCreditsADayPerOutageUpToTheMonth() {
         let result = estimate("us-att", tally([outage(date(6, 9), date(6, 9, 25)), outage(date(10, 0), date(12, 2)), outage(date(14, 9), date(14, 9, 10))]), price: 62)
         #expect(result.days == 4 && result.amount == 8)
@@ -266,6 +321,22 @@ import Testing
         for i in 0..<5 { journal.ingest(sample(router: i != 4), secondary: none, httpReachable: false, date: start.addingTimeInterval(Double(i) * 60)) }
         let event = try #require(journal.events.last)
         #expect(event.routerChecks == 5 && event.routerAnswered == 4)
+    }
+
+    @Test func theProviderSetupKeepsDecodingAndNamesATypedProvider() throws {
+        // Saved before the setup held a plan: still decodes, with nothing new filled in.
+        let old = try JSONDecoder().decode(CreditSettings.self, from: Data(#"{"provider":"gb-bt","country":"GB","monthlyPrice":32}"#.utf8))
+        #expect(old.provider == "gb-bt" && old.uploadMbps == nil && old.minimumMbps == nil && old.planWording == nil && old.otherProvider == nil)
+        var settings = CreditSettings(country: "US")
+        settings.otherProvider = "  Sonic  "; settings.uploadMbps = 50
+        let decoded = try JSONDecoder().decode(CreditSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded == settings && decoded.typedProvider == "Sonic")
+        let month = tally([outage(date(5, 10), date(9, 12))])
+        let report = CreditReport.make(settings: settings, tally: month)
+        #expect(report.provider == nil && report.providerName == "Sonic" && report.claim.text.contains("Hello Sonic,"))
+        // A provider from Kilobat's list wins over a stale typed name.
+        settings.provider = "gb-bt"
+        #expect(CreditReport.make(settings: settings, tally: month).providerName == "BT")
     }
 
     @Test func cliOptionsParse() throws {

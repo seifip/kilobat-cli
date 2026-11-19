@@ -60,8 +60,10 @@ public struct RouterDraft: Sendable, Equatable {
     public var auth: RouterConnection.Auth
     /// The certificate the person just confirmed.
     public var pin: String?
-    public init(kind: RouterKind, entered: String, user: String = "", secret: String, auth: RouterConnection.Auth = .password, pin: String? = nil) {
-        self.kind = kind; self.entered = entered; self.user = user; self.secret = secret; self.auth = auth; self.pin = pin
+    /// The name a UPnP router gave when it was found.
+    public var model: String?
+    public init(kind: RouterKind, entered: String, user: String = "", secret: String, auth: RouterConnection.Auth = .password, pin: String? = nil, model: String? = nil) {
+        self.kind = kind; self.entered = entered; self.user = user; self.secret = secret; self.auth = auth; self.pin = pin; self.model = model
     }
 }
 
@@ -123,6 +125,7 @@ public struct RouterDraft: Sendable, Equatable {
     @ObservationIgnored private var phaseConnection: String?
     @ObservationIgnored private var reader: (id: String, reader: RouterReader)?
     @ObservationIgnored private var needs: Set<Need> = []
+    @ObservationIgnored private var consumerNeeds: [Need: Set<UUID>] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var lastPoll = Date.distantPast
     @ObservationIgnored private var retryAfter = Date.distantPast
@@ -135,7 +138,7 @@ public struct RouterDraft: Sendable, Equatable {
     nonisolated public static let ledgerFile = "home-usage.json"
     /// While Devices is open, or settings: every 15 s; during a call every 10 s.
     public static let fast: TimeInterval = 15, call: TimeInterval = 10
-    /// Otherwise every five minutes; a FRITZ!Box every two, since its 32-bit line counters wrap at 4 GiB.
+    /// Otherwise every five minutes, or two for a FRITZ!Box; sooner when a 32-bit line counter could wrap in that time (`idleInterval`).
     public static let idle: TimeInterval = 300, idleFritz: TimeInterval = 120
 
     /// `directory` nil keeps everything in memory, as screenshot runs and tests need.
@@ -187,15 +190,23 @@ public struct RouterDraft: Sendable, Equatable {
         guard let network = network(), network.home else {
             return .failed(String(localized: "Mark this network as your home first. Kilobat reads a router only on your home network.", comment: "Router connection error"))
         }
-        guard !draft.secret.isEmpty, !draft.kind.usesUser || draft.auth == .apiKey || !draft.user.isEmpty else {
+        guard draft.kind == .upnp || (!draft.secret.isEmpty && (!draft.kind.usesUser || draft.auth == .apiKey || !draft.user.isEmpty)) else {
             return .failed(String(localized: "Enter the router user and its password.", comment: "Router connection error"))
         }
         phase = .connecting
         do {
-            var url = try RouterAddress.resolve(draft.entered, defaultScheme: draft.kind == .unifi || draft.kind == .mikrotik ? "https" : "http", loopback: loopback)
+            var url: URL
+            if draft.kind == .upnp {
+                // UPnP's address is the counters' own control URL, path included.
+                guard let control = URL(string: draft.entered), let host = control.host, control.user == nil, RouterAddress.isLocal(host, loopback: loopback) else { throw RouterAPIError.notLocal }
+                url = control
+            } else {
+                url = try RouterAddress.resolve(draft.entered, defaultScheme: draft.kind == .unifi || draft.kind == .mikrotik ? "https" : "http", loopback: loopback)
+            }
             if draft.kind == .fritzbox, url.scheme == "http" { url = await Self.fritzSecure(url, transport: transport(nil)) }
             var connection = RouterConnection(kind: draft.kind, network: network.key, networkName: network.name, url: url.absoluteString, entered: draft.entered,
                                               user: draft.kind.usesUser || draft.auth == .account ? draft.user : nil, auth: draft.auth, pin: url.scheme == "https" ? draft.pin : nil)
+            if draft.kind == .upnp { connection.model = draft.model }
             let reader = try RouterReaders.make(connection, secret: draft.secret, transport: transport(connection.pin))
             if let unifi = reader as? UniFiConsole, let site = try await unifi.chosenSite() { connection.site = site.id.isEmpty ? nil : site.id; connection.siteName = site.reference }
             var poll = try await reader.poll()
@@ -205,7 +216,7 @@ public struct RouterDraft: Sendable, Equatable {
                 return .failed(String(localized: "The home network changed while connecting. Connect the router again on its home network.", comment: "Router connection error"))
             }
             connection.model = poll.model; connection.firmware = poll.firmware
-            guard secrets.set(draft.secret, for: connection.id) else {
+            guard draft.kind == .upnp || secrets.set(draft.secret, for: connection.id) else {
                 phase = .failed(String(localized: "Kilobat couldn’t save the password in the Keychain.", comment: "Router connection error"))
                 return .failed(String(localized: "Kilobat couldn’t save the password in the Keychain.", comment: "Router connection error"))
             }
@@ -236,6 +247,11 @@ public struct RouterDraft: Sendable, Equatable {
         }
     }
 
+    /// A router found sharing UPnP's counters: nothing to enter, so no sheet.
+    public func connectUPnP(_ found: RouterDetect.Found) async -> Outcome {
+        await connect(RouterDraft(kind: .upnp, entered: found.url, secret: "", model: found.model))
+    }
+
     /// FRITZ! recommends TR-064 over HTTPS on the port GetSecurityPort names; plain HTTP only if the box offers none.
     static func fritzSecure(_ url: URL, transport: RouterTransport) async -> URL {
         let box = FritzBox(base: url, user: "", password: "", transport: transport)
@@ -246,9 +262,11 @@ public struct RouterDraft: Sendable, Equatable {
 
     public func disconnect(network: String? = nil) {
         guard let key = network ?? self.network()?.key, let connection = connection(for: key) else { return }
+        var remaining = book
+        remaining.routers.removeAll { $0.id == connection.id }
+        guard saveBook(remaining) else { return }
+        book = remaining
         secrets.remove(connection.id)
-        book.routers.removeAll { $0.id == connection.id }
-        saveBook()
         if reader?.id == connection.id || phaseConnection == connection.id { reader = nil; clearMeasurements(); phaseConnection = nil; phase = .idle }
     }
 
@@ -260,15 +278,29 @@ public struct RouterDraft: Sendable, Equatable {
 
     // MARK: Polling
 
-    public func need(_ need: Need, _ on: Bool) {
-        if on { needs.insert(need) } else { needs.remove(need) }
+    public func need(_ need: Need, _ on: Bool, consumer: UUID? = nil) {
+        if let consumer {
+            if on { consumerNeeds[need, default: []].insert(consumer) }
+            else { consumerNeeds[need]?.remove(consumer) }
+        } else if on { needs.insert(need) }
+        else { needs.remove(need) }
         if on, lastPoll < Date().addingTimeInterval(-Self.fast) { Task { await tick() } }
     }
 
     public var interval: TimeInterval {
-        if needs.contains(.call) { return Self.call }
-        if !needs.isEmpty { return Self.fast }
-        return current?.kind == .fritzbox ? Self.idleFritz : Self.idle
+        if needs.contains(.call) || consumerNeeds[.call]?.isEmpty == false { return Self.call }
+        if !needs.isEmpty || consumerNeeds.values.contains(where: { !$0.isEmpty }) { return Self.fast }
+        return Self.idleInterval(kind: current?.kind, wan: latest?.wan)
+    }
+
+    /// How often to read a router nobody is looking at. A 32-bit line counter is read at least as often as its line
+    /// could move half the counter's range; never faster than `fast`.
+    static func idleInterval(kind: RouterKind?, wan: RouterWAN?) -> TimeInterval {
+        let usual = kind == .fritzbox ? idleFritz : idle
+        let wraps = wan.map { $0.bits == 32 } ?? (kind == .fritzbox || kind == .upnp)
+        guard wraps else { return usual }
+        let capacity = [wan?.downMax, wan?.upMax].compactMap { $0 }.max()
+        return min(usual, max(fast, RouterMeter.wrapSafeInterval(capacity: capacity)))
     }
 
     public func start() {
@@ -305,7 +337,7 @@ public struct RouterDraft: Sendable, Equatable {
             else {
                 clearMeasurements()
                 phase = .connecting
-                guard let secret = secrets.secret(for: connection.id) else {
+                guard let secret = connection.kind == .upnp ? "" : secrets.secret(for: connection.id) else {
                     phase = .needsAttention(String(localized: "The router’s password isn’t in the Keychain any more. Connect the router again.", comment: "Router status")); return
                 }
                 reader = try RouterReaders.make(connection, secret: secret, transport: transport(connection.pin))
@@ -342,7 +374,10 @@ public struct RouterDraft: Sendable, Equatable {
         return RouterFirmware(product: "OpenWrt", installed: release.version, available: newer, updateAvailable: newer != nil, url: flash, source: "openwrt.org")
     }
 
+    private var lastRouterUptime: TimeInterval?
+
     private func clearMeasurements() {
+        lastRouterUptime = nil
         measuredConnection = nil; meter = RouterMeter(); latest = nil; rates = [:]; line = nil; firmware = nil
     }
 
@@ -350,6 +385,10 @@ public struct RouterDraft: Sendable, Equatable {
     public func ingest(_ poll: RouterPoll, connection: RouterConnection, calendar: Calendar = .current) {
         if measuredConnection != connection.id { clearMeasurements(); measuredConnection = connection.id }
         phaseConnection = connection.id
+        if let uptime = poll.uptime {
+            if let previous = lastRouterUptime, uptime < previous { meter = RouterMeter() }
+            lastRouterUptime = uptime
+        }
         var next: [String: HomeUsageMerge.Rate] = [:]
         for client in poll.clients {
             guard let mac = MACAddress.normalized(client.mac) else { continue }
@@ -364,7 +403,7 @@ public struct RouterDraft: Sendable, Equatable {
         rates = next
         var lineRate: HomeUsageMerge.Rate?
         if let wan = poll.wan {
-            if let down = wan.down, let up = wan.up, let step = meter.step(HomeUsageLedger.home, down: down, up: up, at: poll.date, bits: wan.bits) {
+            if let down = wan.down, let up = wan.up, let step = meter.step(HomeUsageLedger.home, down: down, up: up, at: poll.date, bits: wan.bits, downMax: wan.downMax, upMax: wan.upMax) {
                 ledger.add(HomeUsageLedger.home, down: step.down, up: step.up, at: poll.date, calendar: calendar, network: connection.network)
                 lineRate = .init(down: step.downRate, up: step.upRate)
             }
@@ -402,7 +441,7 @@ public struct RouterDraft: Sendable, Equatable {
         let poll = measuredConnection == connection.id ? latest : nil
         let router = HomeUsageReport.Router(kind: connection.kind, name: connection.model ?? connection.kind.name, model: connection.model, firmware: connection.firmware,
                                             address: connection.base?.host ?? connection.url, measures: poll?.perDevice == true ? "perDevice" : "wholeHome",
-                                            uptimeSeconds: poll?.uptime.map { $0 + now.timeIntervalSince(poll!.date) }, missing: poll?.missing ?? [], firmware: poll?.update)
+                                            uptimeSeconds: poll?.uptime.map { $0 + now.timeIntervalSince(poll!.date) }, missing: poll?.missing ?? [], firmware: poll?.update, dsl: poll?.dsl)
         let note = HomeUsageReport.note(kind: connection.kind, perDevice: poll?.perDevice ?? false, missing: poll?.missing ?? [])
         guard network.home else { return HomeUsageReport(state: .notHome, network: network.name, router: router, note: note, pro: pro) }
         guard pro else { return HomeUsageReport(state: .needsPro, network: network.name, router: router, note: note, pro: pro) }
@@ -456,18 +495,22 @@ public struct RouterDraft: Sendable, Equatable {
         Task {
             let found = await RouterDetect.detect(gateway: gateway, vendor: vendor)
             detecting.remove(network.key)
-            if let found { detected[network.key] = found; onDetected?(network.key, found.kind) }
+            if let found {
+                detected[network.key] = found
+                // "Other router" names no maker for the firmware reminder.
+                if found.kind != .upnp { onDetected?(network.key, found.kind) }
+            }
         }
     }
 
     // MARK: Files
 
-    @discardableResult private func saveBook() -> Bool {
+    @discardableResult private func saveBook(_ candidate: Book? = nil) -> Bool {
         guard let folder else { return true }
         do {
             let url = folder.appendingPathComponent(Self.bookFile)
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(book).write(to: url, options: .atomic)
+            try encoder.encode(candidate ?? book).write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             persistenceError = nil
             return true

@@ -402,13 +402,13 @@ public struct HouseholdPairing: Sendable {
 /// `kilobat household`: paired Macs and what each is doing now. Pairing happens in the app, where both people can see the code.
 public enum HouseholdCommand: Equatable, Sendable {
     case list(json: Bool)
-    public static let usage = "Use household [--json]. Pairing, sharing and unpairing are in the app: Kilobat › Settings › Household Macs."
+    public static let usage = "Use household [--json]. Pairing, sharing and unpairing are in the app: Kilobat › Settings › Calls, streaming & Awake › Household Macs."
 
     /// `args` starts with "household".
     public static func parse(_ args: [String]) throws -> HouseholdCommand {
         let rest = Array(args.dropFirst())
         if let word = rest.first(where: { ["pair", "unpair", "share", "sharing", "name", "rename"].contains($0.lowercased()) }) {
-            throw DiagnosticError("Kilobat pairs Macs only in the app, where both Macs show the code to compare: open Kilobat › Settings › Household Macs (\(word) isn't a CLI command).")
+            throw DiagnosticError("Kilobat pairs Macs only in the app, where both Macs show the code to compare: open Kilobat › Settings › Calls, streaming & Awake › Household Macs (\(word) isn't a CLI command).")
         }
         guard rest.allSatisfy({ $0 == "--json" }) else { throw DiagnosticError(usage) }
         return .list(json: rest.contains("--json"))

@@ -125,6 +125,10 @@ public struct AgentHostSummary: Codable, Equatable, Identifiable, Sendable {
     public var blockedBy: String? = nil
     public var id: String { process + "|" + host + "|" + port + "|" + transport }
     public var flagged: Bool { !flags.isEmpty }
+    public var needsReview: Bool {
+        flags.contains(.blocked) || flags.contains(.largeUpload)
+            || (sent > 0 && flags.contains(.shareOrTunnel))
+    }
     public var notes: String {
         flags.map { flag in
             switch flag {
@@ -159,11 +163,18 @@ public struct AgentLogEntry: Codable, Equatable, Identifiable, Sendable {
     /// By process, then by bytes sent.
     public var hosts: [AgentHostSummary]
 
+    public var reviewCount: Int { Set(hosts.filter(\.needsReview).map { $0.host.lowercased() }).count }
+
     public var title: String { agent + (project.map { " · " + $0 } ?? "") }
-    /// "Claude Code · 14 hosts · 2.1 MB up".
-    public var line: String {
-        let count = hostCount == 1 ? String(localized: "1 host") : String(localized: "\(hostCount) hosts")
-        return [agent, count, String(localized: "\(TrafficFormat.bytes(sent)) up", comment: "Bytes sent, e.g. 2.1 MB up")].joined(separator: " · ")
+    /// "Claude Code · 14 hosts · 2.1 MB sent since it started": every byte since the agent started, local ones and other
+    /// networks included, so it says so beside the Upload card's Internet bytes on this network.
+    public var line: String { [agent, hostsLine, sentLine].joined(separator: " · ") }
+    public var hostsLine: String { hostCount == 1 ? String(localized: "1 host") : String(localized: "\(hostCount) hosts") }
+    /// "2.1 MB since start", beside an upload arrow.
+    public var sinceStart: String { String(localized: "\(TrafficFormat.bytes(sent)) since start", comment: "Beside an upload arrow: what an agent has sent since it started, such as 2.1 MB since start") }
+    /// "2.1 MB sent since it started", which a narrow line keeps when it drops the host count.
+    public var sentLine: String {
+        String(localized: "\(TrafficFormat.bytes(sent)) sent since it started", comment: "An agent's bytes sent since it started, such as 2.1 MB sent since it started")
     }
     /// Processes in the order the table shows them: the one that sent most first.
     public var processes: [(process: String, hosts: [AgentHostSummary])] {
@@ -284,12 +295,15 @@ public enum AgentNetworkLog {
     }
 
     /// The session as a Markdown table, for an issue, a review or a chat.
-    public static func markdown(_ entry: AgentLogEntry, onlyFlagged: Bool = false) -> String {
-        let hosts = onlyFlagged ? entry.hosts.filter(\.flagged) : entry.hosts
+    public static func markdown(_ entry: AgentLogEntry, onlyFlagged: Bool = false, onlyReview: Bool = false) -> String {
+        let hosts = entry.hosts.filter { onlyReview ? $0.needsReview : !onlyFlagged || $0.flagged }
         let when = entry.start.formatted(date: .abbreviated, time: .shortened) + " – " + (entry.end.map { $0.formatted(date: .omitted, time: .shortened) } ?? String(localized: "running"))
         var lines = ["## " + entry.title, "",
                      "\(when) · \(entry.hostCount == 1 ? String(localized: "1 host") : String(localized: "\(entry.hostCount) hosts")) · ↑ \(TrafficFormat.bytes(entry.sent)) ↓ \(TrafficFormat.bytes(entry.received))", ""]
-        if hosts.isEmpty { lines.append(onlyFlagged ? String(localized: "Nothing flagged.") : String(localized: "No connections recorded.")) }
+        if hosts.isEmpty {
+            if onlyReview { lines.append(String(localized: "Nothing to review in this session.")) }
+            else { lines.append(onlyFlagged ? String(localized: "Nothing flagged.") : String(localized: "No connections recorded.")) }
+        }
         else {
             lines += ["| " + [String(localized: "Process"), String(localized: "Host"), String(localized: "Port"), String(localized: "Sent"), String(localized: "Received"), String(localized: "Connections"), String(localized: "Notes")].joined(separator: " | ") + " |",
                       "|---|---|---|--:|--:|--:|---|"]

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Observation
 @testable import KilobatCore
 
 /// A made-up process table the tests change between polls: who is whose parent, names, paths and arguments.
@@ -176,6 +177,29 @@ struct AgentProcessTreeTests {
         return (table, store)
     }
 
+    private final class Flag: @unchecked Sendable { var raised = false }
+
+    @Test func hiddenViewsAreToldOnlyOnceSomeoneCanSee() {
+        let (table, store) = setup()
+        var hidden = true
+        store.viewsAreHidden = { hidden }
+        let t0 = table.origin
+        func sample(_ at: Double, received: UInt64) -> TrafficSnapshot {
+            TrafficSnapshot(timestamp: t0 + at, processes: [process(102, "npm", [connection("104.16.5.34", received: received, sent: 10_000)])])
+        }
+        store.consume(sample(0, received: 5_000_000))
+        let told = Flag()
+        withObservationTracking { _ = store.sessions } onChange: { told.raised = true }
+        store.consume(sample(1, received: 7_000_000))
+        // Recorded all the same; the views just weren't told.
+        #expect(!told.raised)
+        #expect(store.report.first?.hosts.first?.received == 2_000_000)
+        hidden = false
+        // No new traffic this time, and they still catch up.
+        store.consume(sample(2, received: 7_000_000))
+        #expect(told.raised)
+    }
+
     @Test func firstSightingIsABaselineThenOnlyDeltasCount() {
         let (table, store) = setup()
         let t0 = table.origin
@@ -257,6 +281,26 @@ struct AgentProcessTreeTests {
         #expect(store.sessions.isEmpty && store.pastHosts.isEmpty)
         #expect(AgentLogFile.load(directory.appendingPathComponent("agent-network-log.json"))?.sessions.isEmpty == true)
     }
+
+    @Test func anEraseIsNotUndoneByASaveAlreadyQueued() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-agentlog-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let now = Date()
+        var old = AgentNetworkSession(key: "1@1", agent: AgentIdentity(id: "codex", name: "Codex"), pid: 1, start: now - 40 * 86_400)
+        old.end = now - 31 * 86_400
+        old.hosts = [AgentHostRecord(process: "codex", address: "203.0.113.9", port: "443", transport: "TCP", host: "example.org", nameSource: "filter", first: old.start, last: old.start, sent: 1, received: 1, connections: 1)]
+        var recent = old; recent.id = UUID(); recent.key = "2@2"; recent.start = now - 86_400; recent.end = now - 80_000
+        let url = directory.appendingPathComponent("agent-network-log.json")
+        try AgentLogFile(recording: true, updated: now, sessions: [old, recent]).data().write(to: url)
+        let store = AgentNetworkLogStore(directory: directory, tree: AgentProcessTree(source: FakeTable().source))
+        store.persist(now: Date().addingTimeInterval(60))
+        try store.erase(.clear(.all))
+        store.waitForWrites()
+        let loaded = AgentLogFile.load(url)
+        #expect(loaded?.sessions.allSatisfy { $0.hosts.isEmpty } == true)
+        #expect(loaded?.pastHosts.isEmpty == true)
+    }
 }
 
 struct AgentHostFlagTests {
@@ -289,6 +333,24 @@ struct AgentHostFlagTests {
         #expect(flags["server-1.example.cloudfront.net"] == [.newHost, .addressOnly])
         #expect(flags["abc.trycloudflare.com"] == [.newHost, .shareOrTunnel])
         #expect(report[0].hosts.first { $0.host == "abc.trycloudflare.com" }?.notes == "first time, tunnel")
+    }
+
+    @Test func reviewCountSkipsRoutineHostsAndDeduplicatesUploads() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let entry = AgentNetworkLog.report([session("codex", start: start, [
+            record("node", nil, address: "198.51.100.200"),
+            record("curl", "first-seen.example.org"),
+            record("curl", "read.trycloudflare.com", sent: 0),
+            record("node", "upload.example.org", sent: 6_000_000),
+            record("curl", "upload.example.org", sent: 6_000_000),
+            record("curl", "send.trycloudflare.com", sent: 4_000)
+        ])])[0]
+        #expect(entry.reviewCount == 2)
+        #expect(Set(entry.hosts.filter(\.needsReview).map(\.host)) == ["upload.example.org", "send.trycloudflare.com"])
+        #expect(entry.flaggedCount > entry.reviewCount)
+        let review = AgentNetworkLog.markdown(entry, onlyReview: true)
+        #expect(review.contains("upload.example.org") && review.contains("send.trycloudflare.com"))
+        #expect(!review.contains("first-seen.example.org") && !review.contains("read.trycloudflare.com"))
     }
 
     @Test func aHostIsNewOnlyTheFirstTime() {

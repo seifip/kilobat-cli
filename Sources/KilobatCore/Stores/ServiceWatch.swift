@@ -219,14 +219,17 @@ public enum ConnectionStates {
     }
 
     /// Problems right now among what was checked, worst first. Nothing when all is fine.
-    public func problems(now: Date = Date()) -> [ServiceStatus] {
+    public func problems(now: Date = Date()) -> [ServiceStatus] { ServiceStatus.oneRowPerIncident(allProblems(now: now)) }
+
+    /// Every service with a problem, before one incident's services are folded into one row: what gets checked again.
+    private func allProblems(now: Date) -> [ServiceStatus] {
         statuses.values.filter { $0.problem && now.timeIntervalSince($0.checked) < Self.listedFor }
             .sorted { $0.state != $1.state ? $0.state > $1.state : $0.service < $1.service }
     }
 
     /// Asks again about listed problems older than the cache, so a resolved outage drops off when it's looked at.
     public func refreshProblems(now: Date = Date()) async {
-        let stale = problems(now: now).filter { now.timeIntervalSince($0.checked) >= ServiceStatusChecker.freshFor }
+        let stale = allProblems(now: now).filter { now.timeIntervalSince($0.checked) >= ServiceStatusChecker.freshFor }
         let services = ServiceCatalog.services.filter { service in stale.contains { $0.id == service.id } }
         await check(services)
     }

@@ -21,6 +21,11 @@ enum RouterFixtures {
         return "<?xml version=\"1.0\"?>\n<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>\n<u:\(action)Response xmlns:u=\"\(service)\">\n\(body)\n</u:\(action)Response>\n</s:Body> </s:Envelope>"
     }
 
+    // FRITZ! "TR-064 Support - WANDSLInterfaceConfig", version 9.
+    static let dslInfo = soap("X_AVM-DE_GetDSLInfo", "urn:dslforum-org:service:WANDSLInterfaceConfig:1", [
+        ("NewDownstreamCurrRate", "98200"), ("NewUpstreamCurrRate", "36100"), ("NewDownstreamNoiseMargin", "81"), ("NewUpstreamNoiseMargin", "64"), ("NewCRCErrors", "12")])
+    static let dslDiagnose = soap("X_AVM-DE_GetDSLDiagnoseInfo", "urn:dslforum-org:service:WANDSLInterfaceConfig:1", [
+        ("NewX_AVM-DE_DSLDigagnoseState", "NONE"), ("NewX_AVM-DE_CableNokDistance", "-1"), ("NewX_AVM-DE_DSLActive", "1"), ("NewX_AVM-DE_DSLSync", "1")])
     static let securityPort = soap("GetSecurityPort", "urn:dslforum-org:service:DeviceInfo:1", [("NewSecurityPort", "49443")])
     static let getInfo = soap("GetInfo", "urn:dslforum-org:service:DeviceInfo:1", [
         ("NewManufacturerName", "AVM"), ("NewManufacturerOUI", "00040E"), ("NewModelName", "FRITZ!Box 7590"), ("NewDescription", "FRITZ!Box 7590 154.08.00"),

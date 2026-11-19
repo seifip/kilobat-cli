@@ -226,7 +226,7 @@ struct RuleInspectorTests {
         context.names["process:curl"] = nil
         let result = inspector({ $0.profile = .travel; $0.autoHotspot = true; $0.rules["Travel"] = [slack: false] }, metered: true, context: context)
             .inspect(host: "slack.com", app: slack)
-        #expect(result.summary == "Blocked by App rule: Slack is blocked in Travel, which Kilobat switched to for this metered network")
+        #expect(result.summary == "Blocked by App rule: Slack is blocked in Essentials, which Kilobat switched to for this metered network")
         #expect(result.decided?.change.command == "kilobat reset \(slack) --profile travel")
         #expect(result.note?.contains("filter is off") == true)
         // An app Kilobat has no name for shows as its process.
@@ -271,4 +271,12 @@ struct RuleInspectorTests {
             .inspect(host: "example.org", app: "com.apple.Safari", appleSigned: true)
         #expect(verified.verdict == .allow && verified.decided?.rule == "appleSoftware")
     }
+}
+
+@Test func essentialsIsTravelUnderItsNewName() {
+    // Rules and preferences keep the stored name; people and agents can type either.
+    #expect(NetworkProfile.travel.rawValue == "Travel")
+    #expect(NetworkProfile.named("essentials") == .travel && NetworkProfile.named("Travel") == .travel && NetworkProfile.named("work") == .work)
+    #expect(NetworkProfile.named("home") == nil)
+    #expect(NetworkProfile.travel.cliName == "essentials" && NetworkProfile.unrestricted.cliName == "unrestricted")
 }

@@ -16,8 +16,20 @@ public enum RouterReaders {
                                 site: connection.site, siteName: connection.siteName, transport: transport)
         case .mikrotik: return RouterOSREST(base: base, user: connection.user ?? "", password: secret, transport: transport)
         case .openwrt: return OpenWrtUbus(base: base, user: connection.user ?? "root", password: secret, transport: transport)
-        case .upnp: throw RouterAPIError.unexpected("UPnP needs no sign-in")
+        case .upnp: return UPnPRouter(controlURL: connection.url, model: connection.model)
         }
+    }
+}
+
+/// Any other router that shares UPnP's standard traffic counters: no account, whole home only, nothing changed.
+public struct UPnPRouter: RouterReader {
+    let controlURL: String
+    let model: String?
+    var read: @Sendable (String) async throws -> RouterReading = { try await RouterCounters.read(controlURL: $0) }
+
+    public func poll() async throws -> RouterPoll {
+        let reading = try await read(controlURL)
+        return RouterPoll(date: reading.date, clients: [], wan: RouterWAN(down: reading.received, up: reading.sent, bits: 32), model: model, perDevice: false)
     }
 }
 
@@ -33,7 +45,8 @@ public actor FritzBox: RouterReader {
     public static let deviceInfo = "urn:dslforum-org:service:DeviceInfo:1"
     public static let hosts = "urn:dslforum-org:service:Hosts:1"
     public static let wan = "urn:dslforum-org:service:WANCommonInterfaceConfig:1"
-    static let defaultControls = [deviceInfo: "/upnp/control/deviceinfo", hosts: "/upnp/control/hosts", wan: "/upnp/control/wancommonifconfig1",
+    public static let dsl = "urn:dslforum-org:service:WANDSLInterfaceConfig:1"
+    static let defaultControls = [deviceInfo: "/upnp/control/deviceinfo", hosts: "/upnp/control/hosts", wan: "/upnp/control/wancommonifconfig1", dsl: "/upnp/control/wandslifconfig1",
                                   "urn:dslforum-org:service:UserInterface:1": "/upnp/control/userif"]
     /// GetGenericHostEntry one by one is slow; past this many the list is cut.
     static let maxHosts = 200
@@ -64,12 +77,22 @@ public actor FritzBox: RouterReader {
         catch RouterAPIError.unexpected { clients = try await genericHosts() }
         let received = try await optional(Self.wan, "GetTotalBytesReceived")?["NewTotalBytesReceived"].flatMap { UInt64($0) }
         let sent = try await optional(Self.wan, "GetTotalBytesSent")?["NewTotalBytesSent"].flatMap { UInt64($0) }
-        var rates = try await optional(Self.wan, "X_AVM-DE_GetOnlineMonitor", [("NewSyncGroupIndex", "0")]).map(TR064.monitorRates)
-        if rates?.down == nil { rates = try await optional(Self.wan, "GetCommonLinkProperties").map(TR064.utilization) }
-        let wan = RouterWAN(down: received, up: sent, downRate: rates?.down, upRate: rates?.up, bits: 32)
+        let monitor = try await optional(Self.wan, "X_AVM-DE_GetOnlineMonitor", [("NewSyncGroupIndex", "0")])
+        var rates = monitor.map(TR064.monitorRates), maxima = monitor.map(TR064.monitorMax)
+        if rates?.down == nil {
+            let link = try await optional(Self.wan, "GetCommonLinkProperties")
+            rates = link.map(TR064.utilization)
+            if maxima?.down == nil { maxima = link.map(TR064.linkMax) }
+        }
+        let wan = RouterWAN(down: received, up: sent, downRate: rates?.down, upRate: rates?.up, bits: 32, downMax: maxima?.down, upMax: maxima?.up)
         var poll = RouterPoll(clients: clients, wan: wan, uptime: info?["NewUpTime"].flatMap { Double($0) },
                               model: info?["NewModelName"], firmware: info?["NewSoftwareVersion"], perDevice: false, missing: limited ? ["rights"] : [])
         poll.update = try await firmware(installed: info?["NewSoftwareVersion"])
+        poll.dsl = try await optional(Self.dsl, "X_AVM-DE_GetDSLInfo").flatMap(RouterDSLLine.init(info:))
+        if let metres = try await optional(Self.dsl, "X_AVM-DE_GetDSLDiagnoseInfo").flatMap(RouterDSLLine.cableFault) {
+            poll.dsl = poll.dsl ?? RouterDSLLine(downKbps: 0, upKbps: 0)
+            poll.dsl?.cableFaultMeters = metres
+        }
         return poll
     }
 
@@ -245,6 +268,14 @@ public enum TR064 {
     /// The online monitor's newest values, bytes a second. Each is a comma-separated list, newest first.
     static func monitorRates(_ values: [String: String]) -> (down: Double?, up: Double?) {
         (first(values["Newds_current_bps"]), first(values["Newus_current_bps"]))
+    }
+    /// The online monitor's line maximum, bytes a second.
+    static func monitorMax(_ values: [String: String]) -> (down: Double?, up: Double?) {
+        (values["Newmax_ds"].flatMap { Double($0) }, values["Newmax_us"].flatMap { Double($0) })
+    }
+    /// GetCommonLinkProperties' maximum bit rates, as bytes a second.
+    static func linkMax(_ values: [String: String]) -> (down: Double?, up: Double?) {
+        (values["NewLayer1DownstreamMaxBitRate"].flatMap { Double($0) }.map { $0 / 8 }, values["NewLayer1UpstreamMaxBitRate"].flatMap { Double($0) }.map { $0 / 8 })
     }
     /// GetCommonLinkProperties' utilization lists, which any right may read.
     static func utilization(_ values: [String: String]) -> (down: Double?, up: Double?) {

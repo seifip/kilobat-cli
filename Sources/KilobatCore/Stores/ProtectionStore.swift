@@ -3,7 +3,8 @@ import Observation
 
 /// One list Protection can download. Lists are fetched on this Mac from their own sites, never bundled with Kilobat.
 public struct ProtectionList: Sendable, Identifiable, Equatable {
-    public enum Group: String, Sendable { case threats, trackers }
+    /// Subscriptions are the person's own lists, added by URL.
+    public enum Group: String, Sendable { case threats, trackers, subscriptions }
     public let id: String
     public let name: String
     public let url: URL
@@ -15,7 +16,7 @@ public struct ProtectionList: Sendable, Identifiable, Equatable {
     public let minimum: Int
 }
 
-/// The lists, checked on 2026-11-01.
+/// The lists, checked on 2026-11-01 (see Release/RESEARCH-DECISIONS.md).
 public enum ProtectionLists {
     private static func list(_ id: String, _ name: String, _ url: String, _ homepage: String, _ licence: String, _ category: ProtectionCategory,
                              _ group: ProtectionList.Group, minimum: Int) -> ProtectionList {
@@ -42,6 +43,78 @@ public enum ProtectionLists {
     public static let defaultTracker = "hagezi-light"
     public static var all: [ProtectionList] { threats + trackers }
     public static func tracker(_ id: String?) -> ProtectionList { trackers.first { $0.id == id } ?? trackers[0] }
+}
+
+/// A blocklist the person subscribed to by its HTTPS address: a hosts file or a plain list of domains (Adblock lines
+/// other than `||domain^` are skipped). It is downloaded and checked daily like Protection's lists, compiled into the
+/// same index, and blocks for every app. None by default.
+public struct BlocklistSubscription: Codable, Equatable, Sendable, Identifiable {
+    public var id: String
+    public var name: String
+    public var url: String
+    /// Nil is on.
+    public var enabled: Bool?
+    public var added: Date?
+    public init(name: String, url: String, id: String = "sub-" + UUID().uuidString.prefix(8).lowercased(), enabled: Bool? = nil, added: Date? = Date()) {
+        self.id = id; self.name = name; self.url = url; self.enabled = enabled; self.added = added
+    }
+    public var on: Bool { enabled != false }
+    /// As the updater and the index take it.
+    public var list: ProtectionList? {
+        guard let address = Self.validURL(url) else { return nil }
+        return ProtectionList(id: id, name: name, url: address, homepage: address, licence: String(localized: "Your subscription; terms are the publisher’s", comment: "Protection: the licence line of a blocklist the person added"),
+                              category: .blocklist, group: .subscriptions, minimum: 1)
+    }
+
+    /// At most this many. Each is one slot of the index's 255.
+    public static let maximumCount = 8
+    /// A download larger than this is refused and the last good copy kept. Big community lists (StevenBlack's unified
+    /// hosts, OISD big, HaGeZi Pro) are 3–8 MB.
+    public static let maximumBytes = 16 << 20
+    /// More entries than this is refused: 8 bytes each in the mapped index, so eight full lists add 32 MB at most.
+    public static let maximumEntries = 500_000
+
+    /// HTTPS with a host, and no user name or password in it; nil otherwise.
+    public static func validURL(_ raw: String) -> URL? {
+        guard let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), url.scheme?.lowercased() == "https",
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+
+    public enum Failure: Error, Equatable, LocalizedError {
+        case invalidURL, duplicate, tooMany
+        public var errorDescription: String? {
+            switch self {
+            case .invalidURL: String(localized: "Use the list’s https:// address.", comment: "Blocklist subscription error")
+            case .duplicate: String(localized: "You already subscribe to this list.", comment: "Blocklist subscription error")
+            case .tooMany: String(localized: "You can subscribe to at most \(BlocklistSubscription.maximumCount) lists.", comment: "Blocklist subscription error")
+            }
+        }
+    }
+
+    /// Adds a subscription; without a name it is called after the list's host.
+    @discardableResult public static func add(name: String?, url raw: String, to preferences: inout SavedPreferences, now: Date = Date()) throws -> BlocklistSubscription {
+        guard let url = validURL(raw) else { throw Failure.invalidURL }
+        var subscriptions = preferences.blocklistSubscriptions ?? []
+        guard !subscriptions.contains(where: { $0.url == url.absoluteString }) else { throw Failure.duplicate }
+        guard subscriptions.count < maximumCount else { throw Failure.tooMany }
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let subscription = BlocklistSubscription(name: trimmed.isEmpty ? (url.host ?? url.absoluteString) : String(trimmed.prefix(60)), url: url.absoluteString, added: now)
+        subscriptions.append(subscription)
+        preferences.blocklistSubscriptions = subscriptions
+        return subscription
+    }
+    @discardableResult public static func remove(_ id: String, from preferences: inout SavedPreferences) -> Bool {
+        guard var subscriptions = preferences.blocklistSubscriptions, let at = subscriptions.firstIndex(where: { $0.id == id }) else { return false }
+        subscriptions.remove(at: at)
+        preferences.blocklistSubscriptions = subscriptions.isEmpty ? nil : subscriptions
+        return true
+    }
+    @discardableResult public static func set(_ id: String, on: Bool, in preferences: inout SavedPreferences) -> Bool {
+        guard let at = preferences.blocklistSubscriptions?.firstIndex(where: { $0.id == id }) else { return false }
+        preferences.blocklistSubscriptions?[at].enabled = on ? nil : false
+        return true
+    }
 }
 
 /// Hosts, domains-only and AdBlock (`||domain^`) lists, with comments. Hosts files are matched like domain lists:
@@ -111,6 +184,8 @@ public struct ProtectionListState: Codable, Equatable, Sendable {
     public var bytes: Int = 0
     /// Why the last check failed; the copy from `updated` is still used.
     public var error: String?
+    /// Lines the last good copy held that Kilobat can't use (Adblock rules beyond `||domain^`, paths); subscriptions only.
+    public var skipped: Int?
     public init() {}
 }
 
@@ -176,6 +251,7 @@ public struct ProtectionUpdater: Sendable {
                     let http = response as? HTTPURLResponse
                     entry.etag = http?.value(forHTTPHeaderField: "ETag"); entry.lastModified = http?.value(forHTTPHeaderField: "Last-Modified")
                     entry.updated = now; entry.entries = parsed.count; entry.bytes = data.count; entry.error = nil
+                    entry.skipped = list.group == .subscriptions ? parsed.skipped : nil
                 } else { entry.error = "HTTP \(status)" }
             } catch let failure as Failure { entry.error = failure.message }
             catch { entry.error = error.localizedDescription }
@@ -189,6 +265,7 @@ public struct ProtectionUpdater: Sendable {
 
     /// A sane size, parseable, and not a sudden collapse: at least the list's minimum and half its last count.
     public static func validate(_ data: Data, list: ProtectionList, previous: Int) throws -> BlocklistParser.Parsed {
+        if list.group == .subscriptions { return try validateSubscription(data, previous: previous) }
         guard data.count <= maximumBytes else { throw Failure(message: "larger than 64 MB") }
         guard !data.isEmpty else { throw Failure(message: "empty download") }
         let parsed = BlocklistParser.parse(String(decoding: data, as: UTF8.self))
@@ -196,6 +273,28 @@ public struct ProtectionUpdater: Sendable {
         guard previous == 0 || parsed.count * 2 >= previous else { throw Failure(message: "\(parsed.count) entries, down from \(previous)") }
         guard parsed.skipped <= max(1_000, parsed.count / 10) else { throw Failure(message: "\(parsed.skipped) lines that aren't domains") }
         return parsed
+    }
+
+    /// A list the person added: any size of real list up to the caps, Adblock lines it can't use skipped rather than
+    /// refused, but never an empty page, a web page instead of a list, or a sudden collapse.
+    static func validateSubscription(_ data: Data, previous: Int) throws -> BlocklistParser.Parsed {
+        guard data.count <= BlocklistSubscription.maximumBytes else { throw Failure(message: "larger than \(BlocklistSubscription.maximumBytes >> 20) MB") }
+        guard !data.isEmpty else { throw Failure(message: "empty download") }
+        let text = String(decoding: data.prefix(2_048), as: UTF8.self).lowercased()
+        guard !text.contains("<html"), !text.contains("<!doctype") else { throw Failure(message: "a web page, not a list") }
+        let parsed = BlocklistParser.parse(String(decoding: data, as: UTF8.self))
+        guard parsed.count > 0 else { throw Failure(message: "no domains or addresses in it") }
+        guard parsed.count <= BlocklistSubscription.maximumEntries else { throw Failure(message: "\(parsed.count) entries, more than \(BlocklistSubscription.maximumEntries)") }
+        guard previous < 100 || parsed.count * 2 >= previous else { throw Failure(message: "\(parsed.count) entries, down from \(previous)") }
+        return parsed
+    }
+
+    /// Deletes a list's downloaded copy and what was kept about it: for a subscription that was removed.
+    public func forget(_ id: String) {
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(id + ".txt"))
+        var state = loadState()
+        guard state.lists.removeValue(forKey: id) != nil else { return }
+        save(state)
     }
 
     /// Compiles the downloaded lists (and the hosts agents already used) into the index, written next to them.
@@ -232,11 +331,17 @@ public enum ProtectionPreferences {
     public static func lists(_ preferences: SavedPreferences, pro: Bool) -> [ProtectionList] {
         (threats(preferences, pro: pro) || agentGuard(preferences, pro: pro) ? ProtectionLists.threats : [])
             + (trackers(preferences) ? [ProtectionLists.tracker(preferences.trackerList)] : [])
+            + subscriptions(preferences)
+    }
+    /// The blocklists subscribed to by URL that are on. Free, like the tracker lists: a list anyone can download.
+    public static func subscriptions(_ preferences: SavedPreferences) -> [ProtectionList] {
+        (preferences.blocklistSubscriptions ?? []).filter(\.on).prefix(BlocklistSubscription.maximumCount).compactMap(\.list)
     }
     public static func settings(_ preferences: SavedPreferences, pro: Bool, digest: String? = nil) -> ProtectionSettings {
         ProtectionSettings(threats: threats(preferences, pro: pro), trackers: trackers(preferences), agentGuard: agentGuard(preferences, pro: pro),
                            uploadLimit: UInt64(max(1, min(10_000, preferences.agentGuardUploadMB ?? 10))) * 1_000_000,
-                           allowed: (preferences.allowedSites ?? []).compactMap(HostName.normalize), digest: digest)
+                           allowed: (preferences.allowedSites ?? []).compactMap(HostName.normalize), digest: digest,
+                           blocklists: !subscriptions(preferences).isEmpty)
     }
 
     /// "Allow this site" for a host or domain; returns the normalised name, or nil when it isn't one.
@@ -282,7 +387,7 @@ public struct ProtectionCheckResult: Codable, Equatable, Sendable {
         if let url = URL(string: text), let host = url.host, url.scheme != nil { text = host }
         guard let host = HostName.normalize(text) else { return nil }
         let local = HostName.isLocal(host, address: nil), allowed = settings.allows(host)
-        let match = index?.match(host: host, in: Set(ProtectionCategory.allCases).subtracting([.known]))
+        let match = index?.match(host: host, in: Set(ProtectionCategory.allCases).subtracting([.known, .blocklist]))
         let licences = Dictionary(ProtectionLists.all.map { ($0.id, $0.licence) }, uniquingKeysWith: { first, _ in first })
         let lists = match?.lists.map { Listing(list: $0.name, id: $0.id, category: $0.category.rawValue, licence: licences[$0.id]) } ?? []
         let flow = FilterPolicy.Flow(app: nil, process: "", host: host)
@@ -349,12 +454,12 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
             return List(id: list.id, name: list.name, category: list.category.rawValue, licence: list.licence, url: list.url.absoluteString,
                         entries: entry?.entries ?? 0, updated: entry?.updated, checked: entry?.checked, error: entry?.error)
         }
-        let threatIDs = Set(ProtectionLists.threats.map(\.id))
+        let threatIDs = Set(ProtectionLists.threats.map(\.id)), trackerIDs = Set(ProtectionLists.trackers.map(\.id))
         return ProtectionStatus(threats: preferences.protectThreats != false && pro != false, trackers: preferences.protectTrackers == true,
                                 agentGuard: preferences.agentGuard == true && pro != false, trackerList: ProtectionLists.tracker(preferences.trackerList).id,
                                 uploadLimitMB: preferences.agentGuardUploadMB ?? 10, pro: pro, filterActive: filterActive,
                                 threatEntries: rows.filter { threatIDs.contains($0.id) }.reduce(0) { $0 + $1.entries },
-                                trackerEntries: rows.filter { !threatIDs.contains($0.id) }.reduce(0) { $0 + $1.entries },
+                                trackerEntries: rows.filter { trackerIDs.contains($0.id) }.reduce(0) { $0 + $1.entries },
                                 updated: rows.compactMap(\.updated).min(), allowedSites: preferences.allowedSites ?? [], lists: rows)
     }
 }
@@ -400,6 +505,8 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
         return removed
     }
 
+    @ObservationIgnored private var indexedKnownHosts: Set<String>?
+
     /// Downloads what's due and rebuilds the index when a list changed, the lists in use changed, or the known hosts did.
     public func refresh(_ lists: [ProtectionList], known: [String], force: Bool = false) async {
         guard !updating, !lists.isEmpty else { return }
@@ -409,10 +516,13 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
         let next = await Task.detached(priority: .utility) { await updater.update(lists, force: force) }.value
         let ids = Set(lists.map(\.id))
         let built = index.map { Set($0.slots.map(\.id)).subtracting(["agent-known"]) }
-        let knownCount = index?.slots.first { $0.id == "agent-known" }?.entries ?? 0
+        let canonical = Set(known.compactMap(HostName.normalize))
         let changed = index == nil || built != ids || lists.contains { next.lists[$0.id]?.updated != before.lists[$0.id]?.updated }
-            || Set(known.compactMap(HostName.normalize)).count != knownCount
-        if changed { index = await Task.detached(priority: .utility) { updater.build(lists, known: known) }.value ?? index }
+            || canonical != indexedKnownHosts
+        if changed, let rebuilt = await Task.detached(priority: .utility, operation: { updater.build(lists, known: known) }).value {
+            index = rebuilt
+            indexedKnownHosts = canonical
+        }
         state = updater.loadState()
         updating = false
     }

@@ -199,6 +199,19 @@ struct HotspotThrottleTests {
         #expect(none.isEmpty)
     }
 
+    @Test func aSampleDeliveredTwiceCountsOnce() {
+        var meter = HotspotVideoMeter(), ended: [HotspotVideoSession] = []
+        func sample(_ second: Int, _ received: UInt64) -> TrafficSnapshot {
+            let connection = ConnectionTraffic(id: "tcp4 172.20.10.2:50000<->142.250.1.1:443", route: .internet, interface: "en0", received: received, sent: 1_000)
+            return TrafficSnapshot(timestamp: at(0, 20).addingTimeInterval(Double(second)), processes: [ProcessTraffic(pid: 77, process: "Safari", received: 0, sent: 0, connections: [connection])])
+        }
+        // The same run as videoMeterTimesBusySeconds, every sample delivered to the meter twice.
+        for second in 0...100 { for _ in 0..<2 { ended += meter.ingest(sample(second, UInt64(second) * 187_500)) { _, _ in "youtube" } } }
+        for second in 101...140 { for _ in 0..<2 { ended += meter.ingest(sample(second, 100 * 187_500)) { _, _ in "youtube" } } }
+        #expect(ended.count == 1)
+        #expect(abs((ended.first?.peakMbps ?? 0) - 1.5) < 0.01 && ended.first?.seconds == 100)
+    }
+
     @Test func videoServicesByHostAndNetwork() {
         #expect(ServiceSpeedCatalog.video(host: "rr3---sn-abc.googlevideo.com", reverse: nil, owner: nil) == "youtube")
         #expect(ServiceSpeedCatalog.video(host: nil, reverse: nil, owner: "netflix") == "netflix")
@@ -222,6 +235,12 @@ struct HotspotThrottleTests {
         #expect(Set(HotspotCarriers.all.map(\.id)).count == HotspotCarriers.all.count)
     }
 
+    @Test(.enabled(if: RepoFiles.has("site/src/content/hotspot-limits"))) func everyCarrierHasASitePage() throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let folder = repository.appendingPathComponent("site/src/content/hotspot-limits")
+        let pages = Set(try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".yaml") }.map { String($0.dropLast(5)) })
+        #expect(Set(HotspotCarriers.all.map(\.id)) == pages)
+    }
 
     @Test func pickedCarrierWinsOverTheLookup() {
         var log = HotspotLog()

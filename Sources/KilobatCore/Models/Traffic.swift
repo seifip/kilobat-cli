@@ -99,25 +99,6 @@ public struct UsageEntry: Codable, Identifiable {
     public var total: UInt64 { received + sent }
 }
 
-public enum NetworkProfile: String, Codable, CaseIterable, Identifiable, Sendable {
-    case travel = "Travel", work = "Work", unrestricted = "Unrestricted"
-    public var id: String { rawValue }
-    /// The name as shown; `rawValue` is what rules and preferences store.
-    public var title: String {
-        switch self { case .travel: String(localized: "Travel", comment: "Profile name"); case .work: String(localized: "Work", comment: "Profile name"); case .unrestricted: String(localized: "Unrestricted", comment: "Profile name") }
-    }
-    public var symbol: String {
-        switch self { case .travel: "suitcase.rolling"; case .work: "laptopcomputer"; case .unrestricted: "globe" }
-    }
-    public var subtitle: String {
-        switch self {
-        case .travel: String(localized: "Only the essentials. Save your mobile data.")
-        case .work: String(localized: "Keep your work flowing. Pause distractions.")
-        case .unrestricted: String(localized: "Monitor every app. Allow every connection.")
-        }
-    }
-}
-
 public struct NetworkSession: Codable, Sendable {
     public var name: String
     public var received: UInt64 = 0
@@ -126,8 +107,9 @@ public struct NetworkSession: Codable, Sendable {
     public var identified: Bool? = nil
     public var local: UInt64? = nil
     public var unattributed: UInt64? = nil
-    public init(name: String, received: UInt64 = 0, sent: UInt64 = 0, identified: Bool? = nil, local: UInt64? = nil, unattributed: UInt64? = nil) {
-        self.name = name; self.received = received; self.sent = sent; self.identified = identified; self.local = local; self.unattributed = unattributed
+    public var budgetSession: UUID? = nil
+    public init(name: String, received: UInt64 = 0, sent: UInt64 = 0, identified: Bool? = nil, local: UInt64? = nil, unattributed: UInt64? = nil, budgetSession: UUID? = nil) {
+        self.name = name; self.received = received; self.sent = sent; self.identified = identified; self.local = local; self.unattributed = unattributed; self.budgetSession = budgetSession
     }
 }
 
@@ -146,6 +128,7 @@ public struct SavedPreferences: Codable, Equatable {
     public var connectionRules: [ConnectionRule]? = nil
     public var temporaryRules: [String: TemporaryRule]? = nil
     public var networkProfiles: [String: String]? = nil
+    public var networkBudgetModes: [String: NetworkBudgetMode]? = nil
     public var networkLimits: [String: Double]? = nil
     public var trafficScope: String? = nil
     public var blockedDomains: [String]? = nil
@@ -156,6 +139,17 @@ public struct SavedPreferences: Codable, Equatable {
     /// The profile to restore when the metered network that switched to Travel goes away.
     public var autoProfileFrom: String? = nil
     public var profile: NetworkProfile = .travel
+    /// On disk only: the profile in use when it's one the person added. `profile` is then written as Work, so a copy of
+    /// Kilobat or its command line from before profiles of your own still reads the file instead of starting over.
+    public var customProfile: String? = nil
+    /// Names and icons the person gave the built-in profiles, and profiles they added. See `ProfileDefinition`.
+    public var profileDefinitions: [ProfileDefinition]? = nil
+    /// Weekly times to switch profile (Pro). See `ProfileScheduler`.
+    public var profileSchedules: [ProfileSchedule]? = nil
+    /// The schedule that switched the profile, and the profile it switched from.
+    public var profileScheduleState: ProfileScheduleState? = nil
+    /// Where apps sent and received data, per site per day (Pro); nil is off. See `DestinationHistory`.
+    public var destinationHistory: DestinationHistorySettings? = nil
     public var rules: [String: [String: Bool]] = [:]
     public var limitGB: Double = 5
     public var autoHotspot: Bool = true
@@ -166,16 +160,32 @@ public struct SavedPreferences: Codable, Equatable {
     public var askNewApps: Bool? = nil
     /// Apple-signed software connects without a rule when new apps are blocked or asked about.
     public var allowApple: Bool? = nil
-    /// The current network's budget cycle, kept per network in `networkCycles` like `limitGB` in `networkLimits`. Nil is a session budget.
+    /// Alert mode: apps without a rule connect (`defaultAllow` is true), and the filter lists them quietly for review.
+    /// Older copies of Kilobat that don't know it simply allow new apps.
+    public var alertNewApps: Bool? = nil
+    /// Apps (rule keys) that ask before reaching a destination their rules don't cover (Pro). Nil is none.
+    public var askDestinations: [String]? = nil
+    /// Developer names for developer rules, by Team ID ("Example Inc"), so the Rules list can name them. Nil is none.
+    public var developerNames: [String: String]? = nil
+    /// Blocklists subscribed to by URL; nil is none. See `BlocklistSubscription`.
+    public var blocklistSubscriptions: [BlocklistSubscription]? = nil
+    /// The connection log keeps the last hour in memory while Kilobat runs; false pauses it. Nil is on.
+    public var connectionLog: Bool? = nil
+    /// The connection log also lists browsers, whose destinations are browsing history; nil leaves them out.
+    public var connectionLogBrowsers: Bool? = nil
+    /// The current network's budget cycle, kept per network in `networkCycles` like `limitGB` in `networkLimits`. Nil is a total budget.
     public var budgetCycle: BudgetCycle? = nil
     public var networkCycles: [String: BudgetCycle]? = nil
-    public var quotas: [AppQuota]? = nil
+    /// App limits, under the key they had as quotas so older files keep decoding.
+    public var quotas: [AppLimit]? = nil
     /// Notify when an app uploads far more than usual in an hour.
     public var uploadAlerts: Bool? = nil
     /// "metered" or "unmetered" per network key; networks without an entry follow macOS.
     public var networkCost: [String: String]? = nil
     /// Block updater helpers while the network is metered; nil means on. See `UpdaterPause`.
     public var pauseUpdaters: Bool? = nil
+    /// Block cloud storage clients (Dropbox, Google Drive, OneDrive…) while the network is metered; nil means on. See `CloudSyncPause`.
+    public var pauseCloudSync: Bool? = nil
     /// A Focus filter pauses updaters on every network while its Focus is on; nil otherwise. See `FocusFilterStore`.
     public var focusPausesUpdaters: Bool? = nil
     /// The VPN kill switch (Pro): new connections wait while the VPN is down. Nil is off. See `KillSwitchState`.
@@ -210,6 +220,27 @@ public struct SavedPreferences: Codable, Equatable {
     public var blockCheckResolver: String? = nil
     /// The resolver fastest DNS falls back to when the one it picked fails, before the network's own; nil is none.
     public var dnsFallback: String? = nil
+    /// On disk only: the layout version of the file. A command line older than the file's number doesn't save over it
+    /// (`TrafficStore`); `settleProfiles()` clears it after a read. Bumped only for a change an older writer would damage.
+    public var schema: Int? = nil
+    public static let currentSchema = 1
+    public func budgetMode(for network: String) -> NetworkBudgetMode {
+        if let mode = networkBudgetModes?[network] { return mode }
+        // Older versions saved 5 GB even on networks the user never configured.
+        if networkCycles?[network] != nil || (networkLimits?[network] ?? 5) != 5 { return .block }
+        return .off
+    }
+
+    public mutating func setBudgetMode(_ mode: NetworkBudgetMode, for network: String) {
+        let previous = budgetMode(for: network)
+        networkBudgetModes = (networkBudgetModes ?? [:]).merging([network: mode]) { _, new in new }
+        if previous != .alert, mode == .alert, (networkCycles?[network] ?? BudgetCycle()).thresholds.isEmpty {
+            var cycle = networkCycles?[network] ?? BudgetCycle()
+            cycle.alerts = BudgetCycle.defaultAlerts
+            networkCycles = (networkCycles ?? [:]).merging([network: cycle]) { _, new in new }
+        }
+    }
+
     public func cost(of network: String) -> NetworkCost { networkCost?[network].flatMap(NetworkCost.init) ?? .automatic }
     public mutating func setCost(_ cost: NetworkCost, for network: String) {
         var costs = networkCost ?? [:]
@@ -224,6 +255,38 @@ public enum TrafficFormat {
         return ByteCountFormatter.string(fromByteCount: Int64(clamping: value), countStyle: .decimal)
     }
     public static func rate(_ value: Double) -> String { guard value.isFinite, value >= 0, value < Double(UInt64.max) else { return "—" }; return String(localized: "\(bytes(UInt64(value)))/s", comment: "A data rate, e.g. 3.2 MB/s") }
+
+    /// The preference behind Settings › General › "Rates in bits per second" and `kilobat settings units`.
+    public static let bitsKey = "menu.bits"
+
+    /// Bytes per second written in bits, as plans and speed tests are: "640 bps", "850 kbps", "3.2 Mbps", "1.25 Gbps".
+    public static func bitRate(_ bytesPerSecond: Double, locale: Locale = .current) -> String {
+        guard bytesPerSecond.isFinite, bytesPerSecond >= 0, bytesPerSecond < Double(UInt64.max) else { return "—" }
+        let bits = bytesPerSecond * 8
+        // The same steps and decimals ByteCountFormatter uses for bytes: none for k, one for M, two for G.
+        let number: Double, digits: Int, unit: String
+        if bits < 1_000 { (number, digits, unit) = (bits, 0, "bps") }
+        else if bits < 999_500 { (number, digits, unit) = (bits / 1_000, 0, "kbps") }
+        else if bits < 999_950_000 { (number, digits, unit) = (bits / 1_000_000, 1, "Mbps") }
+        else { (number, digits, unit) = (bits / 1_000_000_000, 2, "Gbps") }
+        return number.formatted(.number.precision(.fractionLength(digits)).locale(locale)) + " " + unit
+    }
+
+    /// A live rate as the app shows it: bits when the person chose "Rates in bits per second", else bytes.
+    /// The CLI keeps `rate(_:)`.
+    public static func shownRate(_ bytesPerSecond: Double, defaults: UserDefaults = .standard) -> String {
+        defaults.bool(forKey: bitsKey) ? bitRate(bytesPerSecond) : rate(bytesPerSecond)
+    }
+
+    /// The menu bar's short form, whole numbers only: "24 Mbps" or "3 MB/s".
+    public static func compactRate(_ bytesPerSecond: Double, bits: Bool) -> String {
+        guard bytesPerSecond.isFinite, bytesPerSecond >= 0 else { return "—" }
+        let units = bits ? ["bps", "kbps", "Mbps", "Gbps"] : ["B/s", "KB/s", "MB/s", "GB/s"]
+        var number = bytesPerSecond * (bits ? 8 : 1)
+        var index = 0
+        while number >= 999.5 && index < units.count - 1 { number /= 1000; index += 1 }
+        return min(999, number).formatted(.number.precision(.fractionLength(0))) + " " + units[index]
+    }
 }
 
 /// Compact usage history for scripts and agents: raw samples can run to megabytes. Totals and top apps count

@@ -89,6 +89,8 @@ public struct HotspotVideoMeter: Sendable {
     /// One sample; `identify` returns the video service for a connection, or nil. Returns sessions that ended.
     public mutating func ingest(_ snapshot: TrafficSnapshot, identify: (ProcessTraffic, _ address: String) -> String?) -> [HotspotVideoSession] {
         let now = snapshot.timestamp
+        // The same sample again (two observers of one monitor): already counted, and no reason to start over.
+        if let previous = last, now == previous { return [] }
         guard let previous = last, now > previous, now.timeIntervalSince(previous) <= 5 else {
             let ended = finish()
             flows = [:]

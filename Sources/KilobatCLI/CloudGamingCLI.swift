@@ -48,7 +48,7 @@ enum CloudGamingCLI {
         }
         if query.json { try print(json: app.merging(["source": "app"]) { $1 }); return }
         guard app["enabled"] as? Bool == true else {
-            Swift.print("Cloud gaming reports are off. Turn on Settings › Streaming › Cloud gaming reports in the Kilobat app.")
+            Swift.print("Cloud gaming reports are off. Turn on Settings › Calls, streaming & Awake › Cloud gaming reports in the Kilobat app.")
             return
         }
         if let live = app["live"] as? [String: Any] {

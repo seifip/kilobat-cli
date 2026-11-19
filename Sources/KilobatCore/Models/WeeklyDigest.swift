@@ -172,6 +172,8 @@ public struct DigestInput {
     public var speedTests: [SavedSpeedTest] = []
     /// Plan speeds by network key.
     public var plans: [String: Double] = [:]
+    var scopedStarlink: StarlinkJournal?
+
     public init() {}
 
     /// What Kilobat saved on this Mac, read from Application Support and the app's settings: the app and the CLI tell
@@ -182,13 +184,15 @@ public struct DigestInput {
         func read<T: Decodable>(_ name: String) -> T? { (try? Data(contentsOf: folder.appendingPathComponent(name))).flatMap { try? JSONDecoder().decode(T.self, from: $0) } }
         var input = DigestInput()
         input.events = read("events.json") ?? []
-        input.samples = read("health-samples.json") ?? []
+        input.samples = HealthSampleFile.read(folder, quarantine: false)
         input.speedTests = read("speed-tests.json") ?? []
         input.sleeps = read("sleeps.json") ?? []
-        input.starlink = StarlinkJournal.load(directory: folder).outages
+        let dish = StarlinkJournal.load(directory: folder)
+        input.scopedStarlink = dish
+        input.starlink = dish.outages(on: dish.network)
         input.calls = CallStore.load(directory: folder)
         input.remote = RemoteSessionStore.load(directory: folder)
-        input.usage = read("usage.json") ?? []
+        input.usage = UsageFile.read(folder)
         let sessions: [String: NetworkSession] = read("network-sessions.json") ?? [:]
         input.networkNames = UsageComparison.networkNames(input.usage, sessions: sessions)
         let preferences: SavedPreferences = read("preferences.json") ?? SavedPreferences()
@@ -219,6 +223,8 @@ public struct DigestInput {
 /// listed. Without Pro, a fact whose cause is a Pro feature shows its count, and the first such fact carries the one
 /// line saying what Pro would have explained.
 public struct WeeklyDigest: Codable, Sendable, Equatable {
+    public static let showOnOverviewKey = "overview.showWeeklyEcho"
+
     public enum Topic: String, Codable, Sendable, CaseIterable {
         case outages, calls, remote, router, starlink, protection, agents, metered, credit, plan, signIns, trackers, routerHealthy
     }
@@ -615,14 +621,15 @@ extension WeeklyDigest {
             if agents > 0 {
                 let names = Set(input.blocked.filter { week.contains($0.date) }.compactMap(\.protection).filter { $0.kind != .tracker }.compactMap(\.agent)).sorted()
                 if names.count == 1, agents == threats {
-                    line = agents == 1 ? String(localized: "Kilobat stopped \(names[0]) reaching a risky host", comment: "Weekly digest; an AI agent such as Claude Code")
-                        : String(localized: "Kilobat stopped \(names[0]) reaching risky hosts \(agents) times", comment: "Weekly digest; an AI agent such as Claude Code and a count")
+                    line = agents == 1 ? String(localized: "Stopped \(names[0]) reaching a risky host", comment: "Weekly digest; an AI agent such as Claude Code")
+                        : String(localized: "Stopped \(names[0]) reaching risky hosts \(agents) times", comment: "Weekly digest; an AI agent such as Claude Code and a count")
                 } else {
-                    line = String(localized: "Kilobat blocked \(threats) risky connections, \(agents) from AI agents", comment: "Weekly digest; two counts")
+                    line = agents == threats ? String(localized: "Blocked \(threats) risky connections from AI agents", comment: "Weekly digest; a count")
+                        : String(localized: "Blocked \(threats) risky connections, \(agents) from AI agents", comment: "Weekly digest; two counts")
                 }
             } else {
-                line = threats == 1 ? String(localized: "Kilobat blocked 1 known threat", comment: "Weekly digest: malware, phishing or scam")
-                    : String(localized: "Kilobat blocked \(threats) known threats", comment: "Weekly digest: malware, phishing or scam; a count")
+                line = threats == 1 ? String(localized: "Blocked 1 known threat", comment: "Weekly digest: malware, phishing or scam")
+                    : String(localized: "Blocked \(threats) known threats", comment: "Weekly digest: malware, phishing or scam; a count")
             }
             let days = current.protection.map { Double($0.threats + $0.agentGuard) }
             let fact = Fact(topic: .protection, score: Base.protection + min(20, Double(agents) * 8 + Double(threats)), problem: true, line: line,
@@ -665,9 +672,15 @@ extension WeeklyDigest {
         func credit() -> Fact? {
             guard pro, let settings = input.credit, settings.provider != nil || settings.country != nil else { return nil }
             let month = CreditTally.month(of: week.end.addingTimeInterval(-1), calendar: calendar)
-            let tally = CreditTally.make(events: input.events, samples: input.samples, starlink: input.starlink, sleeps: input.sleeps,
-                                         network: settings.networkName, from: month.start, to: month.end, now: now)
-            let report = CreditReport.make(settings: settings, tally: tally)
+            let report: CreditReport
+            if let dish = input.scopedStarlink {
+                report = CreditReport.make(settings: settings, events: input.events, samples: input.samples, dish: dish,
+                                           sleeps: input.sleeps, interval: month, now: now)
+            } else {
+                let tally = CreditTally.make(events: input.events, samples: input.samples, starlink: input.starlink, sleeps: input.sleeps,
+                                             network: settings.networkName, from: month.start, to: month.end, now: now)
+                report = CreditReport.make(settings: settings, tally: tally)
+            }
             guard report.estimate.qualifies, report.estimate.qualifying.contains(where: { week.contains($0) }) else { return nil }
             let amount = report.estimate.amount.flatMap { amount in report.estimate.currency.map { CreditText.money(amount, $0) } }
             let line = amount.map { String(localized: "Your outages may qualify for about \($0) from \(report.providerName)", comment: "Weekly digest; an amount and a provider") }

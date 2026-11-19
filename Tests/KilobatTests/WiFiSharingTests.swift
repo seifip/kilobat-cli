@@ -104,4 +104,12 @@ struct WiFiSharingTests {
         #expect(!WiFiShareNetwork.same(connected: "Studio Wi-Fi ", expected: "Studio Wi-Fi"))
         #expect(!WiFiShareNetwork.same(connected: nil, expected: "Studio Wi-Fi"))
     }
+
+    /// Forgetting a network quotes its name for the shell, apostrophes included, and refuses an odd interface.
+    @Test func forgetQuotesTheName() {
+        #expect(NetworkTools.forgetCommand("Anna's Wi-Fi", interface: "en0") == #"/usr/sbin/networksetup -removepreferredwirelessnetwork en0 'Anna'\''s Wi-Fi'"#)
+        #expect(NetworkTools.forgetCommand("Home; rm -rf /", interface: "en1") == "/usr/sbin/networksetup -removepreferredwirelessnetwork en1 'Home; rm -rf /'")
+        #expect(NetworkTools.forgetCommand("Home", interface: "en0; reboot") == nil)
+        #expect(NetworkTools.forgetCommand("", interface: "en0") == nil)
+    }
 }

@@ -118,7 +118,15 @@ import Observation
     @ObservationIgnored private var ending = false
     @ObservationIgnored private var reverse: [String: String?] = [:]
     @ObservationIgnored private var resolving: Set<String> = []
-    @ObservationIgnored private var heldBlocks: [String] = []
+    @ObservationIgnored private var heldBlocks: [TrafficStore.OwnedTemporary] = []
+    @ObservationIgnored var processHoldLedger = CallMode.ledgerURL
+    @ObservationIgnored var processHoldLimit: Duration = .seconds(CallMode.limit)
+    @ObservationIgnored var waitForHoldDeadline: (ContinuousClock.Instant) async throws -> Void = {
+        try await ContinuousClock().sleep(until: $0)
+    }
+    @ObservationIgnored private var holdDeadline: ContinuousClock.Instant?
+    @ObservationIgnored private var holdTimer: Task<Void, Never>?
+    @ObservationIgnored private var holdGeneration = UUID()
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var observing = false
 
@@ -277,7 +285,7 @@ import Observation
         // lsof runs for this, so every 30 seconds.
         if now.timeIntervalSince(session.lastAWDL) >= 30 {
             session.lastAWDL = now
-            Task { let status = await NearbyRadios.awdlStatus(); session.awdlActive = status.up && status.active; if session.awdlActive { session.samples.airDrop.append(at) } }
+            Task { let status = await AWDLWatch.shared.status(users: false); session.awdlActive = status.up && status.active; if session.awdlActive { session.samples.airDrop.append(at) } }
         }
         releaseFront()
         guard var live else { return }
@@ -326,7 +334,7 @@ import Observation
         guard worth else { return }
         let length = end.timeIntervalSince(session.start)
         samples.seconds = samples.seconds.filter { $0.at <= length }
-        let network = diagnostics?.snapshot.map { ($0.networkKey, $0.networkName) }
+        let network = session.sampler.reportNetwork
         var card = CloudGamingAnalysis.report(service: session.service, browser: session.browser, start: session.start, end: end, network: network,
                                               metered: metered(), samples: samples)
         card.held = held.isEmpty ? nil : held
@@ -346,17 +354,23 @@ import Observation
     /// Everything comes back when the session ends, when you switch to a held app, or after three hours at most.
     public func pause() async {
         guard let traffic, let diagnostics, let session, !pausing else { return }
+        let generation = holdGeneration
         pausing = true; error = nil
         defer { pausing = false }
-        if !airDropPaused, !diagnostics.lowLatency.active, session.awdlActive || live?.issues.contains(where: { $0.kind == .airDrop }) == true {
+        if !airDropPaused, !diagnostics.lowLatency.active, !diagnostics.lowLatency.busy, session.awdlActive || live?.issues.contains(where: { $0.kind == .airDrop }) == true {
             let app: (pid: Int32, name: String)? = session.browser == nil
                 ? NSWorkspace.shared.runningApplications.first { CloudGamingService.app(id: $0.bundleIdentifier ?? "", name: $0.localizedName ?? "", path: $0.bundleURL?.path)?.id == session.service.id }
                     .map { ($0.processIdentifier, $0.localizedName ?? session.service.name) } : nil
             await diagnostics.lowLatency.enable(seconds: CallMode.limit, app: app)
+            guard self.session === session, holdGeneration == generation else {
+                if diagnostics.lowLatency.active { diagnostics.lowLatency.release() }
+                return
+            }
             airDropPaused = diagnostics.lowLatency.active
             if !airDropPaused { error = diagnostics.lowLatency.error }
             if airDropPaused { session.awdlActive = false }
         }
+        guard self.session === session, holdGeneration == generation else { return }
         let movers = traffic.apps.filter { CallMode.name(of: $0.id) != nil && ($0.uploadRate >= CallAnalysis.uploadLoad / 4 || $0.downloadRate >= CallAnalysis.downloadLoad / 4) }
         if !movers.isEmpty {
             if allowed() { hold(movers, traffic: traffic) }
@@ -371,29 +385,59 @@ import Observation
         return live.issues.contains { $0.kind == .airDrop || $0.pausable == true }
     }
 
-    private func hold(_ apps: [AppTraffic], traffic: TrafficStore) {
+    func hold(_ apps: [AppTraffic], traffic: TrafficStore) {
+        let clock = ContinuousClock()
+        if let holdDeadline, clock.now >= holdDeadline {
+            releaseProcessHolds(traffic: traffic)
+            return
+        }
         let skipped = Set(UserDefaults.standard.stringArray(forKey: "callModeSkipped") ?? [])
         for app in apps {
-            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name), !holding.contains(name) else { continue }
+            guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name) else { continue }
             // A launcher is held only while it downloads: nothing runs a local game during a cloud session.
             if CallMode.launchers.contains(name), app.downloadRate < CallAnalysis.downloadLoad / 2 { continue }
-            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.cloudGaming).isEmpty else { continue }
+            guard !CallMode.hold(app.processIDs, app: name, owner: CallMode.cloudGaming, ledger: processHoldLedger).isEmpty, !holding.contains(name) else { continue }
             holding.append(name)
-            if traffic.temporaryRule(app.id) == nil { traffic.setTemporary(app.id, allowed: false, minutes: Int(CallMode.limit / 60)); heldBlocks.append(app.id) }
+            if holdDeadline == nil {
+                let deadline = clock.now.advanced(by: processHoldLimit)
+                holdDeadline = deadline
+                let generation = holdGeneration
+                let wait = waitForHoldDeadline
+                holdTimer = Task { [weak self, weak traffic] in
+                    do { try await wait(deadline) } catch { return }
+                    guard let self, !Task.isCancelled, self.holdGeneration == generation else { return }
+                    self.releaseProcessHolds(traffic: traffic)
+                }
+            }
+            if traffic.temporaryRule(app.id) == nil {
+                heldBlocks.append(traffic.holdTemporary(app.id, minutes: Int(CallMode.limit / 60)))
+            }
         }
     }
 
     /// An app the person brings to the front goes again, and stays out of this session's holds.
     private func releaseFront() {
         guard !holding.isEmpty, let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) else { return }
-        released.insert(name); CallMode.resume(app: name, owner: CallMode.cloudGaming); holding.removeAll { $0 == name }
+        released.insert(name); CallMode.resume(app: name, owner: CallMode.cloudGaming, ledger: processHoldLedger); holding.removeAll { $0 == name }
+        heldBlocks.removeAll { rule in
+            guard CallMode.name(of: rule.id) == name else { return false }
+            traffic?.clearTemporary(rule)
+            return true
+        }
     }
 
-    /// Resumes what this session holds (not what a call, a stream or a Focus filter holds too) and brings AirDrop back.
-    public func release() {
-        CallMode.resume(owner: CallMode.cloudGaming)
-        for id in heldBlocks { traffic?.clearTemporary(id) }
+    private func releaseProcessHolds(traffic: TrafficStore?) {
+        holdGeneration = UUID()
+        holdTimer?.cancel(); holdTimer = nil
+        CallMode.resume(owner: CallMode.cloudGaming, ledger: processHoldLedger)
+        for rule in heldBlocks { traffic?.clearTemporary(rule) }
         heldBlocks = []; holding = []
+    }
+
+    /// Releases this session's holds and brings AirDrop back.
+    public func release() {
+        releaseProcessHolds(traffic: traffic)
+        holdDeadline = nil
         if airDropPaused { diagnostics?.lowLatency.release(); airDropPaused = false }
     }
 

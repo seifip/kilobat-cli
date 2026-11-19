@@ -41,6 +41,18 @@ import Testing
         #expect(!MeshNodes.sameNode(radio("10", -60, 36), NodeRadio(bssid: "00:00:5f:00:53:11", rssi: -60, channel: 44, band: "5 GHz", widthMHz: 80)))
     }
 
+    @Test func someMakersGiveOneBoxAddressesFurtherApart() {
+        // The 2.4 GHz radio at the 5 GHz radio's address plus 0x10.
+        #expect(MeshNodes.sameNode(radio("e0", -53, 36), radio("f0", -57, 6, "2.4 GHz")))
+        // A second address on the same radio: one apart and heard about as strongly.
+        #expect(MeshNodes.sameNode(radio("10", -61, 6, "2.4 GHz"), radio("11", -61, 6, "2.4 GHz")))
+        // Plus 0x10 inside one band is the next box's block.
+        #expect(!MeshNodes.sameNode(radio("e0", -53, 36), radio("f0", -57, 44)))
+        let nodes = MeshNodes.nodes([radio("e0", -53, 36), radio("e1", -60, 36), radio("f0", -57, 6, "2.4 GHz"),
+                                     radio("81", -73, 149), radio("90", -71, 11, "2.4 GHz"), radio("91", -66, 11, "2.4 GHz")], current: nil)
+        #expect(nodes.count == 2)
+    }
+
     @Test func addressesAreNormalized() {
         #expect(MeshNodes.normalize("0:0:5E:0:53:A") == "00:00:5e:00:53:0a")
         #expect(MeshNodes.normalize("not a mac") == nil)

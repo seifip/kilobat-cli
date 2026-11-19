@@ -27,16 +27,10 @@ public enum OpenConnections {
 
     public static func sampleByProcess(pids: Set<Int32>) async -> [Int32: ProcessConnections] {
         guard !pids.isEmpty else { return [:] }
-        return await Task.detached(priority: .utility) {
-            let process = Process(), output = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-            process.arguments = ["-L", "1", "-n", "-x", "-J", "bytes_in,bytes_out"]
-            process.standardOutput = output; process.standardError = Pipe(); process.standardInput = Pipe()
-            guard (try? process.run()) != nil else { return [:] }
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return parseByProcess(String(decoding: data, as: UTF8.self), pids: pids)
-        }.value
+        let result = await CommandRunner.run("/usr/bin/nettop", ["-L", "1", "-n", "-x", "-J", "bytes_in,bytes_out"], timeout: 10)
+        // Cut short, its last process may be missing connections: better nothing than a partial list read as complete.
+        guard result.status == 0 else { return [:] }
+        return parseByProcess(result.output, pids: pids)
     }
 
     static func parse(_ text: String, pids: Set<Int32>) -> [OpenDestination] {

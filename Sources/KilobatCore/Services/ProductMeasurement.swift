@@ -17,6 +17,7 @@ import Observation
     public private(set) var campaign: String
     public private(set) var deletionPending: Bool
     public var access = "unknown"
+    public var policyAllowsSharing: @MainActor () -> Bool = { true }
     public var prompt: String?
     public var canOfferUseCase: Bool { enabled && !defaults.bool(forKey: "measurement.useCaseAsked") }
     public var canOfferReason: Bool { enabled && !defaults.bool(forKey: "measurement.reasonAsked") }
@@ -63,7 +64,7 @@ import Observation
         // An explicit sharing choice also answers the one-time invitation. Never ask again after withdrawal.
         if allowed { defaults.set(true, forKey: "measurement.invitationSeen") }
         task?.cancel(); generation = UUID(); prompt = nil
-        if value && allowed && !deletionPending {
+        if value && allowed && policyAllowsSharing() && !deletionPending {
             enabled = true; defaults.set(true, forKey: "measurement.enabled")
             if token == nil { token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
             defaults.set(token, forKey: "measurement.token"); register()
@@ -171,7 +172,7 @@ import Observation
         parts.queryItems = query; return parts.url ?? url
     }
     private func post(_ path: String, _ body: [String: Any]) async -> [String: Any]? {
-        guard allowed, let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        guard allowed, (path == "withdraw" || policyAllowsSharing()), let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         var request = URLRequest(url: endpoint.appendingPathComponent(path), timeoutInterval: 5)
         request.httpMethod = "POST"; request.httpBody = data; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         do {

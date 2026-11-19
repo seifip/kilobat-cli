@@ -29,7 +29,7 @@ import KilobatCore
             let profile = store.preferences.profile, budget = store.preferences.limitGB
             store.switchNetwork(await DiagnosticProbe().snapshot())
             store.preferences.profile = profile; store.preferences.limitGB = budget; store.rememberNetwork()
-            print("Remembered \(profile.rawValue), \(budget) GB for \(store.networkName).")
+            print("Remembered \(profile.title), \(budget) GB for \(store.networkName).")
         case "scope":
             guard args.count == 2, ["external", "wifi", "wired"].contains(args[1]) else { throw CLIError("Use scope <external|wifi|wired>.") }
             store.preferences.trafficScope = args[1]; print("Saved scope: \(args[1]). Open Kilobat reloads it on its next sample.")

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 /// Call mode: while a call is on, the apps that freeze calls — sync clients, backup tools, game launchers — are held.
 /// Their processes are suspended so a transfer already running stops at once, the filter refuses their new
@@ -65,9 +66,14 @@ public enum CallMode {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/call-mode-held.json")
     }
 
+    private static let ledgerLock = NSLock()
+    private static let ledgerLog = Logger(subsystem: "co.seifi.kilobat", category: "suspension")
+    nonisolated(unsafe) private static var unsaved: [URL: [Held]] = [:]
+
     /// Suspends `pids` that belong to this user for `owner`, noting each before it stops. Returns what this owner now
     /// holds that it didn't: a process another owner already stopped is only noted as this one's too.
     public static func hold(_ pids: [Int32], app: String, owner: String = call, ledger: URL = ledgerURL) -> [Held] {
+        ledgerLock.lock(); defer { ledgerLock.unlock() }
         var held = load(ledger)
         var now: [Held] = []
         for pid in Set(pids) where pid > 1 && pid != getpid() && owned(pid) {
@@ -75,15 +81,18 @@ public enum CallMode {
             if let index = held.firstIndex(where: { $0.pid == pid }) {
                 if held[index].started == started {
                     guard !held[index].holders.contains(owner) else { continue }
-                    held[index].owners = held[index].holders + [owner]; save(held, ledger)
+                    let previous = held[index]
+                    held[index].owners = previous.holders + [owner]
+                    guard write(held, ledger) else { held[index] = previous; continue }
                     now.append(held[index]); continue
                 }
                 // The PID was reused by a process nobody stopped; the old line is stale.
-                held.remove(at: index); save(held, ledger)
+                held.remove(at: index)
             }
             let entry = Held(pid: pid, started: started, app: app, owners: [owner])
-            held.append(entry); save(held, ledger)
-            if kill(pid, SIGSTOP) == 0 { now.append(entry) } else { held.removeAll { $0.pid == pid }; save(held, ledger) }
+            held.append(entry)
+            guard write(held, ledger) else { held.removeLast(); continue }
+            if kill(pid, SIGSTOP) == 0 { now.append(entry) } else { held.removeAll { $0.pid == pid }; write(held, ledger) }
         }
         return now
     }
@@ -91,6 +100,7 @@ public enum CallMode {
     /// Lets go of what `owner` holds (or every owner's, with nil), of every app or only `app`. A process resumes when no
     /// owner holds it any more, and only if it's still the same process. Returns the processes resumed.
     @discardableResult public static func resume(app: String? = nil, owner: String? = nil, ledger: URL = ledgerURL) -> [Held] {
+        ledgerLock.lock(); defer { ledgerLock.unlock() }
         var kept: [Held] = [], resumed: [Held] = []
         for var entry in load(ledger) {
             guard app == nil || entry.app == app, owner.map(entry.holders.contains) ?? true else { kept.append(entry); continue }
@@ -98,7 +108,13 @@ public enum CallMode {
             if rest.isEmpty { resumed.append(entry) } else { entry.owners = rest; kept.append(entry) }
         }
         for entry in resumed where startTime(entry.pid) == entry.started { kill(entry.pid, SIGCONT) }
-        save(kept, ledger)
+        let key = ledger.standardizedFileURL
+        if !write(kept, ledger) {
+            // Disk still has a conservative record for launch recovery. Use the actual owners in
+            // this process so a later release cannot resurrect an owner that has already left.
+            unsaved[key] = kept
+            ledgerLog.error("Could not save a suspension release. The live ownership change will be retried.")
+        }
         return resumed
     }
 
@@ -111,12 +127,26 @@ public enum CallMode {
         resume(ledger: ledger)
     }
 
-    public static func held(ledger: URL = ledgerURL) -> [Held] { load(ledger) }
+    public static func held(ledger: URL = ledgerURL) -> [Held] { ledgerLock.withLock { load(ledger) } }
 
-    static func load(_ url: URL) -> [Held] { (try? JSONDecoder().decode([Held].self, from: Data(contentsOf: url))) ?? [] }
-    static func save(_ held: [Held], _ url: URL) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if held.isEmpty { try? FileManager.default.removeItem(at: url) } else { try? JSONEncoder().encode(held).write(to: url, options: .atomic) }
+    static func load(_ url: URL) -> [Held] {
+        unsaved[url.standardizedFileURL] ?? (try? JSONDecoder().decode([Held].self, from: Data(contentsOf: url))) ?? []
+    }
+    @discardableResult static func save(_ held: [Held], _ url: URL) -> Bool {
+        ledgerLock.withLock { write(held, url) }
+    }
+
+    @discardableResult private static func write(_ held: [Held], _ url: URL) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if held.isEmpty {
+                if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            } else {
+                try JSONEncoder().encode(held).write(to: url, options: .atomic)
+            }
+            unsaved[url.standardizedFileURL] = nil
+            return true
+        } catch { return false }
     }
 
     static func owned(_ pid: Int32) -> Bool {

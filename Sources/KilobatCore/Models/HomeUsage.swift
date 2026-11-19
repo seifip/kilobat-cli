@@ -74,10 +74,56 @@ public struct RouterWAN: Codable, Sendable, Equatable {
     public var up: UInt64?
     public var downRate: Double?
     public var upRate: Double?
+    /// The most the line can carry, bytes a second, when the router says (a FRITZ!Box's sync rate).
+    public var downMax: Double?
+    public var upMax: Double?
     /// 32 for TR-064's and UPnP's counters, which wrap at 4 GiB; 64 otherwise.
     public var bits = 64
-    public init(down: UInt64? = nil, up: UInt64? = nil, downRate: Double? = nil, upRate: Double? = nil, bits: Int = 64) {
+    public init(down: UInt64? = nil, up: UInt64? = nil, downRate: Double? = nil, upRate: Double? = nil, bits: Int = 64, downMax: Double? = nil, upMax: Double? = nil) {
         self.down = down; self.up = up; self.downRate = downRate; self.upRate = upRate; self.bits = bits
+        self.downMax = downMax; self.upMax = upMax
+    }
+}
+
+/// A DSL line as the FRITZ!Box reports it (WANDSLInterfaceConfig, X_AVM-DE_GetDSLInfo, which needs no rights). Rates
+/// are in kbit/s and margins and attenuation in tenths of a dB, as TR-064 defines them.
+public struct RouterDSLLine: Codable, Sendable, Equatable {
+    public var downKbps: Int
+    public var upKbps: Int
+    public var maxDownKbps: Int?
+    public var maxUpKbps: Int?
+    public var marginDownTenths: Int?
+    public var marginUpTenths: Int?
+    public var attenuationDownTenths: Int?
+    public var attenuationUpTenths: Int?
+    public var crcErrors: UInt64?
+    public var fecErrors: UInt64?
+    /// Where the box's own cable test found a break, in metres.
+    public var cableFaultMeters: Int?
+
+    public init(downKbps: Int, upKbps: Int, maxDownKbps: Int? = nil, maxUpKbps: Int? = nil, marginDownTenths: Int? = nil, marginUpTenths: Int? = nil,
+                attenuationDownTenths: Int? = nil, attenuationUpTenths: Int? = nil, crcErrors: UInt64? = nil, fecErrors: UInt64? = nil, cableFaultMeters: Int? = nil) {
+        self.downKbps = downKbps; self.upKbps = upKbps; self.maxDownKbps = maxDownKbps; self.maxUpKbps = maxUpKbps
+        self.marginDownTenths = marginDownTenths; self.marginUpTenths = marginUpTenths
+        self.attenuationDownTenths = attenuationDownTenths; self.attenuationUpTenths = attenuationUpTenths
+        self.crcErrors = crcErrors; self.fecErrors = fecErrors; self.cableFaultMeters = cableFaultMeters
+    }
+
+    /// Nil when no line has synced, as on a DSL-capable box that gets its internet another way.
+    public init?(info: [String: String]) {
+        guard let down = info["NewDownstreamCurrRate"].flatMap({ Int($0) }), let up = info["NewUpstreamCurrRate"].flatMap({ Int($0) }), down > 0, up > 0 else { return nil }
+        func number(_ key: String) -> Int? { info[key].flatMap { Int($0) } }
+        self.init(downKbps: down, upKbps: up, maxDownKbps: number("NewDownstreamMaxRate"), maxUpKbps: number("NewUpstreamMaxRate"),
+                  marginDownTenths: number("NewDownstreamNoiseMargin"), marginUpTenths: number("NewUpstreamNoiseMargin"),
+                  attenuationDownTenths: number("NewDownstreamAttenuation"), attenuationUpTenths: number("NewUpstreamAttenuation"),
+                  crcErrors: info["NewCRCErrors"].flatMap { UInt64($0) }, fecErrors: info["NewFECErrors"].flatMap { UInt64($0) })
+    }
+
+    /// The break the box's cable test located. Only while the box is trying to use DSL, so one on fibre or cable never reports a fault.
+    public static func cableFault(_ info: [String: String]) -> Int? {
+        guard info["NewX_AVM-DE_DSLDigagnoseState"] == "DONE_CABLE_NOK", info["NewX_AVM-DE_DSLActive"] == "1",
+              let metres = info["NewX_AVM-DE_CableNokDistance"].flatMap({ Int($0) }), metres > 0 else { return nil }
+        return metres
     }
 }
 
@@ -180,11 +226,12 @@ public struct RouterPoll: Sendable, Equatable {
     public var missing: [String] = []
     /// The firmware and whether the router says an update is out; nil when its API doesn't say.
     public var update: RouterFirmware? = nil
+    public var dsl: RouterDSLLine? = nil
     /// OpenWrt's distribution and release version, compared with OpenWrt's release list by the store.
     public var release: (distribution: String, version: String)? = nil
     public static func == (a: RouterPoll, b: RouterPoll) -> Bool {
         a.date == b.date && a.clients == b.clients && a.wan == b.wan && a.uptime == b.uptime && a.model == b.model && a.firmware == b.firmware
-            && a.perDevice == b.perDevice && a.missing == b.missing && a.update == b.update && a.release?.distribution == b.release?.distribution && a.release?.version == b.release?.version
+            && a.perDevice == b.perDevice && a.missing == b.missing && a.update == b.update && a.dsl == b.dsl && a.release?.distribution == b.release?.distribution && a.release?.version == b.release?.version
     }
     public init(date: Date = Date(), clients: [RouterClient], wan: RouterWAN? = nil, uptime: TimeInterval? = nil, model: String? = nil, firmware: String? = nil,
                 perDevice: Bool, missing: [String] = []) {
@@ -224,7 +271,8 @@ public struct RouterConnection: Codable, Sendable, Equatable, Identifiable {
 }
 
 /// Byte counters into amounts and rates: the change since the last read, with a counter that went back counted as
-/// a reset (a reconnect, a reboot, a new accounting period) and a 32-bit one near its top as a wrap.
+/// a reset (a reconnect, a reboot, a new accounting period) and a 32-bit one as a wrap when the line could have
+/// carried that much (or, when the router doesn't say what the line carries, when the counter was near its top).
 public struct RouterMeter: Sendable, Equatable {
     struct Mark: Sendable, Equatable { var date: Date; var down: UInt64; var up: UInt64 }
     var marks: [String: Mark] = [:]
@@ -232,21 +280,38 @@ public struct RouterMeter: Sendable, Equatable {
     public static let ceiling: Double = 1_250_000_000
     public init() {}
 
-    public static func delta(from old: UInt64, to new: UInt64, bits: Int = 64) -> UInt64 {
+    /// A 32-bit counter's range.
+    static let range32 = UInt64(UInt32.max) + 1
+    /// How long a 32-bit counter may go unread on a line of `capacity` bytes a second: the time to move half its
+    /// range, so one wrap can never be mistaken. A line whose capacity isn't known is taken as gigabit.
+    public static func wrapSafeInterval(capacity: Double?) -> TimeInterval {
+        let rate = capacity.flatMap { $0 > 0 ? $0 : nil } ?? 125_000_000
+        return Double(range32 / 2) / rate
+    }
+
+    /// `limit`: the most bytes that could have moved since `old` was read. With it, a smaller value is a wrap only
+    /// if the wrap fits; without it, only a counter that was near its top is taken to have wrapped.
+    public static func delta(from old: UInt64, to new: UInt64, bits: Int = 64, limit: UInt64? = nil) -> UInt64 {
         if new >= old { return new - old }
-        if bits == 32, old <= UInt64(UInt32.max), new <= UInt64(UInt32.max), old > UInt64(UInt32.max) / 2 { return (UInt64(UInt32.max) - old) + new + 1 }
+        if bits == 32, old < range32, new < range32 {
+            let wrapped = (range32 - old) + new
+            if let limit { if wrapped <= limit { return wrapped } } else if old > UInt64(UInt32.max) / 2 { return wrapped }
+        }
         return new
     }
 
     /// The bytes moved since the last read of `key` and the rate over that time; nil for the first read, or a gap
     /// too long or a jump too big to trust.
-    public mutating func step(_ key: String, down: UInt64, up: UInt64, at date: Date, bits: Int = 64, longest: TimeInterval = 3600)
+    public mutating func step(_ key: String, down: UInt64, up: UInt64, at date: Date, bits: Int = 64, longest: TimeInterval = 3600,
+                                downMax: Double? = nil, upMax: Double? = nil)
         -> (down: UInt64, up: UInt64, downRate: Double, upRate: Double)? {
         defer { marks[key] = Mark(date: date, down: down, up: up) }
         guard let last = marks[key], date > last.date else { return nil }
         let seconds = date.timeIntervalSince(last.date)
         guard seconds <= longest else { return nil }
-        let d = Self.delta(from: last.down, to: down, bits: bits), u = Self.delta(from: last.up, to: up, bits: bits)
+        // Half as much again as the line's own maximum, plus a megabyte: counters include what a sync rate doesn't.
+        func limit(_ max: Double?) -> UInt64? { max.flatMap { $0 > 0 ? UInt64($0 * seconds * 1.5) + 1_000_000 : nil } }
+        let d = Self.delta(from: last.down, to: down, bits: bits, limit: limit(downMax)), u = Self.delta(from: last.up, to: up, bits: bits, limit: limit(upMax))
         guard Double(d) / seconds <= Self.ceiling, Double(u) / seconds <= Self.ceiling else { return nil }
         return (d, u, Double(d) / seconds, Double(u) / seconds)
     }
@@ -329,10 +394,11 @@ public struct HomeUsageReport: Codable, Sendable, Equatable {
         public var missing: [String]
         /// The installed firmware and whether an update is out, when the router's API says; Kilobat never installs one.
         public var update: RouterFirmware?
+        public var dsl: RouterDSLLine?
         public init(kind: RouterKind, name: String, model: String?, firmware: String?, address: String, measures: String, uptimeSeconds: Double?, missing: [String],
-                    firmware update: RouterFirmware? = nil) {
+                    firmware update: RouterFirmware? = nil, dsl: RouterDSLLine? = nil) {
             self.kind = kind; self.name = name; self.model = model; self.firmware = firmware; self.address = address; self.measures = measures
-            self.uptimeSeconds = uptimeSeconds; self.missing = missing; self.update = update
+            self.uptimeSeconds = uptimeSeconds; self.missing = missing; self.update = update; self.dsl = dsl
         }
     }
     public struct Device: Codable, Sendable, Equatable {

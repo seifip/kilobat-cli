@@ -5,7 +5,7 @@ import Foundation
 /// All of it comes from the dish at 192.168.100.1 and stays on this Mac. Kilobat only reads: it never stows,
 /// reboots or reconfigures the dish.
 public enum Starlink {
-    // Request and response field numbers in SpaceX.API.Device.
+    // Request and response field numbers in SpaceX.API.Device (see RESEARCH-DECISIONS.md › Starlink).
     static let getStatus = 1004, getHistory = 1007, getObstructionMap = 2008
     static let dishStatus = 2004, dishHistory = 2006, dishObstructionMap = 2008
 
@@ -485,7 +485,7 @@ public struct StarlinkSkyMap: Codable, Sendable, Equatable {
 // MARK: Plans
 
 /// Starlink's capped plans, for a data budget that matches the plan. Caps as starlink.com and Starlink's support
-/// articles described them in October 2026; after the cap Starlink slows the dish to
+/// articles described them in October 2026 (see RESEARCH-DECISIONS.md); after the cap Starlink slows the dish to
 /// about 1 Mbps rather than cutting it off. Kilobat counts this Mac only, so the budget is a share of the plan.
 public enum StarlinkPlan: String, CaseIterable, Identifiable, Sendable {
     case roam100, roam300, unlimited
@@ -517,6 +517,7 @@ public enum StarlinkPlan: String, CaseIterable, Identifiable, Sendable {
         guard store.setCost(.metered) else { return false }
         guard budget else { return true }
         var preferences = store.preferences
+        if preferences.budgetMode(for: store.networkKey) == .off { preferences.setBudgetMode(.alert, for: store.networkKey) }
         preferences.limitGB = gigabytes
         let cycle = store.budgetCycle
         preferences.budgetCycle = BudgetCycle(period: .monthly, anchor: cycle.period == .monthly ? cycle.anchor : nil, alerts: cycle.alerts)
@@ -544,7 +545,12 @@ public struct StarlinkEvidence: Codable, Sendable {
     public let software: String?
 
     public static func make(outages: [StarlinkOutage], status: StarlinkStatus?, since: Date, now: Date = Date()) -> StarlinkEvidence {
-        let window = outages.filter { $0.end >= since && $0.start <= now }.sorted { $0.start < $1.start }
+        let window = outages.compactMap { outage -> StarlinkOutage? in
+            var clipped = outage
+            clipped.start = max(outage.start, since)
+            clipped.seconds = min(outage.end, now).timeIntervalSince(clipped.start)
+            return clipped.seconds > 0 ? clipped : nil
+        }.sorted { $0.start < $1.start }
         func total(_ side: StarlinkOutage.Side) -> Double { window.filter { $0.side == side }.reduce(0) { $0 + $1.seconds } }
         return StarlinkEvidence(outages: window.suffix(60).map { Outage(start: $0.start, seconds: $0.seconds, cause: $0.cause.rawValue, side: $0.side.rawValue) },
                                 setupSeconds: total(.setup), networkSeconds: total(.network), dishSeconds: total(.dish),

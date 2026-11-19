@@ -359,7 +359,7 @@ public struct BluetoothCallNote: Codable, Sendable, Equatable {
         guard let first = risks.first else { return nil }
         switch first {
         case .wifi24, .crowdedChannel: return String(localized: "Before the next call, join your router’s 5 GHz network.", comment: "Call report advice for Bluetooth audio")
-        case .airDrop: return String(localized: "Before the next call, turn on low latency or call mode’s AirDrop pause.", comment: "Call report advice for Bluetooth audio")
+        case .airDrop: return String(localized: "Before the next call, pause AirDrop or turn on call mode.", comment: "Call report advice for Bluetooth audio")
         case .heavyTraffic: return String(localized: "Pause big downloads before the next call, or let call mode hold them.", comment: "Call report advice for Bluetooth audio")
         case .weakBluetooth: return String(localized: "Keep the Mac closer, and out of your bag, on the next call.", comment: "Call report advice for Bluetooth audio")
         case .busyBluetooth: return String(localized: "Disconnect Bluetooth devices you aren’t using before the next call.", comment: "Call report advice for Bluetooth audio")

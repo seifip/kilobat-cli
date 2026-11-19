@@ -67,6 +67,8 @@ public struct ServiceFlowTracker: Sendable {
     /// One sample. `identify` names a connection (nil: never measured, such as video or a call). Returns transfers that ended.
     public mutating func ingest(_ snapshot: TrafficSnapshot, identify: (ProcessTraffic, _ address: String, _ port: String, _ proto: String) -> ServiceAttribution?) -> [(key: String, transfer: ServiceTransfer)] {
         let now = snapshot.timestamp
+        // The same sample again (two observers of one monitor): already counted, and no reason to start over.
+        if let previous = last, now == previous { return [] }
         guard let previous = last, now > previous, now.timeIntervalSince(previous) <= 5 else {
             // The first sample, or one after a gap (sleep, a restarted monitor): counters become baselines.
             let ended = finish()

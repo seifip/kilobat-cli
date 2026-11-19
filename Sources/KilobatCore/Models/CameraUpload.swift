@@ -35,7 +35,7 @@ public enum CameraUpload {
         public let summary: String
         public let source: URL
     }
-    /// Makers' own figures. Re-check before relying on a number.
+    /// Makers' own figures; Release/RESEARCH-DECISIONS.md has the quotes. Re-check before relying on a number.
     public static let figures: [Figure] = [
         Figure(maker: "Google Nest", summary: String(localized: "0.15–4 Mbps per camera, and up to 300–400 GB a month recording around the clock", comment: "Google's published upload figure for Nest cameras"),
                source: URL(string: "https://support.google.com/googlenest/answer/9245832")!),

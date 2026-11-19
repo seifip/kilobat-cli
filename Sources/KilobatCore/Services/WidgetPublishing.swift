@@ -28,7 +28,7 @@ extension WidgetSnapshot {
         }
         latency = samples.filter { now.timeIntervalSince($0.date) < 3600 }.suffix(30).compactMap(\.internet.average)
         todayReceived = today.received; todaySent = today.sent; todayHours = today.hours
-        self.budget = pro ? budget : nil
+        self.budget = pro && (budget?.limitBytes ?? 0) > 0 ? budget : nil
         self.speed = speed.map { Speed(date: $0.date, downMbps: $0.downloadMbps, upMbps: $0.uploadMbps) }
         self.pro = pro
     }
@@ -42,6 +42,16 @@ extension WidgetSnapshot {
         }
         hours[min(23, calendar.component(.hour, from: now))] += pending
         return hours
+    }
+}
+
+/// Whether the app's feed should build a snapshot, and whether to write it: nothing without a widget on the desktop or
+/// in Notification Center; a write only with a redraw, or when the file is older than `WidgetReloadPlan.interval`.
+/// A redraw is always due before the widgets would call the figures stale, so the keep-alive write is never skipped.
+public enum WidgetFeedPlan {
+    public static func build(widgetsInstalled: Bool) -> Bool { widgetsInstalled }
+    public static func write(reloading: [String], lastWrite: Date?, now: Date) -> Bool {
+        !reloading.isEmpty || lastWrite.map { now.timeIntervalSince($0) >= WidgetReloadPlan.interval } ?? true
     }
 }
 

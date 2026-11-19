@@ -131,7 +131,7 @@ public enum SiriAnswers {
         }
         let degraded = snapshot.health != .good
         if let app = input.busy.first, app.heavy {
-            let rate = TrafficFormat.rate(app.rate)
+            let rate = TrafficFormat.shownRate(app.rate)
             let title = String(localized: "\(app.name) is filling your line", comment: "Siri snippet title; the argument is an app such as Dropbox")
             let sentence: String = switch (degraded, app.uploading) {
             case (true, true): String(localized: "\(app.name) is uploading at \(rate), which is filling your line. Pause it, and everything else should speed up.", comment: "Siri; the arguments are an app and a rate such as 4.2 MB/s")
@@ -341,16 +341,16 @@ public enum SiriAnswers {
 
     public static func usageNow(_ apps: [BusyApp], download: Double, upload: Double) -> SiriAnswer {
         let top = apps.filter { $0.rate >= 5_000 }.sorted { $0.rate > $1.rate }.prefix(3)
-        let total = TrafficFormat.rate(download + upload)
-        var facts = top.map { SiriAnswer.Fact($0.name, "↓ \(TrafficFormat.rate($0.download))  ↑ \(TrafficFormat.rate($0.upload))", warning: $0.heavy) }
-        facts.append(.init(String(localized: "All apps"), "↓ \(TrafficFormat.rate(download))  ↑ \(TrafficFormat.rate(upload))"))
+        let total = TrafficFormat.shownRate(download + upload)
+        var facts = top.map { SiriAnswer.Fact($0.name, "↓ \(TrafficFormat.shownRate($0.download))  ↑ \(TrafficFormat.shownRate($0.upload))", warning: $0.heavy) }
+        facts.append(.init(String(localized: "All apps"), "↓ \(TrafficFormat.shownRate(download))  ↑ \(TrafficFormat.shownRate(upload))"))
         guard let first = top.first else {
             return SiriAnswer(title: String(localized: "Quiet right now"), sentence: String(localized: "Nothing much right now: all your apps together use \(total).", comment: "Siri; the argument is a rate such as 12 KB/s"), tone: .good, facts: facts)
         }
         var sentence = first.uploading
-            ? String(localized: "\(first.name) is using the most right now, uploading at \(TrafficFormat.rate(first.rate)).", comment: "Siri; the arguments are an app and a rate")
-            : String(localized: "\(first.name) is using the most right now, downloading at \(TrafficFormat.rate(first.rate)).", comment: "Siri; the arguments are an app and a rate")
-        let rest = top.dropFirst().map { String(localized: "\($0.name) at \(TrafficFormat.rate($0.rate))", comment: "Siri: an app and its rate, in a list such as “Dropbox at 1.2 MB/s and Safari at 300 KB/s”") }
+            ? String(localized: "\(first.name) is using the most right now, uploading at \(TrafficFormat.shownRate(first.rate)).", comment: "Siri; the arguments are an app and a rate")
+            : String(localized: "\(first.name) is using the most right now, downloading at \(TrafficFormat.shownRate(first.rate)).", comment: "Siri; the arguments are an app and a rate")
+        let rest = top.dropFirst().map { String(localized: "\($0.name) at \(TrafficFormat.shownRate($0.rate))", comment: "Siri: an app and its rate, in a list such as “Dropbox at 1.2 MB/s and Safari at 300 KB/s”") }
         if !rest.isEmpty { sentence += " " + String(localized: "Then \(rest.formatted(.list(type: .and))).", comment: "Siri; the argument lists apps with rates") }
         return SiriAnswer(title: String(localized: "\(first.name) uses the most", comment: "Siri snippet title; the argument is an app"), sentence: sentence, tone: first.heavy ? .caution : .good, facts: facts)
     }
@@ -423,9 +423,8 @@ public enum SiriAnswers {
             case .app: String(localized: "Pause \(first.app ?? "that app") before the call.", comment: "Siri before a call; the argument is an app")
             case .wifi: String(localized: "Move closer to the router, or use Radar to find a stronger spot.", comment: "Call report advice")
             case .unstable: String(localized: "If it keeps dropping, use another network or a hotspot for the call.", comment: "Siri before a call")
-            case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
-            case .mac: first.app.map { String(localized: "Quit \($0) during calls, or turn off video effects in the call app.", comment: "Call report advice; the argument is a process") }
-                ?? String(localized: "Quit heavy apps during calls, or turn off video effects in the call app.", comment: "Call report advice")
+            case .airDrop: String(localized: "Pause AirDrop before calls, from the AirDrop switch in Wi-Fi & Bluetooth.", comment: "Call report advice")
+            case .mac: CallReport.Strain.cpuAdvice(first.app)
             }
             sentence += " " + fix
         }

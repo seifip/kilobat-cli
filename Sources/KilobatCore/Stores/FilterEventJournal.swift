@@ -1,6 +1,51 @@
 import Foundation
 import Observation
 
+/// Daily counts from the retained Protection events, in the Mac's current calendar.
+public struct ProtectionActivity {
+    public enum Group: CaseIterable, Hashable, Sendable {
+        case threats, trackers, agentGuard
+
+        fileprivate init(_ kind: ProtectionDetail.Kind) {
+            switch kind {
+            case .malware, .phishing, .scam, .threat: self = .threats
+            case .tracker: self = .trackers
+            case .agentGuard: self = .agentGuard
+            }
+        }
+    }
+
+    public struct Day: Identifiable, Sendable {
+        public let date: Date
+        public let counts: [Group: Int]
+        public var id: Date { date }
+        public var total: Int { counts.values.reduce(0, +) }
+    }
+
+    public let days: [Day]
+    public var total: Int { days.reduce(0) { $0 + $1.total } }
+    public func count(_ group: Group) -> Int { days.reduce(0) { $0 + ($1.counts[group] ?? 0) } }
+
+    public init(events: [FilterEvent], interval: DateInterval? = nil, now: Date = Date(), calendar: Calendar = .current) {
+        let today = calendar.startOfDay(for: now)
+        let starts = (-6...0).compactMap {
+            calendar.date(byAdding: .day, value: $0, to: today).map { calendar.startOfDay(for: $0) }
+        }
+        let start = starts.first ?? today
+        var counts: [Date: [Group: Int]] = [:]
+        for event in events {
+            guard let kind = event.protection?.kind, event.date >= start, event.date <= now,
+                  interval.map({ event.date >= $0.start && event.date < $0.end }) ?? true else { continue }
+            counts[calendar.startOfDay(for: event.date), default: [:]][Group(kind), default: 0] += 1
+        }
+        days = starts.compactMap { date in
+            if let interval, let day = calendar.dateInterval(of: .day, for: date),
+               day.end <= interval.start || day.start >= interval.end { return nil }
+            return Day(date: date, counts: counts[date] ?? [:])
+        }
+    }
+}
+
 @MainActor @Observable public final class FilterEventJournal {
     public private(set) var events: [FilterEvent] = []
     public private(set) var error: String?
@@ -13,23 +58,37 @@ import Observation
     private var removedSet: Set<UUID> = []
     private var loadFailure: (any Error)?
     private var removedFile: URL { file.deletingLastPathComponent().appendingPathComponent("filter-events-removed.json") }
-    public init(file: URL? = nil) {
+    /// `recover` is for the app, which owns these files: an unreadable one is moved aside as `.corrupt` and the journal
+    /// starts empty, so blocks keep being recorded and erasing keeps working. Readers that don't own the files (the
+    /// command line) leave them where they are and refuse to write.
+    public init(file: URL? = nil, recover: Bool = false) {
         self.file = file ?? Self.fileURL
-        do {
-            if FileManager.default.fileExists(atPath: self.file.path) {
-                events = try JSONDecoder().decode([FilterEvent].self, from: Data(contentsOf: self.file))
+        func fail(_ error: any Error, _ url: URL) {
+            if recover {
+                let aside = url.appendingPathExtension("corrupt")
+                try? FileManager.default.removeItem(at: aside)
+                try? FileManager.default.moveItem(at: url, to: aside)
+            } else {
+                loadFailure = loadFailure ?? error
+                self.error = self.error ?? error.localizedDescription
             }
-            if FileManager.default.fileExists(atPath: removedFile.path) {
-                removed = try JSONDecoder().decode([UUID].self, from: Data(contentsOf: removedFile))
-            }
-        } catch { loadFailure = error; self.error = error.localizedDescription }
+        }
+        if FileManager.default.fileExists(atPath: self.file.path) {
+            do { events = try JSONDecoder().decode([FilterEvent].self, from: Data(contentsOf: self.file)) } catch { fail(error, self.file) }
+        }
+        if FileManager.default.fileExists(atPath: removedFile.path) {
+            do { removed = try JSONDecoder().decode([UUID].self, from: Data(contentsOf: removedFile)) } catch { fail(error, removedFile) }
+        }
         removedSet = Set(removed)
     }
     public func ingest(_ observed: [FilterEvent], now: Date = Date()) throws {
         if let loadFailure { throw loadFailure }
         var merged = Dictionary(events.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         for event in observed where !removedSet.contains(event.id) { merged[event.id] = event }
-        try save(Array(merged.values.filter { now.timeIntervalSince($0.date) < 7 * 86400 }.sorted { $0.date > $1.date }.prefix(1000)))
+        let next = Array(merged.values.filter { now.timeIntervalSince($0.date) < 7 * 86400 }.sorted { $0.date > $1.date }.prefix(1000))
+        // Asked every five seconds; the file is only rewritten when something changed.
+        guard Dictionary(next.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last }) != Dictionary(events.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last }) else { return }
+        try save(next)
     }
     /// Clears a period or forgets a site, and keeps the filter from handing those events back.
     @discardableResult public func erase(_ action: HistoryAction, now: Date = Date()) throws -> Int {

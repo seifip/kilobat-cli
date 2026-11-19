@@ -6,7 +6,7 @@ import Testing
 /// (with a fake model) and `kilobat explain`'s arguments.
 struct ExplainerTests {
     private static let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    private static let json = try! Data(contentsOf: GeoIP.resources.first!.appendingPathComponent("explainer.json"))
+    private static let json = try! RepoFiles.data("Assets/Explainer/explainer.json")
     private let explainer = Explainer(json: ExplainerTests.json)
 
     @Test func theDatabaseLoadsAndHangsTogether() throws {
@@ -28,6 +28,18 @@ struct ExplainerTests {
     }
 
     /// The committed JSON is what script/build_explainer.py makes from the site's YAML today.
+    @Test(.enabled(if: RepoFiles.has("script/build_explainer.py"))) func theCommittedJSONMatchesTheSiteContent() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", Self.repository.appendingPathComponent("script/build_explainer.py").path, "--check"]
+        let output = Pipe()
+        process.standardOutput = output; process.standardError = output
+        try process.run(); process.waitUntilExit()
+        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        // Without PyYAML the script can't run; the database test above still checks the JSON itself.
+        if text.contains("No module named 'yaml'") { return }
+        #expect(process.terminationStatus == 0, "\(text)")
+    }
 
     @Test func hostsMatchExactNamesFirstThenTheLongestPattern() {
         // gateway.icloud.com has its own entry, though *.icloud.com covers it too.
@@ -48,6 +60,16 @@ struct ExplainerTests {
         #expect(explainer.host("") == nil)
     }
 
+    @Test func codexAndItsKnownHostsHaveDescriptions() {
+        #expect(explainer.process(name: "codex")?.slug == "codex")
+        #expect(explainer.host("chatgpt.com")?.slug == "chatgpt-com")
+        #expect(explainer.host("api.openai.com")?.slug == "api-openai-com")
+        #expect(explainer.host("developers.openai.com")?.slug == "developers-openai-com")
+        #expect(explainer.host("mcp.cloudflare.com")?.slug == "mcp-cloudflare-com")
+        #expect(explainer.host("mcp.vercel.com")?.slug == "mcp-vercel-com")
+        #expect(explainer.host("fake-chatgpt.com") == nil)
+    }
+
     @Test func processesMatchByPathThenIdentifierThenName() {
         #expect(explainer.process(path: "/usr/libexec/nsurlsessiond")?.slug == "nsurlsessiond")
         #expect(explainer.process(identifier: "com.apple.cloudd")?.slug == "cloudd")
@@ -58,6 +80,8 @@ struct ExplainerTests {
         #expect(explainer.process(name: "WiFiAgent")?.slug == "airportd")
         // The path wins over a misleading name.
         #expect(explainer.process(name: "bird", path: "/usr/libexec/trustd")?.slug == "trustd")
+        // A database path covers everything under it, so none may be a folder apps share.
+        #expect(explainer.process(path: "/Applications/Acme.app/Contents/MacOS/Acme") == nil)
         #expect(explainer.process(name: "not-a-process") == nil)
     }
 
@@ -65,9 +89,14 @@ struct ExplainerTests {
         // nettop and Kilobat cut names to 15 characters.
         #expect(explainer.process(name: "identityservice")?.slug == "identityservicesd")
         #expect(explainer.process(name: "com.apple.Mobil")?.slug == "mobileassetd")
-        // Electron helpers are named after their app; Chrome's have their own page.
-        #expect(explainer.process(name: "Slack Helper (Renderer)")?.slug == "electron-helpers")
-        #expect(explainer.process(name: "Code Helper")?.slug == "electron-helpers")
+        // Electron helpers are named after their app: apps with their own page get it, the rest the generic Electron
+        // page. Chrome's have their own page.
+        #expect(explainer.process(name: "Slack Helper (Renderer)")?.slug == "slack")
+        #expect(explainer.process(name: "Code Helper")?.slug == "vscode")
+        #expect(explainer.process(name: "Discord Helper (Renderer)")?.slug == "discord")
+        #expect(explainer.process(name: "Figma Helper")?.slug == "figma")
+        #expect(explainer.process(name: "Acme Helper (Renderer)")?.slug == "electron-helpers")
+        #expect(explainer.process(name: "Acme Helper")?.slug == "electron-helpers")
         #expect(explainer.process(identifier: "com.microsoft.VSCode.helper")?.slug == "electron-helpers")
         #expect(explainer.process(name: "Google Chrome Helper (Renderer)")?.slug == "chrome-helper")
         // A path with a placeholder: Sparkle inside any app.

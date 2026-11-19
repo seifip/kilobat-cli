@@ -18,11 +18,13 @@ public enum LANScan {
     /// Sweeps when asked, reads the neighbour cache on the router's interface (`interface` when the cache doesn't have
     /// the router yet), and names the devices `known` doesn't contain. With `described`, it also browses Bonjour and
     /// asks UPnP who is there, fetching the UPnP descriptions of devices not in `described` (eight at most).
-    public static func run(gateway: String?, interface fallback: String?, sweep: Bool, known: Set<String>, described: Set<String>? = nil) async -> Result {
+    /// `widest` is the widest block swept around this Mac, as a prefix length: 24 for the usual look, down to
+    /// `widestSweep` when the person asks for the whole network.
+    public static func run(gateway: String?, interface fallback: String?, sweep: Bool, widest: Int = 24, known: Set<String>, described: Set<String>? = nil) async -> Result {
         var rows = await ExpertTools.devices()
         guard let interface = gateway.flatMap({ gateway in rows.first { $0.address == gateway }?.interface }) ?? fallback else { return Result(rows: rows, sightings: [], router: nil) }
         if sweep, let subnet = subnet(interface: interface) {
-            await touch(hosts(address: subnet.address, mask: subnet.mask))
+            await touch(hosts(address: subnet.address, mask: subnet.mask, widest: widest))
             try? await Task.sleep(for: .milliseconds(1500))
             rows = await ExpertTools.devices()
         }
@@ -75,7 +77,7 @@ public enum LANScan {
         var seen: Set<String> = []
         return rows.compactMap { row in
             guard row.interface == interface, let mac = MACAddress.normalized(row.mac), MACAddress.unicast(mac), !own.contains(mac),
-                  !row.address.hasSuffix(".255"), seen.insert(mac).inserted else { return nil }
+                  seen.insert(mac).inserted else { return nil }
             return DeviceSighting(mac: mac, address: row.address)
         }
     }
@@ -96,12 +98,37 @@ public enum LANScan {
         return nil
     }
 
-    /// The other addresses in the subnet, 254 at most: a wider network is swept only in the /24 around this Mac.
-    /// Nothing outside the private ranges.
-    public static func hosts(address: UInt32, mask: UInt32) -> [String] {
-        let private10 = address >> 24 == 10, private172 = address >> 20 == 0xAC1, private192 = address >> 16 == 0xC0A8
-        guard private10 || private172 || private192 else { return [] }
-        let mask = max(mask, 0xFFFF_FF00)
+    /// The widest block a sweep covers when the person asks for the whole network: a /22, 1,022 addresses, about four
+    /// seconds of datagrams. A /16 would be 65,534 and take over four minutes.
+    public static let widestSweep = 22
+    /// One datagram this far apart, and the wait after for the neighbour cache to fill.
+    static let spacing: TimeInterval = 0.004, settle: TimeInterval = 1.5
+
+    /// How big a sweep of this network is, for offering the whole of one wider than a /24. Nil when there is nothing
+    /// to choose: a /24 or smaller, or not a private network.
+    public struct SweepSize: Equatable, Sendable {
+        /// Addresses in the usual /24 sweep, and in the widest one offered.
+        public let nearby: Int, whole: Int
+        /// The block the whole sweep covers, such as 22, and whether the network is wider still.
+        public let prefix: Int, capped: Bool
+        /// About how long the whole sweep's datagrams and wait take, rounded up.
+        public var seconds: Int { Int((Double(whole) * LANScan.spacing + LANScan.settle).rounded(.up)) }
+    }
+    public static func sweepSize(address: UInt32, mask: UInt32) -> SweepSize? {
+        guard isPrivate(address), mask < 0xFFFF_FF00 else { return nil }
+        let prefix = max(mask.nonzeroBitCount, widestSweep)
+        return SweepSize(nearby: hosts(address: address, mask: mask).count, whole: hosts(address: address, mask: mask, widest: prefix).count,
+                         prefix: prefix, capped: mask.nonzeroBitCount < widestSweep)
+    }
+    static func isPrivate(_ address: UInt32) -> Bool { address >> 24 == 10 || address >> 20 == 0xAC1 || address >> 16 == 0xC0A8 }
+
+    /// The other addresses in the subnet: 254 at most by default, as a wider network is swept only in the /24 around
+    /// this Mac; with `widest`, in that block around it instead, never wider than `widestSweep`. Nothing outside the
+    /// private ranges.
+    public static func hosts(address: UInt32, mask: UInt32, widest: Int = 24) -> [String] {
+        guard isPrivate(address) else { return [] }
+        let prefix = min(max(widest, widestSweep), 24)
+        let mask = max(mask, UInt32.max << UInt32(32 - prefix))
         guard mask < 0xFFFF_FFFE else { return [] }
         let network = address & mask, broadcast = network | ~mask
         return (network + 1..<broadcast).filter { $0 != address }.map { value in

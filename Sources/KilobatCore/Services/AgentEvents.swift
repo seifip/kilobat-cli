@@ -84,27 +84,43 @@ public enum AgentEventSpool {
     /// Older events describe runs the app can no longer follow.
     static let maxAge: TimeInterval = 6 * 3600
 
+    // Lock a separate inode: atomic replacement and drain both change the spool's inode.
+    private static func locked<T>(_ file: URL, _ body: () throws -> T) throws -> T {
+        let fd = open(file.appendingPathExtension("lock").path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        while flock(fd, LOCK_EX) != 0 {
+            guard errno == EINTR else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        return try body()
+    }
+
     public static func append(_ event: AgentEvent, to file: URL = file) throws {
         guard event.valid else { return }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         let line = try JSONEncoder().encode(event) + Data("\n".utf8)
-        // Appends are atomic for a line this small, so two hooks at once don't interleave.
-        let descriptor = open(file.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
-        guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission) }
-        let written = line.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
-        let size = written > 0 ? Int(lseek(descriptor, 0, SEEK_END)) : 0
-        close(descriptor)
-        guard size > maxBytes, let data = try? Data(contentsOf: file) else { return }
-        // Keep the newest half so trimming doesn't happen on every append.
-        let lines = data.split(separator: UInt8(ascii: "\n")).suffix(maxLines / 2)
-        try Data(lines.joined(separator: [UInt8(ascii: "\n")]) + [UInt8(ascii: "\n")]).write(to: file, options: .atomic)
+        try locked(file) {
+            // Keep the lock through the append and any replacement.
+            let descriptor = open(file.path, O_WRONLY | O_APPEND | O_CREAT, 0o600)
+            guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+            let written = line.withUnsafeBytes { write(descriptor, $0.baseAddress, $0.count) }
+            let size = written > 0 ? Int(lseek(descriptor, 0, SEEK_END)) : 0
+            close(descriptor)
+            guard written == line.count else { throw CocoaError(.fileWriteUnknown) }
+            guard size > maxBytes, let data = try? Data(contentsOf: file) else { return }
+            // Keep the newest half so trimming doesn't happen on every append.
+            let lines = data.split(separator: UInt8(ascii: "\n")).suffix(maxLines / 2)
+            try Data(lines.joined(separator: [UInt8(ascii: "\n")]) + [UInt8(ascii: "\n")]).write(to: file, options: .atomic)
+        }
     }
 
     /// Reads and removes the spool, oldest first, dropping lines that are malformed, oversize or too old.
     public static func drain(_ file: URL = file, now: Date = Date()) -> [AgentEvent] {
-        guard let data = try? Data(contentsOf: file) else { return [] }
-        try? FileManager.default.removeItem(at: file)
-        return data.split(separator: UInt8(ascii: "\n")).suffix(maxLines).compactMap { AgentEvent.decode(Data($0)) }
-            .filter { now.timeIntervalSince($0.time) <= maxAge && $0.time <= now.addingTimeInterval(60) }
+        (try? locked(file) {
+            guard let data = try? Data(contentsOf: file) else { return [] }
+            try FileManager.default.removeItem(at: file)
+            return data.split(separator: UInt8(ascii: "\n")).suffix(maxLines).compactMap { AgentEvent.decode(Data($0)) }
+                .filter { now.timeIntervalSince($0.time) <= maxAge && $0.time <= now.addingTimeInterval(60) }
+        }) ?? []
     }
 }

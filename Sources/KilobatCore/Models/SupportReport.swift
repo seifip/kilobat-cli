@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import IOKit
 
@@ -37,6 +38,8 @@ public struct SupportReport: Codable, Sendable {
         public let uploadMbps: Double
         public let idleMs: Double?
         public let bufferbloat: String
+        public let downloadLoadedMs: Double?
+        public let uploadLoadedMs: Double?
     }
     public struct Check: Codable, Sendable {
         public let host: String
@@ -52,6 +55,9 @@ public struct SupportReport: Codable, Sendable {
 
     public let created: Date
     public let hours: Int
+    public let firstCheck: Date?
+    public let lastCheck: Date?
+    public let placeURL: String?
     /// "MacBook Pro · macOS 27.2". No serial number or name.
     public let mac: String
     /// "Wi-Fi 5 GHz, channel 149, signal −54 dBm" or "Ethernet". Never the network's name.
@@ -70,6 +76,58 @@ public struct SupportReport: Codable, Sendable {
     public var starlink: StarlinkEvidence? = nil
     /// One service much slower than the rest of the internet on this network: the route to it, for the provider.
     public var serviceRoute: ServiceRoute? = nil
+    /// A watched route the person chose to include (`with(route:)`).
+    public var route: RouteEvidence? = nil
+    /// The provider and plan the person set up in the app; the CLI's report has none.
+    public var service: Service? = nil
+    /// This network the week before and the days since a recent macOS upgrade, without the network's name.
+    public var macOSUpgrade: MacOSUpgradeComparison? = nil
+
+    public struct Service: Codable, Sendable, Equatable {
+        public var provider: String?
+        public var downloadMbps: Double?
+        public var uploadMbps: Double?
+        public var minimumMbps: Double?
+        public init(provider: String? = nil, downloadMbps: Double? = nil, uploadMbps: Double? = nil, minimumMbps: Double? = nil) {
+            self.provider = provider; self.downloadMbps = downloadMbps; self.uploadMbps = uploadMbps; self.minimumMbps = minimumMbps
+        }
+        var isEmpty: Bool { provider == nil && downloadMbps == nil && uploadMbps == nil && minimumMbps == nil }
+        /// "BT · plan 500 Mbps down, 50 Mbps up · guaranteed minimum 250 Mbps"
+        public var line: String? {
+            var parts: [String] = []
+            if let provider { parts.append(provider) }
+            switch (downloadMbps, uploadMbps) {
+            case let (down?, up?): parts.append(String(localized: "plan \(SupportReport.mbps(down)) down, \(SupportReport.mbps(up)) up", comment: "The internet plan in the provider report: download and upload speeds"))
+            case let (down?, nil): parts.append(String(localized: "plan \(SupportReport.mbps(down)) down", comment: "The internet plan in the provider report: its download speed"))
+            case let (nil, up?): parts.append(String(localized: "plan \(SupportReport.mbps(up)) up", comment: "The internet plan in the provider report: its upload speed"))
+            case (nil, nil): break
+            }
+            if let minimumMbps { parts.append(String(localized: "guaranteed minimum \(SupportReport.mbps(minimumMbps))", comment: "The contract's minimum download speed, in the provider report")) }
+            return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        }
+        /// The report's line: "Provider: BT · plan 500 Mbps down, 50 Mbps up", or "Plan 500 Mbps down" without a provider.
+        public var heading: String? {
+            guard let line else { return nil }
+            return provider != nil ? String(localized: "Provider: \(line)", comment: "The provider report’s line naming the provider and plan") : line.prefix(1).uppercased() + line.dropFirst()
+        }
+    }
+
+    /// The report with the person's provider and plan named at the top, and a finding when the tests' median download
+    /// fell under the guaranteed minimum. Measurements only: it never says the contract was breached.
+    public func with(service: Service) -> SupportReport {
+        let cleaned = Service(provider: service.provider.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 },
+                              downloadMbps: service.downloadMbps.flatMap { $0 > 0 && $0.isFinite ? $0 : nil } ?? planMbps,
+                              uploadMbps: service.uploadMbps.flatMap { $0 > 0 && $0.isFinite ? $0 : nil },
+                              minimumMbps: service.minimumMbps.flatMap { $0 > 0 && $0.isFinite ? $0 : nil })
+        guard !cleaned.isEmpty else { return self }
+        var copy = self
+        copy.service = cleaned
+        let median = planCheck?.downloadMedianMbps ?? Self.median(speedTests.map(\.downloadMbps))
+        if let minimum = cleaned.minimumMbps, let median, median < minimum {
+            copy.findings.append(String(localized: "The median download, \(Self.mbps(median)), was under the guaranteed minimum of \(Self.mbps(minimum)).", comment: "Provider report: the median measured download and the contract's minimum speed"))
+        }
+        return copy
+    }
 
     public struct ServiceRoute: Codable, Sendable {
         public let service: String
@@ -91,24 +149,28 @@ public struct SupportReport: Codable, Sendable {
     /// (`PlanSpeeds`); `planMbps` stands in for a network without one.
     public static func make(samples: [DiagnosticSnapshot], events: [NetworkEvent], speedTests: [SavedSpeedTest],
                             hours: Int, planMbps: Double? = nil, plans: [String: Double] = [:], check: DoctorReport? = nil, starlink: StarlinkEvidence? = nil,
-                            serviceSpeed: ServiceSpeedReport? = nil, mac: String = SupportReport.macDescription(), now: Date = Date()) -> SupportReport {
+                            serviceSpeed: ServiceSpeedReport? = nil, placeURL: String? = nil, macOSUpgrade: MacOSUpgradeComparison? = nil,
+                            mac: String = SupportReport.macDescription(), now: Date = Date(), calendar: Calendar = .current) -> SupportReport {
         let since = now.addingTimeInterval(-Double(hours) * 3600)
         let latest = samples.last
-        let key = latest?.networkKey, name = latest?.networkName
-        let window = samples.filter { $0.date >= since && $0.networkKey == key }
+        let key = latest.flatMap { $0.networkIdentified ? $0.networkKey : nil }, name = latest?.networkName
+        // With an unidentified network, summarize the current reading only.
+        let window = key == nil ? [latest].compactMap { $0 }.filter { $0.date >= since } : samples.filter { $0.date >= since && $0.networkKey == key }
         let outages = events
-            .filter { $0.kind == "Unreachable" && $0.network == name && ($0.end ?? now) >= since }
+            .filter { $0.kind == "Unreachable" && key != nil && $0.networkKey == key && ($0.end ?? now) >= since }
             .map { Outage(start: max($0.start, since), end: min($0.end ?? now, now)) }
             .filter { $0.end > $0.start }
         let speeds = speedTests
-            .filter { $0.result.date >= since && $0.networkKey == key }
+            .filter { $0.result.date >= since && $0.result.date <= now && $0.networkKey == key && $0.networkChanged != true }
             .suffix(10)
             .map { Speed(date: $0.result.date, downloadMbps: $0.result.downloadMbps, uploadMbps: $0.result.uploadMbps,
-                         idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat) }
+                         idleMs: $0.result.baseline.average, bufferbloat: $0.result.bufferbloat,
+                         downloadLoadedMs: $0.result.downloadSeconds >= 2 ? $0.result.downloadLoaded.average : nil,
+                         uploadLoadedMs: $0.result.uploadSeconds >= 2 ? $0.result.uploadLoaded.average : nil) }
         let latency = window.isEmpty ? nil : Self.latency(window)
-        let plan = key.flatMap { plans[$0] } ?? ((planMbps ?? 0) > 0 ? planMbps : nil)
+        let plan = (key.flatMap { plans[$0] } ?? planMbps).flatMap { $0 > 0 ? $0 : nil }
         // Fewer than three tests add nothing the speed tests below don't say.
-        let planCheck = PlanSummary.make(tests: speedTests, network: key, planMbps: plan, now: now).flatMap { $0.checks >= PlanSummary.enoughScheduled ? $0 : nil }
+        let planCheck = PlanSummary.make(tests: speedTests, network: key, planMbps: plan, now: now, calendar: calendar).flatMap { $0.checks >= PlanSummary.enoughScheduled ? $0 : nil }
         let doctor = check.map { report in
             Check(host: report.host, ok: report.ok, verdict: redact(report.verdict),
                   steps: report.steps.map { Step(layer: $0.title, status: $0.status.rawValue, detail: redact($0.detail)) })
@@ -122,12 +184,20 @@ public struct SupportReport: Codable, Sendable {
         let route = serviceSpeed.flatMap { report -> ServiceRoute? in
             guard report.network == key, let finding = report.finding, finding.kind == "route", finding.latest >= since else { return nil }
             return ServiceRoute(service: finding.service, slowMbps: finding.slowMbps, elsewhereMbps: finding.elsewhereMbps, transfers: finding.slowTransfers,
-                                since: finding.since, pattern: finding.pattern?.sentence, trace: finding.trace.map(ServiceSpeedReport.traceSentence), address: finding.trace?.address)
+                                since: finding.since, pattern: finding.pattern?.sentence, trace: finding.trace.flatMap(ServiceSpeedReport.traceSentence), address: finding.trace?.address)
         }
         if route != nil, let line = serviceSpeed?.providerLine {
             if latency == nil, outages.isEmpty, speeds.isEmpty, planCheck == nil, doctor == nil, starlink?.finding == nil { lines = [line] } else { lines.append(line) }
         }
-        return SupportReport(created: now, hours: hours, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
+        // A recent macOS upgrade, compared on this report's network only; what got worse leads its line.
+        let upgrade = macOSUpgrade.flatMap { $0.comparable && key != nil && $0.networkKey == key ? $0.withoutNetwork : nil }
+        if let upgrade, !upgrade.worse.isEmpty { lines.append(upgrade.summary) }
+        let suppliedURL = placeURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeURL = suppliedURL.flatMap { value -> String? in
+            guard let parts = URLComponents(string: value), ["http", "https"].contains(parts.scheme?.lowercased() ?? ""), parts.host != nil, parts.user == nil, parts.password == nil else { return nil }
+            return value
+        }
+        return SupportReport(created: now, hours: hours, firstCheck: window.map(\.date).min(), lastCheck: window.map(\.date).max(), placeURL: safeURL, mac: mac, connection: latest.map(connection) ?? String(localized: "No checks recorded yet", comment: "The provider report’s connection line before any health check ran"),
                              findings: lines,
                              latency: latency, outages: outages, speedTests: Array(speeds), planMbps: plan, planCheck: planCheck, check: doctor,
                              leftOut: [String(localized: "the network’s name", comment: "Left out of the provider report; items are joined with semicolons"),
@@ -135,7 +205,7 @@ public struct SupportReport: Codable, Sendable {
                                        String(localized: "device names and hardware addresses", comment: "Left out of the provider report; items are joined with semicolons"),
                                        String(localized: "which apps used the network", comment: "Left out of the provider report; items are joined with semicolons")]
                                      + (starlink == nil ? [] : [String(localized: "the dish’s serial number and location", comment: "Left out of the provider report; items are joined with semicolons")]),
-                             starlink: starlink?.outages.isEmpty == false ? starlink : nil, serviceRoute: route)
+                             starlink: starlink?.outages.isEmpty == false ? starlink : nil, serviceRoute: route, macOSUpgrade: upgrade)
     }
 
     // MARK: Measurements
@@ -215,6 +285,11 @@ public struct SupportReport: Codable, Sendable {
             if !route.service.isEmpty { names.append((route.service, service)) }
             if let address = route.address, !address.isEmpty { names.append((address, server)) }
         }
+        if let watched = route {
+            let word = String(localized: "the host watched", comment: "Replaces a watched route's host in the provider report, mid-sentence")
+            names.append((watched.host, word))
+            if let address = watched.hops.last(where: { $0.destination })?.router, !address.isEmpty { names.append((address, word)) }
+        }
         guard !names.isEmpty else { return self }
         // Longest first, so a name inside another (github.com in api.github.com) can't leave half of it behind.
         names.sort { $0.0.count > $1.0.count }
@@ -235,6 +310,7 @@ public struct SupportReport: Codable, Sendable {
             ServiceRoute(service: service, slowMbps: $0.slowMbps, elsewhereMbps: $0.elsewhereMbps, transfers: $0.transfers, since: $0.since,
                          pattern: $0.pattern.map(scrub), trace: $0.trace.map(scrub), address: nil)
         }
+        copy.route = route?.withoutNames()
         copy.leftOut.append(String(localized: "the names of the sites checked", comment: "Left out of the provider report; items are joined with semicolons"))
         return copy
     }
@@ -299,4 +375,216 @@ public struct SupportReport: Codable, Sendable {
             : value < 90 ? String(localized: "\(String(format: "%.0f", locale: Locale.current, value)) min", comment: "Minutes, abbreviated") : String(localized: "\(String(format: "%.1f", locale: Locale.current, value / 60)) h", comment: "Hours, abbreviated")
     }
     static func time(_ date: Date) -> String { date.formatted(.dateTime.weekday(.abbreviated).hour().minute()) }
+}
+
+// MARK: Complaint evidence
+
+/// Everything a complaint pack argues from, frozen in one value. It is saved as the evidence file whose SHA-256 the
+/// PDF prints, so anyone can check that the file is the one the PDF was made from. It carries the report as redacted
+/// and every speed test of the period on the report's network, never a network name, an address or the person's details.
+public struct ComplaintEvidence: Codable, Sendable {
+    public struct Test: Codable, Sendable, Equatable {
+        public let date: Date
+        public let downloadMbps: Double
+        public let uploadMbps: Double
+        public let idleMs: Double?
+        /// "Ethernet", "Wi-Fi", "VPN" or "Other"; nil for a test saved before Kilobat recorded it.
+        public let link: String?
+        public let band: String?
+        public let server: String?
+        /// Started by Kilobat on a schedule, not by the person.
+        public let scheduled: Bool
+        public var wired: Bool { link == "Ethernet" }
+        public init(date: Date, downloadMbps: Double, uploadMbps: Double, idleMs: Double? = nil, link: String? = nil, band: String? = nil, server: String? = nil, scheduled: Bool = false) {
+            self.date = date; self.downloadMbps = downloadMbps; self.uploadMbps = uploadMbps; self.idleMs = idleMs
+            self.link = link; self.band = band; self.server = server; self.scheduled = scheduled
+        }
+    }
+    /// What the provider sold, as the person entered it.
+    public struct Plan: Codable, Sendable, Equatable {
+        public var provider: String?
+        public var country: String?
+        public var downloadMbps: Double?
+        public var uploadMbps: Double?
+        public var minimumMbps: Double?
+        public init(provider: String? = nil, country: String? = nil, downloadMbps: Double? = nil, uploadMbps: Double? = nil, minimumMbps: Double? = nil) {
+            self.provider = provider; self.country = country; self.downloadMbps = downloadMbps; self.uploadMbps = uploadMbps; self.minimumMbps = minimumMbps
+        }
+    }
+    /// The numbers page one leads with.
+    public struct Summary: Codable, Sendable, Equatable {
+        public let tests: Int
+        public let wiredTests: Int
+        public let wifiTests: Int
+        public let scheduledTests: Int
+        /// Calendar days with at least one test.
+        public let days: Int
+        public let medianDownMbps: Double?
+        public let medianUpMbps: Double?
+        /// 7 to 11 pm, the busy hours regulators measure, and the rest of the day.
+        public let eveningTests: Int
+        public let eveningMedianMbps: Double?
+        public let daytimeTests: Int
+        public let daytimeMedianMbps: Double?
+        /// The 10th percentile download: what the slowest tenth of tests got.
+        public let worstTenthMbps: Double?
+        public let percentOfPlan: Double?
+        public let belowMinimumPercent: Double?
+        public let belowHalfPercent: Double?
+        public let outages: Int
+        public let outageMinutes: Double
+        public let longestOutageMinutes: Double?
+    }
+    /// The published credit rule and what the outages may be worth under it.
+    public struct Credit: Codable, Sendable, Equatable {
+        public let rule: String
+        public let terms: String?
+        public let source: String
+        public let checked: String
+        public let qualifies: Bool
+        public let amount: Double?
+        public let currency: String?
+        public let atLeast: Bool
+        public let verdict: String
+        public init(rule: String, terms: String?, source: String, checked: String, qualifies: Bool, amount: Double?, currency: String?, atLeast: Bool, verdict: String) {
+            self.rule = rule; self.terms = terms; self.source = source; self.checked = checked; self.qualifies = qualifies
+            self.amount = amount; self.currency = currency; self.atLeast = atLeast; self.verdict = verdict
+        }
+        public init?(_ report: CreditReport) {
+            guard let policy = report.policy else { return nil }
+            self.init(rule: policy.name, terms: report.terms, source: policy.source, checked: policy.checked, qualifies: report.estimate.qualifies,
+                      amount: report.estimate.amount, currency: report.estimate.currency, atLeast: report.estimate.atLeast, verdict: report.verdict)
+        }
+        /// "about £31.02" or "at least €30.00"
+        public var amountText: String? {
+            guard qualifies, let amount, let currency else { return nil }
+            return atLeast ? String(localized: "at least \(CreditText.money(amount, currency))", comment: "A credit estimate") : String(localized: "about \(CreditText.money(amount, currency))", comment: "A credit estimate")
+        }
+    }
+
+    public let generated: Date
+    public let from: Date
+    public let to: Date
+    /// The time zone every time in the pack is in, such as Europe/London.
+    public let timeZone: String
+    /// "Kilobat 1.31.8 (1318)"
+    public let app: String
+    public let plan: Plan
+    public let summary: Summary
+    /// Oldest first.
+    public let tests: [Test]
+    public let report: SupportReport
+    public var credit: Credit?
+
+    public init(generated: Date, from: Date, to: Date, timeZone: String, app: String, plan: Plan, summary: Summary, tests: [Test], report: SupportReport, credit: Credit?) {
+        self.generated = generated; self.from = from; self.to = to; self.timeZone = timeZone; self.app = app
+        self.plan = plan; self.summary = summary; self.tests = tests; self.report = report; self.credit = credit
+    }
+
+    /// The period's tests on the report's network, with `network` the key the report was made for.
+    public static func make(report: SupportReport, speedTests: [SavedSpeedTest], network: String?, plan: Plan, credit: Credit? = nil, app: String,
+                            timeZone: TimeZone = .current, calendar: Calendar = .current) -> ComplaintEvidence {
+        let from = report.created.addingTimeInterval(-Double(report.hours) * 3600), to = report.created
+        let tests = speedTests
+            .filter { $0.networkKey == network && $0.networkChanged != true && $0.reservedAttempt != true && $0.result.date >= from && $0.result.date <= to }
+            .sorted { $0.result.date < $1.result.date }
+            .map { saved in
+                Test(date: saved.result.date, downloadMbps: saved.result.downloadMbps, uploadMbps: saved.result.uploadMbps, idleMs: saved.result.baseline.average,
+                     link: saved.result.context?.kind, band: saved.result.context?.band, server: saved.result.server, scheduled: saved.scheduled == true)
+            }
+        return make(report: report, tests: tests, plan: plan, credit: credit, app: app, timeZone: timeZone, calendar: calendar)
+    }
+
+    /// From tests already chosen, oldest first: the sample data and the smoke test build packs this way.
+    public static func make(report: SupportReport, tests: [Test], plan: Plan, credit: Credit? = nil, app: String,
+                            timeZone: TimeZone = .current, calendar: Calendar = .current) -> ComplaintEvidence {
+        var plan = plan
+        if plan.downloadMbps == nil { plan.downloadMbps = report.service?.downloadMbps ?? report.planMbps }
+        if plan.provider == nil { plan.provider = report.service?.provider }
+        if plan.uploadMbps == nil { plan.uploadMbps = report.service?.uploadMbps }
+        if plan.minimumMbps == nil { plan.minimumMbps = report.service?.minimumMbps }
+        return ComplaintEvidence(generated: report.created, from: report.created.addingTimeInterval(-Double(report.hours) * 3600), to: report.created,
+                                 timeZone: timeZone.identifier, app: app, plan: plan,
+                                 summary: summary(tests: tests, outages: report.outages, plan: plan, calendar: calendar), tests: tests, report: report, credit: credit)
+    }
+
+    /// Two units at most, days once it runs past a day: "4 days, 2 hr", not "98 hrs, 11 min", in the verdict and the pack's tiles.
+    public static func duration(_ minutes: Double) -> String {
+        let units: Set<Duration.UnitsFormatStyle.Unit> = minutes >= 1_440 ? [.days, .hours] : [.hours, .minutes]
+        return Duration.seconds((minutes * 60).rounded()).formatted(.units(allowed: units, width: .abbreviated, maximumUnitCount: 2))
+    }
+
+    static func summary(tests: [Test], outages: [SupportReport.Outage], plan: Plan, calendar: Calendar) -> Summary {
+        let down = tests.map(\.downloadMbps)
+        let evening = tests.filter { PlanCheck.peakHours.contains(calendar.component(.hour, from: $0.date)) }.map(\.downloadMbps)
+        let daytime = tests.filter { !PlanCheck.peakHours.contains(calendar.component(.hour, from: $0.date)) }.map(\.downloadMbps)
+        let median = PlanSummary.median(down)
+        func share(_ below: Double?) -> Double? {
+            guard let below, below > 0, !down.isEmpty else { return nil }
+            return Double(down.filter { $0 < below }.count) / Double(down.count) * 100
+        }
+        return Summary(tests: tests.count, wiredTests: tests.filter(\.wired).count, wifiTests: tests.filter { $0.link == "Wi-Fi" }.count,
+                       scheduledTests: tests.filter(\.scheduled).count, days: Set(tests.map { calendar.startOfDay(for: $0.date) }).count,
+                       medianDownMbps: median, medianUpMbps: PlanSummary.median(tests.map(\.uploadMbps)),
+                       eveningTests: evening.count, eveningMedianMbps: PlanSummary.median(evening), daytimeTests: daytime.count, daytimeMedianMbps: PlanSummary.median(daytime),
+                       worstTenthMbps: down.isEmpty ? nil : down.sorted()[Int((Double(down.count - 1) * 0.1).rounded(.down))],
+                       percentOfPlan: median.flatMap { value in plan.downloadMbps.map { value / $0 * 100 } },
+                       belowMinimumPercent: share(plan.minimumMbps), belowHalfPercent: share(plan.downloadMbps.map { $0 / 2 }),
+                       outages: outages.count, outageMinutes: outages.reduce(0) { $0 + $1.minutes }, longestOutageMinutes: outages.map(\.minutes).max())
+    }
+
+    /// One sentence for page one and the letter: measured facts only, never whose fault it is.
+    public var verdict: String {
+        var parts: [String] = []
+        if let median = summary.medianDownMbps {
+            if let share = summary.percentOfPlan, let advertised = plan.downloadMbps {
+                parts.append(String(localized: "the median download was \(SupportReport.mbps(median)), \(PlanSummary.percent(share)) of the advertised \(SupportReport.mbps(advertised))",
+                                    comment: "Complaint verdict, mid-sentence: the median measured download, its share of the plan, and the plan"))
+            } else {
+                parts.append(String(localized: "the median download was \(SupportReport.mbps(median))", comment: "Complaint verdict, mid-sentence: the median measured download"))
+            }
+            if let below = summary.belowMinimumPercent, let minimum = plan.minimumMbps, below > 0 {
+                parts.append(String(localized: "\(PlanSummary.percent(below)) of \(summary.tests) tests fell below the guaranteed minimum of \(SupportReport.mbps(minimum))",
+                                    comment: "Complaint verdict, mid-sentence: the share of speed tests under the contract's minimum, the count, and the minimum"))
+            }
+        }
+        if summary.outages > 0 {
+            parts.append(summary.outages == 1
+                ? String(localized: "the internet was unreachable once, for \(ComplaintEvidence.duration(summary.outageMinutes))", comment: "Complaint verdict, mid-sentence: one outage and its length")
+                : String(localized: "the internet was unreachable \(summary.outages) times, \(ComplaintEvidence.duration(summary.outageMinutes)) in all", comment: "Complaint verdict, mid-sentence: a count of outages and their total length"))
+        }
+        guard !parts.isEmpty else { return String(localized: "Kilobat recorded no speed tests or outages on this connection in the period.", comment: "Complaint verdict without measurements") }
+        let sentence = parts.joined(separator: "; ") + "."
+        return sentence.prefix(1).uppercased() + sentence.dropFirst()
+    }
+
+    /// The evidence file's bytes: sorted keys and ISO 8601 times, so the same evidence always gives the same file.
+    public func encoded() -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        return (try? encoder.encode(self)) ?? Data()
+    }
+    /// The SHA-256 of `encoded()` in hex, as `shasum -a 256` prints it for the saved file.
+    public var fingerprint: String { Self.fingerprint(encoded()) }
+    public static func fingerprint(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
+    /// What would make the case stronger, by the thresholds Kilobat itself uses: three scheduled checks before a month
+    /// counts them alone, two evening checks before the evening median is named, and a test over a cable.
+    public enum Gap: Equatable, Sendable {
+        case plan, minimum, tests
+        case scheduled(Int)
+        case evenings(Int)
+        case wired
+    }
+    public var gaps: [Gap] {
+        var gaps: [Gap] = []
+        if plan.downloadMbps == nil { gaps.append(.plan) }
+        if plan.minimumMbps == nil { gaps.append(.minimum) }
+        guard summary.tests > 0 else { return gaps + [.tests] }
+        if summary.scheduledTests < PlanSummary.enoughScheduled { gaps.append(.scheduled(PlanSummary.enoughScheduled - summary.scheduledTests)) }
+        if summary.eveningTests < PlanSummary.enoughEvenings { gaps.append(.evenings(PlanSummary.enoughEvenings - summary.eveningTests)) }
+        if summary.wiredTests == 0 { gaps.append(.wired) }
+        return gaps
+    }
 }

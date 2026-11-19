@@ -99,7 +99,7 @@ import KilobatCore
                 "settling": status.settling, "runsOut": status.runsOut.map { iso.string(from: $0) } ?? NSNull(), "daysEarly": status.daysEarly ?? NSNull(),
                 "lastsWholePack": status.lastsWholePack,
                 "correction": pack.correction.map { ["at": iso.string(from: $0.at), "leftBytes": $0.leftBytes] as [String: Any] } ?? NSNull(),
-                "alerts": pack.thresholds, "holdUploads": pack.holdUploads == true, "summary": status.line()]
+                "alerts": pack.thresholds, "holdUploads": pack.holdUploads == true, "mode": pack.budgetMode.rawValue, "summary": status.line()]
     }
 
     static func lines(_ command: PackCommand, result: [String: Any], store: TrafficStore) -> [String] {
@@ -109,7 +109,7 @@ import KilobatCore
             let added = result["added"] as? [String: Any]
             lines.append("✓ Added \(added?["name"] as? String ?? "the pack"): \(TrafficFormat.bytes(added?["sizeBytes"] as? UInt64 ?? 0)) for \(added?["days"] as? Int ?? 0) days.")
             for name in result["ended"] as? [String] ?? [] { lines.append("  Ended \(name), which counted the same networks.") }
-            lines.append("  The networks it counts are metered now. Set alerts and holding uploads in Kilobat Settings › Data packs (Pro).")
+            lines.append("  The networks it counts are metered now. Set alerts and holding uploads in Kilobat Settings › Data & budgets › Prepaid packs (Pro).")
         case .correct: lines.append("✓ Corrected \((result["corrected"] as? [String: Any])?["name"] as? String ?? "the pack") to the carrier’s figure.")
         case .end: lines.append("✓ Ended \(result["endedPack"] as? String ?? "the pack"). It stays in the history.")
         case .status: break

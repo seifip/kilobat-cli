@@ -17,10 +17,19 @@ import Observation
     @ObservationIgnored private var places: [String: NodePlace] = [:]
     @ObservationIgnored private var lastScan = Date.distantPast
     @ObservationIgnored private let file: URL?
+    /// Every stay on every access point, for roam analysis (wifi-roams.json).
+    public private(set) var roams = RoamLog()
+    @ObservationIgnored private let roamFile: URL?
+    @ObservationIgnored private var roamsSaved = Date.distantPast
     @ObservationIgnored private let probe = DiagnosticProbe()
 
     nonisolated public static let fileName = "wifi-nodes.json"
-    /// Settings › Monitoring: tell me when the Mac stays on a far node. On unless turned off.
+    nonisolated public static let roamFileName = "wifi-roams.json"
+    /// What the app saved, for the CLI: the roam log and each network's node names.
+    nonisolated public static func saved(directory: URL) -> (roams: RoamLog, places: [String: NodePlace]) {
+        (StoredJSON.read(directory.appendingPathComponent(roamFileName)) ?? RoamLog(), StoredJSON.read(directory.appendingPathComponent(fileName)) ?? [:])
+    }
+    /// Settings › Notifications: tell me when the Mac stays on a far node. On unless turned off.
     nonisolated public static let alertsKey = "farNodeAlerts"
     nonisolated public static func alertsEnabled(_ defaults: UserDefaults = .standard) -> Bool { defaults.object(forKey: alertsKey) as? Bool ?? true }
     /// How long an episode lasts before a notification, and how often one network may get one.
@@ -47,8 +56,12 @@ import Observation
     /// `directory` nil keeps everything in memory, as screenshot runs and tests need.
     public init(directory: URL?) {
         file = directory?.appendingPathComponent(Self.fileName)
+        roamFile = directory?.appendingPathComponent(Self.roamFileName)
         if let file, let saved: [String: NodePlace] = StoredJSON.read(file) { places = saved }
+        if let roamFile, let saved: RoamLog = StoredJSON.read(roamFile) { roams = saved }
     }
+    /// The person's names for nodes on a network, by BSSID.
+    public func names(_ network: String?) -> [String: String] { network.flatMap { places[$0]?.names } ?? [:] }
     /// Kilobat's own folder; in a screenshot run (KILOBAT_SNAPSHOT) nothing is read or written.
     public convenience init() {
         let snapshot = ProcessInfo.processInfo.environment["KILOBAT_SNAPSHOT"] != nil
@@ -57,29 +70,46 @@ import Observation
     public func place(_ network: String) -> NodePlace? { places[network] }
     private static let snapshotRun = ProcessInfo.processInfo.environment["KILOBAT_SNAPSHOT"] != nil
 
+    private func interruptEpisode() {
+        defer { detector.reset() }
+        if roams.open != nil { roams.interrupt(); saveRoams(force: true) }
+        guard let report, let key = report.network, var place = places[key],
+              let last = place.episodes.indices.last, place.episodes[last].end == nil else { return }
+        place.episodes[last].end = max(report.date, place.episodes[last].start)
+        places[key] = place
+        save()
+    }
+
+    private var observation = UUID()
+
     /// One health check.
     public func observe(_ snapshot: DiagnosticSnapshot, locationAllowed: Bool) async {
         // A screenshot run shows sample nodes and never scans.
         guard !Self.snapshotRun else { return }
+        let token = UUID()
+        observation = token
         let network = snapshot.networkKey
         guard snapshot.wiredInterface == nil, snapshot.radio.interface != nil, let rssi = snapshot.radio.rssi else {
-            detector.reset(); report = NodeReport(date: snapshot.date, ssid: nil, network: nil, state: .notWiFi); return
+            interruptEpisode(); report = NodeReport(date: snapshot.date, ssid: nil, network: nil, state: .notWiFi); return
         }
-        guard locationAllowed else { report = NodeReport(date: snapshot.date, ssid: snapshot.radio.ssid, network: network, state: .noLocation); return }
+        guard locationAllowed else { interruptEpisode(); report = NodeReport(date: snapshot.date, ssid: snapshot.radio.ssid, network: network, state: .noLocation); return }
         let now = Date()
         let scan = rssi < MeshNodes.weakAbove && !callLive() && !reconnecting && now.timeIntervalSince(lastScan) >= Self.scanEvery
         if scan { lastScan = now }
         let reading = await probe.nodeReading(activeScan: scan)
-        guard !reconnecting else { return }
+        guard !reconnecting, observation == token else { return }
         ingest(reading, network: network)
     }
 
     /// One reading on `network`, for `observe` and tests.
     public func ingest(_ reading: NodeReading, network: String) {
-        if report?.network != network { outcome = nil }
+        if report?.network != network { interruptEpisode(); outcome = nil }
         var place = places[network] ?? NodePlace()
         if let ssid = reading.ssid { place.ssid = ssid }
         detector.observe(reading, names: place.names)
+        let before = (roams.visits.count, roams.visits.last?.ended, roams.visits.last?.ignored)
+        roams.observe(reading, network: network, names: place.names)
+        saveRoams(force: before != (roams.visits.count, roams.visits.last?.ended, roams.visits.last?.ignored))
         let nodes = MeshNodes.nodes(reading.radios, current: reading.current?.bssid, names: place.names)
         // A named node's radios that weren't seen before take its name, so the name follows the box.
         for node in nodes { if let name = node.name { for radio in node.radios where place.names[radio.bssid] == nil { place.names[radio.bssid] = name } } }
@@ -176,7 +206,18 @@ import Observation
     #if DEBUG
     /// Made-up nodes for screenshots; debug builds only.
     public func preview(_ report: NodeReport?, outcome: NodeReconnect? = nil) { self.report = report; self.outcome = outcome }
+    public func previewRoams(_ log: RoamLog, names: [String: String] = [:], network: String) {
+        roams = log
+        if !names.isEmpty { var place = places[network] ?? NodePlace(); place.names.merge(names) { $1 }; places[network] = place }
+    }
     #endif
+
+    /// A new stay, an ended one or a new better access point saves at once; otherwise every five minutes.
+    private func saveRoams(force: Bool) {
+        guard let roamFile, force || Date().timeIntervalSince(roamsSaved) >= 300 else { return }
+        roamsSaved = Date()
+        try? JSONEncoder().encode(roams).write(to: roamFile, options: .atomic)
+    }
 
     private func save() {
         guard let file else { return }

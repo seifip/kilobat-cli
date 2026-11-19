@@ -59,6 +59,19 @@ extension WiFiConnection {
         return NodeMove(method: .power, bssid: now, rssi: now == nil ? nil : interface.rssiValue())
     }
 
+    /// Turns Wi-Fi off and on and waits until it's joined again, up to `timeout` seconds. No password; macOS rejoins by
+    /// itself and asks the router for an address. Returns whether it came back.
+    public func reconnectWiFi(timeout: Double = 30) async throws -> Bool {
+        guard let interface = CWWiFiClient.shared().interface() else { throw DiagnosticError(String(localized: "No Wi-Fi interface is available.")) }
+        try await restart()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if interface.powerOn(), interface.rssiValue() != 0 { return true }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+        return false
+    }
+
     /// The BSSID once the Mac is back on `ssid`, or nil after `timeout` seconds.
     private static func joined(_ interface: CWInterface, ssid: String, timeout: Double) async -> String? {
         let deadline = Date().addingTimeInterval(timeout)

@@ -89,7 +89,9 @@ public struct PortalNetwork: Codable, Sendable, Identifiable, Equatable {
     @ObservationIgnored public var allowed: (@MainActor () -> Bool)?
     /// The This place name for a network key. Set by the app.
     @ObservationIgnored public var placeName: (@MainActor (String) -> String?)?
-    @ObservationIgnored private var joinedAt: Date?
+    @ObservationIgnored private var observedSessionStart: Date?
+
+    public func interruptObservation() { observedSessionStart = nil; lastCheck = nil }
     @ObservationIgnored private var checkedAt: Date?
     @ObservationIgnored private var lastAlert = Date.distantPast
     @ObservationIgnored private var savedAt = Date.distantPast
@@ -147,9 +149,14 @@ public struct PortalNetwork: Codable, Sendable, Identifiable, Equatable {
     /// same as any network behind the same router address, so nothing is learned there.
     @discardableResult
     public func observe(_ check: PortalCheck, network key: String, name: String, identified: Bool = true, now: Date = Date()) -> Notice? {
-        if key != current { current = key; joinedAt = now; status = .none; lastCheck = nil }
+        if key != current { current = key; status = .none; interruptObservation() }
+        if checkedAt.map({ now.timeIntervalSince($0) > 600 }) == true { interruptObservation() }
         checkedAt = now
-        guard check.state != .offline else { return nil }
+        guard check.state != .offline, identified else {
+            interruptObservation()
+            if check.state == .portal { status = .signInNeeded }
+            return nil
+        }
         let wasIntercepted = lastCheck?.state == .portal
         lastCheck = check
         let place = placeName?(key)
@@ -166,7 +173,7 @@ public struct PortalNetwork: Codable, Sendable, Identifiable, Equatable {
             if let index = network.sessions.indices.last, network.sessions[index].end == nil {
                 let passed = max(network.sessions[index].start, network.lastPassed ?? network.sessions[index].start)
                 // Seen whole: on this network since before that last good check, and no long gap since it.
-                let whole = sameHost && (joinedAt ?? now) <= passed && now.timeIntervalSince(passed) <= 600
+                let whole = sameHost && observedSessionStart == network.sessions[index].start && now.timeIntervalSince(passed) <= 600
                 network.sessions[index].end = passed; network.sessions[index].measured = whole
                 status = .loggedOut(since: passed)
                 if whole { notice = alert(.loggedOut, network: network, now: now) }
@@ -183,6 +190,7 @@ public struct PortalNetwork: Codable, Sendable, Identifiable, Equatable {
                 // The sign-in went through between the last check and this one.
                 if let open = network.sessions.indices.last, network.sessions[open].end == nil { network.sessions[open].end = network.lastPassed ?? network.sessions[open].start }
                 network.sessions.append(PortalSession(start: now))
+                observedSessionStart = now
                 network.sessions = Array(network.sessions.suffix(20))
                 network.lastPassed = now; network.lastSeen = now
                 status = .signedIn(since: now)

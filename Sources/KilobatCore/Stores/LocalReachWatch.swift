@@ -29,6 +29,7 @@ import Observation
     @ObservationIgnored var runProbe: (String?, String?, String?, Bool, Bool) async -> LocalReachCheck = { network, gateway, interface, portal, sweep in
         await LocalReachProbe.run(network: network, gateway: gateway, interface: interface, portal: portal, sweep: sweep)
     }
+    @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var current: String?
     @ObservationIgnored private var lastOrdinary: String?
     @ObservationIgnored private var results: [String: LocalReachCheck] = [:]
@@ -47,6 +48,8 @@ import Observation
 
     /// Takes one health check. A new network gets its check after `settle`, unless one from the last hour is kept.
     public func observe(_ sample: DiagnosticSnapshot, portal: Bool, automatic: Bool = LocalReachWatch.onJoinEnabled()) {
+        let changed = self.sample?.networkKey != sample.networkKey || self.sample?.gateway != sample.gateway ||
+            self.sample?.radio.interface != sample.radio.interface || self.sample?.wiredInterface != sample.wiredInterface || self.portal != portal
         self.sample = sample; self.portal = portal
         setup = sample.setupNetwork
         let ssid = sample.wiredInterface == nil ? sample.radio.ssid : nil
@@ -55,7 +58,8 @@ import Observation
             previous = nil
         } else if let lastOrdinary, lastOrdinary != ssid { previous = lastOrdinary }
         let key = sample.networkKey
-        guard key != current else { return }
+        guard changed else { return }
+        generation = UUID()
         current = key
         pending?.cancel(); checking = false
         check = results[key].flatMap { Date().timeIntervalSince($0.date) < Self.fresh ? $0 : nil }
@@ -70,10 +74,12 @@ import Observation
     /// Checks now (the button, the CLI through the relay).
     @discardableResult public func run(sweep: Bool = true) async -> LocalReachCheck? {
         guard !checking, let sample else { return nil }
-        checking = true; defer { checking = false }
+        let generation = self.generation
+        checking = true; defer { if self.generation == generation { checking = false } }
         let key = sample.networkKey
         let interface = sample.wiredInterface ?? sample.radio.interface
         let result = await runProbe(sample.networkName, sample.gateway, interface, portal, sweep)
+        guard self.generation == generation, !Task.isCancelled else { return nil }
         results[key] = result
         if !result.services.isEmpty { onServices?(key, result.services) }
         if key == current { check = result }

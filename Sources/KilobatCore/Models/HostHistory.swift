@@ -1,8 +1,8 @@
 import Foundation
 
 // Clear and "Forget this site" for every history Kilobat keeps that names hosts: Blocked attempts (filter-events.json),
-// the agent network log (agent-network-log.json), the destinations of agent runs (sessions.json) and Protection's
-// once-a-day notification memory (UserDefaults). The transforms here are pure; each store applies them to its own data.
+// the agent network log (agent-network-log.json), the destinations of agent runs (sessions.json), Protection's
+// once-a-day notification memory (UserDefaults) and destination history (destination-history.json). The transforms here are pure; each store applies them to its own data.
 
 /// A period to clear, ending now.
 public enum HistoryRange: String, Codable, CaseIterable, Sendable {
@@ -65,7 +65,7 @@ public enum HistoryAction: Equatable, Sendable {
 
 /// The histories that name hosts.
 public enum HostHistoryKind: String, Codable, CaseIterable, Sendable {
-    case blockedAttempts, agentLog, sessions, notices
+    case blockedAttempts, agentLog, sessions, notices, destinations
 }
 
 /// What went, per history.
@@ -77,13 +77,50 @@ public struct HistoryChange: Codable, Equatable, Sendable {
     public var sessionDestinations = 0
     /// Protection's memory of which notifications went out today.
     public var notices = 0
+    /// Per-day rows of destination history.
+    public var destinations = 0
     public init() {}
-    public var total: Int { blockedAttempts + agentLogHosts + sessionDestinations + notices }
+    private enum CodingKeys: String, CodingKey { case blockedAttempts, agentLogHosts, sessionDestinations, notices, destinations }
+    /// Each count may be missing, as in a reply from an app older than destination history.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        blockedAttempts = try container.decodeIfPresent(Int.self, forKey: .blockedAttempts) ?? 0
+        agentLogHosts = try container.decodeIfPresent(Int.self, forKey: .agentLogHosts) ?? 0
+        sessionDestinations = try container.decodeIfPresent(Int.self, forKey: .sessionDestinations) ?? 0
+        notices = try container.decodeIfPresent(Int.self, forKey: .notices) ?? 0
+        destinations = try container.decodeIfPresent(Int.self, forKey: .destinations) ?? 0
+    }
+    public var total: Int { blockedAttempts + agentLogHosts + sessionDestinations + notices + destinations }
     public static func + (lhs: HistoryChange, rhs: HistoryChange) -> HistoryChange {
         var sum = lhs
         sum.blockedAttempts += rhs.blockedAttempts; sum.agentLogHosts += rhs.agentLogHosts
-        sum.sessionDestinations += rhs.sessionDestinations; sum.notices += rhs.notices
+        sum.sessionDestinations += rhs.sessionDestinations; sum.notices += rhs.notices; sum.destinations += rhs.destinations
         return sum
+    }
+}
+
+/// Some histories could not be erased; the others were. `change` is what did go.
+public struct HistoryEraseFailure: LocalizedError, Sendable {
+    public let change: HistoryChange
+    public let failed: [HostHistoryKind]
+    public let messages: [String]
+    public var errorDescription: String? { messages.joined(separator: " ") }
+}
+
+extension HistoryChange {
+    public subscript(kind: HostHistoryKind) -> Int {
+        get { switch kind { case .blockedAttempts: blockedAttempts; case .agentLog: agentLogHosts; case .sessions: sessionDestinations; case .notices: notices; case .destinations: destinations } }
+        set { switch kind { case .blockedAttempts: blockedAttempts = newValue; case .agentLog: agentLogHosts = newValue; case .sessions: sessionDestinations = newValue; case .notices: notices = newValue; case .destinations: destinations = newValue } }
+    }
+    /// Runs every step, in order. One that throws doesn't stop the rest; afterwards the failures are thrown together.
+    @MainActor public static func erasing(_ steps: [(kind: HostHistoryKind, erase: @MainActor () throws -> Int)]) throws -> HistoryChange {
+        var change = HistoryChange(), failed: [HostHistoryKind] = [], messages: [String] = []
+        for step in steps {
+            do { change[step.kind] = try step.erase() }
+            catch { failed.append(step.kind); messages.append(error.localizedDescription) }
+        }
+        if !failed.isEmpty { throw HistoryEraseFailure(change: change, failed: failed, messages: messages) }
+        return change
     }
 }
 
@@ -168,14 +205,15 @@ public enum HistoryEraser {
     /// `appDefaults` is the app's preferences domain, where Protection keeps its notification memory.
     public static func erase(_ action: HistoryAction, kinds: Set<HostHistoryKind> = Set(HostHistoryKind.allCases), directory: URL = HostHistoryFiles.directory,
                              appDefaults: UserDefaults?, now: Date = Date()) throws -> HistoryChange {
-        var change = HistoryChange()
+        var steps: [(kind: HostHistoryKind, erase: @MainActor () throws -> Int)] = []
         if kinds.contains(.blockedAttempts) {
-            change.blockedAttempts = try FilterEventJournal(file: directory.appendingPathComponent("filter-events.json")).erase(action, now: now)
+            steps.append((.blockedAttempts, { try FilterEventJournal(file: directory.appendingPathComponent("filter-events.json")).erase(action, now: now) }))
         }
-        if kinds.contains(.agentLog) { change.agentLogHosts = try AgentLogFile.erase(action, at: directory.appendingPathComponent("agent-network-log.json"), now: now) }
-        if kinds.contains(.sessions) { change.sessionDestinations = try SessionStore.erase(action, directory: directory, now: now) }
-        if kinds.contains(.notices), let appDefaults { change.notices = try ProtectionStore.erase(action, defaults: appDefaults, now: now) }
-        return change
+        if kinds.contains(.agentLog) { steps.append((.agentLog, { try AgentLogFile.erase(action, at: directory.appendingPathComponent("agent-network-log.json"), now: now) })) }
+        if kinds.contains(.sessions) { steps.append((.sessions, { try SessionStore.erase(action, directory: directory, now: now) })) }
+        if kinds.contains(.notices), let appDefaults { steps.append((.notices, { try ProtectionStore.erase(action, defaults: appDefaults, now: now) })) }
+        if kinds.contains(.destinations) { steps.append((.destinations, { try DestinationHistoryFile.erase(action, at: directory.appendingPathComponent(DestinationHistory.fileName), now: now) })) }
+        return try HistoryChange.erasing(steps)
     }
 }
 

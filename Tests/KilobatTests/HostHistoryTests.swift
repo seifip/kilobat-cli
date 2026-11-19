@@ -222,6 +222,75 @@ struct HistoryEraserTests {
         #expect(try HostHistoryFiles.erase(.forget(try #require(HostMatch("example.com", subdomains: true))), directory: folder, appDefaults: defaults, now: now).total == 0)
         #expect(try HostHistoryFiles.erase(.clear(.all), directory: try directory(), appDefaults: nil, now: now).total == 0)
     }
+
+    @Test func theAppsJournalStartsOverFromAnUnreadableFile() throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("filter-events.json")
+        try Data("corrupt fixture".utf8).write(to: file)
+        let journal = FilterEventJournal(file: file, recover: true)
+        try journal.ingest([FilterEvent(date: now - 60, app: "node", endpoint: "paste.example:443", direction: "outgoing", reason: "Blocklist: paste.example")], now: now)
+        #expect(journal.events.count == 1)
+        #expect(try journal.erase(.clear(.all), now: now) == 1)
+        #expect(try Data(contentsOf: folder.appendingPathComponent("filter-events.json.corrupt")) == Data("corrupt fixture".utf8))
+    }
+
+    @Test func anUnreadableRemovedListIsRecoveredToo() throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("filter-events.json")
+        try Data("corrupt fixture".utf8).write(to: folder.appendingPathComponent("filter-events-removed.json"))
+        let journal = FilterEventJournal(file: file, recover: true)
+        try journal.ingest([FilterEvent(date: now - 60, app: "node", endpoint: "paste.example:443", direction: "outgoing", reason: "Blocklist: paste.example")], now: now)
+        #expect(journal.events.count == 1)
+        #expect(try journal.erase(.clear(.all), now: now) == 1)
+        #expect(try Data(contentsOf: folder.appendingPathComponent("filter-events-removed.json.corrupt")) == Data("corrupt fixture".utf8))
+    }
+
+    @Test func aReaderNeverMovesTheJournal() throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("filter-events.json")
+        try Data("corrupt fixture".utf8).write(to: file)
+        let journal = FilterEventJournal(file: file)
+        #expect(try Data(contentsOf: file) == Data("corrupt fixture".utf8))
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent("filter-events.json.corrupt").path))
+        #expect(throws: (any Error).self) { try journal.ingest([FilterEvent(date: now - 60, app: "node", endpoint: "a.test:443", direction: "outgoing", reason: "x")], now: now) }
+    }
+
+    @Test func oneFailureDoesNotStopTheOthers() throws {
+        do {
+            _ = try HistoryChange.erasing([(.blockedAttempts, { throw CocoaError(.fileReadCorruptFile) }), (.agentLog, { 3 }), (.sessions, { 2 })])
+            Issue.record("expected a failure")
+        } catch let failure as HistoryEraseFailure {
+            #expect(failure.failed == [.blockedAttempts])
+            #expect(failure.change.agentLogHosts == 3 && failure.change.sessionDestinations == 2)
+            #expect(!(failure.errorDescription ?? "").isEmpty)
+        }
+    }
+
+    @Test func everyStepRunsWhenNoneFails() throws {
+        var order: [Int] = []
+        let change = try HistoryChange.erasing([(.blockedAttempts, { order.append(1); return 1 }), (.agentLog, { order.append(2); return 2 }), (.sessions, { order.append(3); return 3 })])
+        #expect(change.total == 6)
+        #expect(order == [1, 2, 3])
+    }
+
+    @Test func theFilesEraseTheRestWhenOneIsUnreadable() throws {
+        let folder = try directory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let corrupt = folder.appendingPathComponent("filter-events.json")
+        try Data("corrupt fixture".utf8).write(to: corrupt)
+        var run = WorkSession(kind: .agent, title: "Claude Code", start: now - 600, lastActive: now - 60)
+        run.end = now - 60; run.destinations = ["paste.example:443", "keep.test:443"]
+        try JSONEncoder().encode([run]).write(to: folder.appendingPathComponent("sessions.json"))
+        #expect(throws: (any Error).self) {
+            try HostHistoryFiles.erase(.forget(try #require(HostMatch("paste.example"))), directory: folder, appDefaults: nil, now: now)
+        }
+        #expect(try Data(contentsOf: corrupt) == Data("corrupt fixture".utf8))
+        let runs = try JSONDecoder().decode([WorkSession].self, from: Data(contentsOf: folder.appendingPathComponent("sessions.json")))
+        #expect(runs.first?.destinations == ["keep.test:443"])
+    }
 }
 
 struct HistoryCommandTests {

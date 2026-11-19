@@ -15,6 +15,7 @@ import KilobatCore
             try await channels(json: json)
         case "networks": try await networks(Array(rest.dropFirst()), json: json)
         case "health-history": try healthHistory(Array(rest.dropFirst()), json: json)
+        case "wakes": try wakes(rest, json: json)
         case "support-report": try await supportReport(Array(rest.dropFirst()), json: json)
         case "settings": try await settings(Array(rest.dropFirst()), json: json)
         case "low-latency": try await lowLatency(Array(rest.dropFirst()))
@@ -42,6 +43,14 @@ import KilobatCore
                 let parts = [standard, radio.security, radio.transmitPowerDBm.map { "transmit \($0) dBm" }].compactMap { $0 }
                 if !parts.isEmpty { print(parts.joined(separator: " · ")) }
                 if let note = radio.securityInfo?.note { print(note) }
+                if let current = value["macAddress"] as? String {
+                    let hardware = value["hardwareAddress"] as? String
+                    switch value["privateAddress"] as? Bool {
+                    case true?: print("Private Wi-Fi address: on · the router sees \(current)\(hardware.map { ", not the hardware address \($0)" } ?? "")")
+                    case false?: print("Private Wi-Fi address: off · the router sees the hardware address \(current)")
+                    default: print("Wi-Fi address \(current)")
+                    }
+                }
             }
         case "on", "off":
             guard args.count == 1 else { throw CLIError("Use wifi on or wifi off.") }
@@ -73,12 +82,140 @@ import KilobatCore
             if args[0] == "password" { print(password); return }
             print(qr(payload) ?? payload)
             print("\(name)\(password.isEmpty ? " · open network" : " · password: \(password)")")
+        case "roams": try roams(args, json: json)
+        case "scan": try await scan(Array(args.dropFirst()) + (json ? ["--json"] : []))
+        case "watch": try await watch(Array(args.dropFirst()), json: json)
+        case "steering":
+            guard args.count == 1 else { throw CLIError("Use wifi steering [--json].") }
+            try await steering(json: json)
         case "nodes", "reconnect":
             let command: WiFiNodesCommand
             do { command = try WiFiNodesCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
             try await nodes(command, json: json)
-        default: throw CLIError("Use wifi [status|on|off|restart|disconnect|join|known|password|share|nodes|reconnect]. Run kilobat wifi --help.")
+        default: throw CLIError("Use wifi [status|scan|watch|steering|on|off|restart|disconnect|join|known|password|share|nodes|reconnect|roams]. Run kilobat wifi --help.")
         }
+    }
+
+    // MARK: Scan, watch and steering
+
+    /// `scan` and `wifi scan`: nearby networks, with `--details` everything their beacons say, as text, `--json` or `--csv`.
+    static func scan(_ args: [String]) async throws {
+        guard args.allSatisfy({ ["--json", "--csv", "--details"].contains($0) }), !(args.contains("--json") && args.contains("--csv")) else {
+            throw CLIError("Use scan [--details] [--json|--csv].")
+        }
+        let networks = try await nearbyNetworks()
+        if args.contains("--json") { print(String(decoding: try DiagnosticsCLI.scanJSON(networks), as: UTF8.self)); return }
+        if args.contains("--csv") { print(WiFiScanExport.csv(networks, date: Date()), terminator: ""); return }
+        let details = args.contains("--details")
+        print("Nearby Wi-Fi networks · macOS Location permission may be required\n")
+        for network in networks {
+            let generation = network.details?.generation.map { " · \($0.name)" } ?? ""
+            let channel = network.channel > 0 ? String(network.channel) : "—", band = network.band == "Unknown" ? "—" : network.band
+            print("\(KilobatCLI.pad(network.ssid, 30)) \(network.rssi) dBm · Ch \(channel) · \(band) · \(network.widthMHz) MHz\(network.security.map { " · \($0)" } ?? "")\(generation)")
+            if details, let line = detailLine(network) { print("    " + line) }
+        }
+        if networks.isEmpty { print("No networks returned. Enable Wi-Fi scanning in the Kilobat app.") }
+        else if networks.allSatisfy({ $0.ssid == "Hidden network" }) { print("\nNames are hidden: macOS shows them only to apps with Location permission. Open the Kilobat app and run this again.") }
+        else if details && networks.allSatisfy({ $0.details == nil }) { print("\nBeacon details need Location access, which only the Kilobat app has. Open it and run this again.") }
+    }
+
+    /// "aa:bb:… Broadcom · 2 streams · up to 1201 Mbps · 802.11k/v/r · WPA3 Personal, PMF required · 12 clients, channel 35% busy".
+    static func detailLine(_ network: NearbyNetwork) -> String? {
+        guard let d = network.details else { return nil }
+        var parts: [String] = []
+        if !network.id.hasPrefix("hidden-") { parts.append(network.id + (d.vendor.map { " " + $0 } ?? "")) }
+        if let streams = d.streams { parts.append("\(streams) stream\(streams == 1 ? "" : "s")") }
+        if let rate = d.maxRateMbps { parts.append("up to \(Int(rate.rounded())) Mbps") }
+        let roaming = [d.radioMeasurement ? "k" : nil, d.bssTransition ? "v" : nil, d.fastRoaming ? "r" : nil].compactMap { $0 }
+        parts.append(roaming.isEmpty ? "no 802.11k/v/r" : "802.11" + roaming.joined(separator: "/"))
+        if let security = d.security { parts.append(security.summary + (security.pmf == .off ? "" : ", PMF \(security.pmf.rawValue)")) }
+        if let link = d.multiLink { parts.append("multi-link" + (link.links.isEmpty ? "" : " with " + link.links.map { "\($0.band) ch \($0.channel)" }.joined(separator: ", "))) }
+        if let stations = d.stations { parts.append("\(stations) clients" + (d.channelUtilization.map { ", channel \(Int(($0 * 100).rounded()))% busy" } ?? "")) }
+        if let country = d.country { parts.append(country) }
+        if ChannelPlan.touchesDFS(network.span, band: network.band) { parts.append("DFS") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// `wifi watch [--for 2m] [--every 15s] [--json|--csv]`: scans every so often for a few minutes and reports each access
+    /// point's signal. The app does the scans when it runs (it has Location access); the CLI reads its own link between.
+    static func watch(_ args: [String], json: Bool) async throws {
+        let command: WiFiWatchCommand
+        do { command = try WiFiWatchCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
+        let probe = DiagnosticProbe()
+        let app = AppRelay.appRunning ? await connection() : nil
+        let ssid = app?["ssid"] as? String, bssid = app?["bssid"] as? String
+        let scan: WiFiWatchSession.Scan = { try await nearbyNetworks(save: false) }
+        let link: WiFiWatchSession.Link = {
+            let radio = await probe.radio()
+            var sample = RadioSample.basic(bssid: radio.bssid ?? bssid, ssid: radio.ssid ?? ssid, interface: radio.interface, rssi: radio.rssi, noise: radio.noise,
+                                           transmitMbps: radio.transmitMbps, channel: radio.channel, band: radio.band)
+            sample.widthMHz = radio.widthMHz
+            return sample
+        }
+        let session = WiFiWatchSession(scan: scan, link: link, pauseScans: { false }, clock: { Date() }, pause: { seconds in try? await Task.sleep(for: .seconds(seconds)) })
+        let quiet = json || command.csv
+        if !quiet {
+            print("Watching for \(WiFiWatchCommand.label(command.duration)), a scan every \(Int(command.interval)) s. Each scan takes Wi-Fi off its channel for a moment.")
+            if !AppRelay.appRunning { print("The Kilobat app isn’t running, so access points show without names or addresses.") }
+        }
+        var lastScans = 0
+        let recording = await session.record(duration: command.duration, interval: command.interval) { recording in
+            guard !quiet, recording.scans.count != lastScans else { return }
+            lastScans = recording.scans.count
+            let own = recording.link.last.map { " · you \($0.rssi) dBm" } ?? ""
+            print("  scan \(recording.scans.count) · \(recording.scans.last?.readings.count ?? 0) radios heard\(own)")
+        }
+        if command.csv { print(recording.csv, terminator: ""); return }
+        if json { try printObject(watchJSON(recording)); return }
+        print("")
+        for series in recording.series(limit: 10) {
+            var range = ""
+            if let low = series.low, let high = series.high, low != high { range = " (\(low) to \(high))" }
+            let mark = series.own ? "●" : series.sameNetwork ? "○" : " "
+            print("  \(mark) \(KilobatCLI.pad(series.radio.ssid, 24))\(KilobatCLI.pad("\(series.radio.band) ch \(series.radio.channel)", 14))\(series.median.map { "\($0) dBm" } ?? "—")\(range)\(series.missed > 0 ? " · missed \(series.missed)" : "")")
+        }
+        print("")
+        print(recording.summary)
+        print("Export with: kilobat wifi watch --csv > watch.csv")
+    }
+
+    static func watchJSON(_ recording: WiFiWatchRecording) -> [String: Any] {
+        let format = ISO8601DateFormatter()
+        let points: [[String: Any]] = recording.series(limit: 64).map { series in
+            ["id": series.id, "ssid": series.radio.ssid, "band": series.radio.band, "channel": series.radio.channel, "joined": series.own, "sameNetwork": series.sameNetwork,
+             "medianRssi": series.median ?? NSNull(), "minRssi": series.low ?? NSNull(), "maxRssi": series.high ?? NSNull(), "missedScans": series.missed,
+             "rssi": series.points.map { value -> Any in value ?? NSNull() }]
+        }
+        return ["start": format.string(from: recording.start), "durationSeconds": Int(recording.duration), "intervalSeconds": Int(recording.interval),
+                "scanTimes": recording.scans.map { format.string(from: $0.date) }, "skippedScans": recording.skipped, "linkSpreadDb": recording.linkSpread ?? NSNull(),
+                "summary": recording.summary, "link": recording.link.map { ["time": format.string(from: $0.date), "rssi": $0.rssi] as [String: Any] }, "accessPoints": points]
+    }
+
+    /// `wifi steering`: band steering and sticky clients, from a scan and the roam history the app keeps.
+    static func steering(json: Bool) async throws {
+        let value = try await steeringReport()
+        if json { try printObject(value); return }
+        guard value["ssid"] is String else { print("Not on Wi-Fi, or the network’s name is hidden: open the Kilobat app (it has Location access) and run this again."); return }
+        for finding in value["findings"] as? [[String: Any]] ?? [] {
+            print((finding["level"] as? String == "caution" ? "! " : "✓ ") + (finding["title"] as? String ?? ""))
+            print("  " + (finding["detail"] as? String ?? ""))
+            if let advice = finding["advice"] as? String { print("  " + advice) }
+        }
+        print("")
+        print(SteeringReport.note)
+    }
+    static func steeringReport() async throws -> [String: Any] {
+        let probe = DiagnosticProbe()
+        let radio = await probe.radio(), networks = try await nearbyNetworks(save: false)
+        let app = AppRelay.appRunning ? await connection() : nil
+        var current = RadioSample.basic(bssid: radio.bssid ?? (app?["bssid"] as? String), ssid: radio.ssid ?? (app?["ssid"] as? String), interface: radio.interface,
+                                        rssi: radio.rssi, noise: radio.noise, transmitMbps: radio.transmitMbps, channel: radio.channel, band: radio.band)
+        current.widthMHz = radio.widthMHz
+        let roams = RoamSummary(NodeWatch.saved(directory: appFolder).roams, network: nil, since: Date().addingTimeInterval(-86_400))
+        let findings = SteeringReport.evaluate(radio: current, networks: networks, supportedBands: await probe.supportedBands(), roams: roams.isEmpty ? nil : roams)
+        return ["findings": findings.map { ["kind": $0.kind.rawValue, "level": $0.level.rawValue, "title": $0.title, "detail": $0.detail,
+                                            "advice": $0.advice ?? NSNull(), "betterAccessPoint": $0.better ?? NSNull()] as [String: Any] },
+                "note": SteeringReport.note, "ssid": current.ssid ?? NSNull(), "band": radio.band ?? NSNull(), "rssi": radio.rssi ?? NSNull()]
     }
 
     // MARK: Mesh nodes
@@ -143,13 +280,79 @@ import KilobatCore
         // macOS shows Wi-Fi names only to apps with Location permission; the running app has it.
         var ssid = radio.ssid
         if ssid == nil { ssid = await appSSID() }
-        return ["powered": powered, "ssid": ssid ?? NSNull(), "interface": radio.interface ?? NSNull(), "rssi": radio.rssi ?? NSNull(),
+        var address: WiFiAddressState?
+        if let interface = radio.interface { address = await PrivateWiFiAddress.read(interface: interface) }
+        return ["macAddress": address?.current ?? NSNull(), "hardwareAddress": address?.hardware ?? NSNull(), "privateAddress": address?.isPrivate ?? NSNull(),
+                "powered": powered, "ssid": ssid ?? NSNull(), "interface": radio.interface ?? NSNull(), "rssi": radio.rssi ?? NSNull(),
                 "noise": radio.noise ?? NSNull(), "signalNoiseRatio": radio.snr ?? NSNull(), "channel": radio.channel ?? NSNull(), "band": radio.band ?? NSNull(),
                 "transmitMbps": radio.transmitMbps ?? NSNull(), "score": radio.score ?? NSNull(), "widthMHz": radio.widthMHz ?? NSNull(),
                 "standard": radio.standard ?? NSNull(), "phyMode": radio.phyMode ?? NSNull(), "security": radio.security ?? NSNull(),
                 "securityLevel": radio.securityInfo?.level.rawValue ?? NSNull(), "securityNote": radio.securityInfo?.note ?? NSNull(),
                 "transmitPowerDBm": radio.transmitPowerDBm ?? NSNull(), "countryCode": radio.countryCode ?? NSNull()]
     }
+    // MARK: Roams and wakes
+
+    static var appFolder: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat") }
+
+    /// Every stay on an access point the app recorded, as a summary, CSV or a text report for an IT desk.
+    static func roams(_ args: [String], json: Bool) throws {
+        guard case .roams(let hours, let format) = try parse(args) else { return }
+        let saved = NodeWatch.saved(directory: appFolder)
+        let names = saved.places.values.reduce(into: [String: String]()) { $0.merge($1.names) { first, _ in first } }
+        let summary = RoamSummary(saved.roams, network: nil, since: Date().addingTimeInterval(-Double(hours) * 3600), names: names)
+        switch format {
+        case .csv: print(summary.csv(names: names), terminator: ""); return
+        case .text: print(summary.text(names: names, mac: nil, system: ProcessInfo.processInfo.operatingSystemVersionString), terminator: ""); return
+        case .summary: break
+        }
+        if json {
+            let format = ISO8601DateFormatter()
+            try printObject(["roams": summary.roams, "lateRoams": summary.late, "briefStays": summary.brief, "ignoredBetter": summary.ignored.count,
+                             "accessPoints": summary.accessPoints.map { ["bssid": $0.bssid, "name": $0.name ?? NSNull(), "band": $0.band, "channel": $0.channel, "stays": $0.visits,
+                                                                        "dwellSeconds": Int($0.dwell.rounded()), "medianSignalAtRoam": $0.leftAt ?? NSNull()] as [String: Any] },
+                             "stays": summary.visits.map { visit -> [String: Any] in
+                                 ["bssid": visit.bssid, "ssid": visit.ssid ?? NSNull(), "band": visit.band, "channel": visit.channel, "joined": format.string(from: visit.start),
+                                  "lastReading": format.string(from: visit.end), "dwellSeconds": Int(visit.dwell.rounded()), "signalAtJoin": visit.firstRSSI, "signalAtLeave": visit.lastRSSI,
+                                  "weakest": visit.weakestRSSI, "ended": visit.ended?.rawValue ?? "current", "next": visit.next ?? NSNull(),
+                                  "betterHeard": visit.ignored.map { ["bssid": $0.bssid, "rssi": $0.betterRSSI, "strongerBy": $0.difference, "seconds": Int($0.seconds.rounded())] as [String: Any] } ?? NSNull()]
+                             }])
+            return
+        }
+        guard !summary.isEmpty else { print("No Wi-Fi stays recorded in the last \(hours) hours. The Kilobat app records them while it runs, with Location access."); return }
+        print("\(summary.roams) roam\(summary.roams == 1 ? "" : "s") in the last \(hours) hours · \(summary.late) at -75 dBm or weaker · \(summary.brief) stays under a minute")
+        for point in summary.accessPoints.prefix(12) {
+            print("  \(KilobatCLI.pad(point.name ?? point.bssid, 20))\(KilobatCLI.pad(point.band + " ch \(point.channel)", 14))\(KilobatCLI.pad("\(Int((point.dwell / 60).rounded())) min", 10))\(point.leftAt.map { "left at \($0) dBm" } ?? "")")
+        }
+        for line in summary.ignoredLines(names: names) { print(line) }
+        print("Export with: kilobat wifi roams --csv > roams.csv, or --text for a report to paste.")
+    }
+
+    /// Each wake the app timed: when the link, the address, DNS and the first web request came back.
+    static func wakes(_ args: [String], json: Bool) throws {
+        guard case .wakes(let days) = try parse(args) else { return }
+        let since = Date().addingTimeInterval(-Double(days) * 86_400)
+        let wakes = NetworkJournal().wakes.filter { $0.woke >= since }
+        if json {
+            let format = ISO8601DateFormatter()
+            try printObject(wakes.map { wake -> [String: Any] in
+                ["woke": format.string(from: wake.woke), "network": wake.network ?? NSNull(), "interface": wake.interface ?? NSNull(), "wired": wake.wired,
+                 "linkSeconds": wake.link ?? NSNull(), "addressSeconds": wake.address ?? NSNull(), "dnsSeconds": wake.dns ?? NSNull(), "internetSeconds": wake.internet ?? NSNull(),
+                 "pingSeconds": wake.ping ?? NSNull(), "vpn": wake.vpn ?? NSNull(), "tunnelPassedTCP": wake.tunnelTCP ?? NSNull(), "watchedSeconds": wake.watched,
+                 "problem": wake.problem == .none ? NSNull() : wake.plainProblem]
+            })
+            return
+        }
+        guard !wakes.isEmpty else { print("No wakes timed in the last \(days) days. The Kilobat app times each wake while it runs."); return }
+        for wake in wakes.suffix(30) {
+            let time = wake.woke.formatted(date: .abbreviated, time: .shortened)
+            print("\(KilobatCLI.pad(time, 22))\(wake.plainLine)\(wake.problem == .none ? "" : "  ← " + wake.plainProblem)")
+        }
+        if wakes.count > 30 { print("… \(wakes.count - 30) earlier wakes; use --json for all.") }
+    }
+    private static func parse(_ args: [String]) throws -> WiFiHistoryCommand {
+        do { return try WiFiHistoryCommand.parse(args) } catch let error as DiagnosticError { throw CLIError(error.message) }
+    }
+
     static func interfaceName() -> String { CWWiFiClient.shared().interface()?.interfaceName ?? "en0" }
 
     static func join(_ name: String, password: String?) async throws {
@@ -208,17 +411,20 @@ import KilobatCore
 
     // MARK: Channels
 
-    static func channelAdvice() async throws -> [String: Any] {
+    /// `band` defaults to the band this Mac is on.
+    static func channelAdvice(band requested: String? = nil) async throws -> [String: Any] {
         let radio = await DiagnosticProbe().radio()
         let networks = try await nearbyNetworks()
-        let band = radio.band ?? "2.4 GHz"
-        // The band's standard non-DFS channels count even when empty, so a free one can be recommended.
-        let standard = ["2.4 GHz": [1, 6, 11], "5 GHz": [36, 40, 44, 48, 149, 153, 157, 161, 165]][band] ?? []
-        let occupied = band == "2.4 GHz" ? [] : networks.filter { $0.band == band && $0.channel > 0 }.map(\.channel) + [radio.channel].compactMap { $0 }
-        let candidates = Array(Set(standard + occupied)).sorted()
-        let rows = candidates.map { (channel: $0, congestion: DiagnosticProbe.congestion(channel: $0, band: band, networks: networks)) }
-        return ["band": band, "current": radio.channel ?? NSNull(), "recommended": rows.min { $0.congestion < $1.congestion }?.channel ?? NSNull(), "networksSeen": networks.count,
-                "channels": rows.map { ["channel": $0.channel, "congestion": tenths($0.congestion)] }]
+        let band = requested ?? radio.band ?? "2.4 GHz"
+        let onBand = radio.band == band
+        // The Mac's own network is left out: a mesh shares its channel on purpose. Its name comes from the app when it runs.
+        var ssid: String?
+        if onBand { ssid = radio.ssid; if ssid == nil { ssid = await appSSID() } }
+        let advice = ChannelPlan.advice(band: band, networks: networks, ssid: ssid, channel: onBand ? radio.channel : nil, width: onBand ? radio.widthMHz : nil)
+        return ["band": band, "current": advice.current ?? NSNull(), "recommended": advice.recommended ?? NSNull(), "networksSeen": advice.networksSeen,
+                "widthMHz": advice.widthMHz, "ownNetworkLeftOut": ssid != nil, "overlappingCurrent": advice.overlappingCurrent, "advice": advice.sentence,
+                "recommendedIsDFS": advice.rows.first { $0.channel == advice.recommended }?.dfs ?? false,
+                "channels": advice.rows.map { ["channel": $0.channel, "congestion": tenths($0.cost), "dfs": $0.dfs] as [String: Any] }]
     }
     static func channels(json: Bool) async throws {
         let advice = try await channelAdvice()
@@ -227,14 +433,17 @@ import KilobatCore
         let rows = (advice["channels"] as? [[String: Any]] ?? []).map { (channel: $0["channel"] as? Int ?? 0, congestion: ($0["congestion"] as? NSNumber)?.doubleValue ?? 0) }
         guard !rows.isEmpty else { print("No nearby networks to compare on \(band)."); return }
         print("\(band) · you are on channel \(current.map(String.init) ?? "—") · \(advice["networksSeen"] as? Int ?? 0) networks seen")
+        print("For \(advice["widthMHz"] as? Int ?? 20) MHz channels" + (advice["ownNetworkLeftOut"] as? Bool == true ? " · your own network's radios left out" : " · open the Kilobat app so your own network can be left out"))
         for row in rows { print("  Ch \(KilobatCLI.pad(String(row.channel), 5))\(String(format: "%6.0f", row.congestion))\(row.channel == best ? "  ← least crowded" : "")\(row.channel == current ? "  (current)" : "")") }
+        if let sentence = advice["advice"] as? String { print(sentence) }
         print("An estimate from visible networks and their widths. Change the channel in your router’s settings.")
     }
 
     /// Nearby networks with names when the app can provide them; the CLI alone sees them unnamed.
-    static func nearbyNetworks() async throws -> [NearbyNetwork] {
+    /// `save` false keeps a watch session's repeated scans out of the saved scans.
+    static func nearbyNetworks(save: Bool = true) async throws -> [NearbyNetwork] {
         if let data = await AppRelay.ask("scan"), let networks = try? JSONDecoder().decode([NearbyNetwork].self, from: data), !networks.isEmpty {
-            SurveyJournal().saveScan(networks)
+            if save { SurveyJournal().saveScan(networks) }
             return networks
         }
         return try await DiagnosticProbe().scan()
@@ -280,7 +489,7 @@ import KilobatCore
     }
     static func networkKeys(_ store: TrafficStore) -> Set<String> {
         Set((store.preferences.networkProfiles ?? [:]).keys).union((store.preferences.networkLimits ?? [:]).keys).union((store.preferences.networkCost ?? [:]).keys)
-            .union(store.networkSessions.keys).subtracting(["unknown"])
+            .union((store.preferences.networkBudgetModes ?? [:]).keys).union(store.networkSessions.keys).subtracting(["unknown"])
     }
     static func network(_ text: String, store: TrafficStore) throws -> String {
         let matches = networkKeys(store).filter { $0 == text || store.networkSessions[$0]?.name.caseInsensitiveCompare(text) == .orderedSame }
@@ -301,7 +510,7 @@ import KilobatCore
         let effect = switch cost {
         case .automatic: "follows macOS again."
         case .unmetered: "is unmetered now."
-        case .metered: "is metered now. Kilobat " + (travel ? "switches to Travel and skips" : "skips") + " scheduled speed tests there."
+        case .metered: "is metered now. Kilobat " + (travel ? "switches to Essentials and skips" : "skips") + " scheduled speed tests there."
         }
         return ["key": key, "name": store.networkSessions[key]?.name ?? "Unknown network", "cost": cost.rawValue, "lastRecorded": current != nil && app == nil, "effect": effect]
     }
@@ -322,11 +531,12 @@ import KilobatCore
         func name(_ key: String) -> String { store.networkSessions[key]?.name ?? "Unknown network" }
         return keys.sorted { name($0).localizedStandardCompare(name($1)) == .orderedAscending }.map { key -> [String: Any] in
             let cost = key == current ? currentCost(store, app: app) : preferences.cost(of: key)
+            let budgetMode = preferences.budgetMode(for: key)
             // macOS only reports the network the Mac is on.
             let metered: [String: Any] = key == current ? cost.fields(os: os)
                 : ["metered": cost == .automatic ? NSNull() : cost == .metered, "osMetered": NSNull(), "meteredSource": cost == .automatic ? NSNull() : "you"]
             return ["key": key, "name": name(key), "profile": preferences.networkProfiles?[key]?.lowercased() ?? NSNull(), "remembered": preferences.networkProfiles?[key] != nil,
-                    "budgetGB": preferences.networkLimits?[key] ?? NSNull(), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0),
+                    "budgetMode": budgetMode.rawValue, "budgetGB": budgetMode == .off ? NSNull() : (preferences.networkLimits?[key] ?? 5), "sessionBytes": (store.networkSessions[key]?.received ?? 0) + (store.networkSessions[key]?.sent ?? 0),
                     "current": key == current, "cost": preferences.cost(of: key).rawValue].merging(metered) { $1 }
         }
     }
@@ -353,8 +563,8 @@ import KilobatCore
 
     /// A redacted report for an ISP or IT desk: findings, latency, outages, speed tests and an optional host check.
     static func supportReport(_ args: [String], json: Bool) async throws {
-        let usage = "Use support-report [--hours 1…168] [--host <host>] [--include-sites] [--markdown|--html] [--output <file>] [--json]."
-        var hours = 24, host: String?, format = "text", output: String?, includeSites = false
+        let usage = "Use support-report [--hours 1…168] [--host <host>] [--route <watch-id>] [--include-sites] [--markdown|--html] [--output <file>] [--json]."
+        var hours = 24, host: String?, format = "text", output: String?, includeSites = false, route: String?
         var index = 0
         while index < args.count {
             switch args[index] {
@@ -367,13 +577,16 @@ import KilobatCore
             case "--output", "-o":
                 guard index + 1 < args.count else { throw CLIError(usage) }
                 output = args[index + 1]; index += 2
+            case "--route":
+                guard index + 1 < args.count, !args[index + 1].hasPrefix("-") else { throw CLIError(usage) }
+                route = args[index + 1]; index += 2
             case "--include-sites": includeSites = true; index += 1
             case "--markdown": format = "markdown"; index += 1
             case "--html": format = "html"; index += 1
             default: throw CLIError(usage)
             }
         }
-        let report = try await makeSupportReport(hours: hours, host: host, includeSites: includeSites)
+        let report = try await makeSupportReport(hours: hours, host: host, includeSites: includeSites, route: route)
         let body: String
         if json { body = String(decoding: try DiagnosticsCLI.encode(report), as: UTF8.self) }
         else { body = format == "html" ? report.html : format == "markdown" ? report.markdown : report.text }
@@ -385,20 +598,26 @@ import KilobatCore
     }
 
     /// Without the names of the sites in it unless `includeSites`: the checked host and a slow service's name.
-    static func makeSupportReport(hours: Int, host: String?, includeSites: Bool = false) async throws -> SupportReport {
+    /// `route` names a watched route (its id, or the first characters of it) to add.
+    static func makeSupportReport(hours: Int, host: String?, includeSites: Bool = false, route: String? = nil) async throws -> SupportReport {
+        let watch = try route.map { id -> WatchedRoute in
+            let matches = SurveyJournal().watches.filter { $0.id.uuidString.lowercased().hasPrefix(id.lowercased()) && $0.rounds.count >= 2 }
+            guard matches.count == 1, let watch = matches.first else { throw CLIError(matches.isEmpty ? "No watched route \(id). List them with kilobat route-history --watches." : "\(id) matches several watches; give more of the id.") }
+            return watch
+        }
         let journal = NetworkJournal()
         let check: DoctorReport? = if let host { await ConnectionDoctor.run(host, policy: await AwakeCLI.policy()) } else { nil }
         let plan = KilobatCLI.appDefaults.double(forKey: "speed.planMbps")
         // The dish's own log, when this network is a Starlink dish's; a live reading adds what the app hasn't saved yet.
-        var dish = StarlinkJournal.load()
-        let status = dish.network == journal.samples.last?.networkKey ? await Starlink.status() : nil
-        if status != nil, let history = await Starlink.history() { dish.merge(history.outages); dish.lastSeen = Date() }
+        let dish = StarlinkJournal.load()
         // A slow route to one service, from what the app measured on this network.
         let services = journal.samples.last.map { ServiceSpeedReport(log: ServiceSpeedWatch.load(), network: $0.networkKey, speedTests: journal.speedTests) }
         let report = SupportReport.make(samples: journal.samples, events: journal.events, speedTests: journal.speedTests,
-                                        hours: hours, planMbps: plan, plans: PlanSpeeds.all(KilobatCLI.appDefaults), check: check,
-                                        starlink: dish.evidence(network: journal.samples.last?.networkKey, status: status, hours: hours), serviceSpeed: services)
-        return includeSites ? report : report.withoutSiteNames()
+                                        hours: hours, planMbps: plan, plans: PlanSpeeds.settings(KilobatCLI.appDefaults), check: check,
+                                        starlink: dish.evidence(network: journal.samples.last?.networkKey, hours: hours), serviceSpeed: services,
+                                        macOSUpgrade: journal.macOSComparison(network: journal.samples.last?.networkKey))
+        let routed = report.with(route: watch)
+        return includeSites ? routed : routed.withoutSiteNames()
     }
 
     static func healthRows(hours: Int) -> [[String: Any]] {
@@ -426,15 +645,17 @@ import KilobatCore
     }
     static var defaults: UserDefaults { KilobatCLI.appDefaults }
     static let settingsList: [Setting] = [
-        Setting(key: "new-apps", values: "allow|ask|block", detail: "What Travel and Work do with apps that have no rule; ask holds them until you decide in the app",
-                read: { $0.preferences.askNewApps == true ? "ask" : $0.preferences.defaultAllow ? "allow" : "block" },
+        Setting(key: "new-apps", values: "allow|alert|ask|block", detail: "What Essentials and Work do with apps that have no rule; alert allows and lists them for review (kilobat new-apps); ask holds them until you decide in the app",
+                read: { NewAppPolicy.mode($0.preferences).rawValue },
                 write: { store, value in _ = try FirewallCLI.setMode(store, newApps: value, allowApple: nil) }),
         Setting(key: "apple-software", values: "on|off", detail: "Let Apple's own software connect when new apps are asked about or blocked",
                 read: { $0.preferences.allowApple == true ? "on" : "off" }, write: { store, value in store.preferences.allowApple = try toggle(value) }),
-        Setting(key: "auto-travel", values: "on|off", detail: "Switch to Travel on metered networks such as a phone hotspot",
+        Setting(key: "auto-travel", values: "on|off", detail: "Switch to Essentials on metered networks such as a phone hotspot",
                 read: { $0.preferences.autoHotspot ? "on" : "off" }, write: { store, value in store.preferences.autoHotspot = try toggle(value) }),
         Setting(key: "pause-updaters", values: "on|off", detail: "Block updater helpers such as Google Updater and macOS Software Update while the network is metered",
                 read: { UpdaterPause.enabled($0.preferences) ? "on" : "off" }, write: { store, value in store.preferences.pauseUpdaters = try toggle(value) ? nil : false }),
+        Setting(key: "pause-cloud-sync", values: "on|off", detail: "Block Dropbox, Google Drive, OneDrive and other cloud storage clients while the network is metered; they catch up on an unmetered network",
+                read: { CloudSyncPause.enabled($0.preferences) ? "on" : "off" }, write: { store, value in store.preferences.pauseCloudSync = try toggle(value) ? nil : false }),
         Setting(key: "kill-switch", values: "on|off", detail: "Pro: block new connections while the VPN is down; arms once the VPN has carried all traffic since boot (see kilobat vpn)",
                 read: { KillSwitchState.enabled($0.preferences) ? "on" : "off" },
                 write: { store, value in
@@ -448,7 +669,7 @@ import KilobatCore
                 read: { $0.preferences.trafficScope ?? "external" },
                 write: { store, value in guard ["external", "wifi", "wired"].contains(value) else { throw CLIError("Use external, wifi or wired.") }; store.preferences.trafficScope = value }),
         Setting(key: "alerts", values: "on|off", detail: "Notify when the connection drops or degrades",
-                read: { _ in defaults.bool(forKey: "networkAlerts") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "networkAlerts") }, appRestart: true),
+                read: { _ in defaults.object(forKey: "networkAlerts") as? Bool ?? true ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "networkAlerts") }, appRestart: true),
         Setting(key: "router-alerts", values: "on|off", detail: "Pro: one notification when the router has been slower than its normal for days (on by default)",
                 read: { _ in RouterWatch.alertsEnabled(defaults) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: RouterWatch.alertsKey) }),
         Setting(key: "node-alerts", values: "on|off", detail: "One notification when the Mac stays on a far Wi-Fi mesh node for five minutes (on by default)",
@@ -466,7 +687,7 @@ import KilobatCore
                     store.preferences.blockCheckResolver = resolver == .cloudflare ? nil : resolver.rawValue
                 }),
         Setting(key: "outage-trace", values: "on|off", detail: "Run a route trace automatically during outages",
-                read: { _ in defaults.bool(forKey: "automaticOutageTrace") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "automaticOutageTrace") }, appRestart: true),
+                read: { _ in defaults.object(forKey: "automaticOutageTrace") as? Bool ?? true ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "automaticOutageTrace") }, appRestart: true),
         Setting(key: "public-ip", values: "on|off", detail: "Have the app ask Cloudflare for your public IP on network changes and every 30 minutes (off by default)",
                 read: { _ in defaults.bool(forKey: "publicIPLookup") ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: "publicIPLookup") }, appRestart: true),
         Setting(key: "speed-streams", values: "single|parallel", detail: "Speed tests in the app: one connection, or four at once",
@@ -486,12 +707,12 @@ import KilobatCore
                 write: { _, value in guard let mbps = Double(value), (0...10_000).contains(mbps) else { throw CLIError("Use 0 to 10000.") }; defaults.set(mbps, forKey: "speed.planMbps") }),
         Setting(key: "plan-check", values: "on|off", detail: "Pro: light speed tests up to three times a day, while the Mac is quiet, on networks with a plan speed set in the app (see kilobat plan)",
                 read: { _ in defaults.bool(forKey: PlanCheck.enabledKey) ? "on" : "off" }, write: { _, value in defaults.set(try toggle(value), forKey: PlanCheck.enabledKey) }),
-        Setting(key: "menu-bar", values: "icon|speed|download,upload,latency,vpn", detail: "What the menu bar item shows; vpn shows On, Split or Off and, with public-ip on, the exit IP's registry country",
-                read: { _ in let shown = ["speed", "download", "upload", "latency", "vpn"].filter { defaults.bool(forKey: "menu." + $0) }; return shown.isEmpty ? "icon" : shown.joined(separator: ",") },
+        Setting(key: "menu-bar", values: "icon|speed|download,upload,latency,vpn,budget,game", detail: "What the menu bar item shows; vpn shows On, Split or Off and, with public-ip on, the exit IP's registry country",
+                read: { _ in let shown = ["speed", "download", "upload", "latency", "vpn", "budget", "game"].filter { defaults.bool(forKey: "menu." + $0) }; return shown.isEmpty ? "icon" : shown.joined(separator: ",") },
                 write: { _, value in
                     let items = value == "icon" ? [] : value.split(separator: ",").map(String.init)
-                    guard items.allSatisfy(["speed", "download", "upload", "latency", "vpn"].contains) else { throw CLIError("Use icon, or a comma list of speed, download, upload, latency and vpn.") }
-                    for item in ["speed", "download", "upload", "latency", "vpn"] { defaults.set(items.contains(item), forKey: "menu." + item) }
+                    guard items.allSatisfy(["speed", "download", "upload", "latency", "vpn", "budget", "game"].contains) else { throw CLIError("Use icon, or a comma list of speed, download, upload, latency and vpn.") }
+                    for item in ["speed", "download", "upload", "latency", "vpn", "budget", "game"] { defaults.set(items.contains(item), forKey: "menu." + item) }
                 }),
         Setting(key: "units", values: "bytes|bits", detail: "Show rates in bytes or bits per second",
                 read: { _ in defaults.bool(forKey: "menu.bits") ? "bits" : "bytes" },

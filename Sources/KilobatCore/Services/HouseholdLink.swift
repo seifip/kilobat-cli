@@ -85,6 +85,34 @@ public enum HouseholdLink {
     }
 }
 
+/// A cancellation can arrive before the callback is registered, and the callback can
+/// still arrive after cancellation. Complete the awaiting task once in either case.
+final class SocketCompletion<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var result: Result<Value, Error>?
+
+    func install(_ continuation: CheckedContinuation<Value, Error>) -> Bool {
+        let prior = lock.withLock {
+            if result == nil { self.continuation = continuation }
+            return result
+        }
+        if let prior { continuation.resume(with: prior); return false }
+        return true
+    }
+
+    func finish(_ result: Result<Value, Error>) {
+        let waiting = lock.withLock {
+            guard self.result == nil else { return nil as CheckedContinuation<Value, Error>? }
+            self.result = result
+            let waiting = continuation
+            continuation = nil
+            return waiting
+        }
+        waiting?.resume(with: result)
+    }
+}
+
 /// One TCP connection that sends and receives whole messages.
 public final class HouseholdConnection: @unchecked Sendable {
     let connection: NWConnection
@@ -105,21 +133,30 @@ public final class HouseholdConnection: @unchecked Sendable {
     /// The other Mac's address once connected, for matching it with a device on the network.
     public var remoteAddress: String? { HouseholdLink.host(of: connection.currentPath?.remoteEndpoint ?? connection.endpoint) }
 
-    func start() async throws {
-        final class Once: @unchecked Sendable {
-            private var done = false
-            private let lock = NSLock()
-            func run(_ body: () -> Void) { lock.lock(); defer { lock.unlock() }; guard !done else { return }; done = true; body() }
+    private func operation<Value: Sendable>(
+        _ begin: (SocketCompletion<Value>) -> Void
+    ) async throws -> Value {
+        let completion = SocketCompletion<Value>()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if completion.install(continuation) { begin(completion) }
+            }
+        } onCancel: { [self] in
+            completion.finish(.failure(CancellationError()))
+            cancel()
         }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let once = Once(), connection = connection
-            connection.stateUpdateHandler = { state in
+    }
+
+    func start() async throws {
+        try await operation { (completion: SocketCompletion<Void>) in
+            let connection = connection
+            connection.stateUpdateHandler = { [weak connection] state in
                 switch state {
-                case .ready: once.run { continuation.resume() }
+                case .ready: completion.finish(.success(()))
                 case .waiting(let error), .failed(let error):
-                    let denied = HouseholdLink.denied(error, path: connection.currentPath)
-                    once.run { continuation.resume(throwing: denied ? HouseholdLinkError.localNetworkDenied : HouseholdLinkError.failed(error.localizedDescription)) }
-                case .cancelled: once.run { continuation.resume(throwing: HouseholdLinkError.closed) }
+                    let denied = HouseholdLink.denied(error, path: connection?.currentPath)
+                    completion.finish(.failure(denied ? HouseholdLinkError.localNetworkDenied : HouseholdLinkError.failed(error.localizedDescription)))
+                case .cancelled: completion.finish(.failure(HouseholdLinkError.closed))
                 default: break
                 }
             }
@@ -127,12 +164,15 @@ public final class HouseholdConnection: @unchecked Sendable {
         }
     }
 
-    public func send(_ message: HouseholdMessage) async throws {
+    public func send(_ message: HouseholdMessage, timeout: TimeInterval = 5) async throws {
         let data = try HouseholdWire.frame(message)
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error { continuation.resume(throwing: HouseholdLinkError.failed(error.localizedDescription)) } else { continuation.resume() }
-            })
+        try await HouseholdLink.within(timeout) { [self] in
+            try await operation { (completion: SocketCompletion<Void>) in
+                connection.send(content: data, completion: .contentProcessed { error in
+                    if let error { completion.finish(.failure(HouseholdLinkError.failed(error.localizedDescription))) }
+                    else { completion.finish(.success(())) }
+                })
+            }
         }
     }
 
@@ -150,10 +190,10 @@ public final class HouseholdConnection: @unchecked Sendable {
     }
 
     private func chunk() async throws -> (Data?, Bool) {
-        try await withCheckedThrowingContinuation { continuation in
+        try await operation { completion in
             connection.receive(minimumIncompleteLength: 1, maximumLength: HouseholdWire.maxFrame + 4) { data, _, complete, error in
-                if let error { continuation.resume(throwing: HouseholdLinkError.failed(error.localizedDescription)) }
-                else { continuation.resume(returning: (data, complete)) }
+                if let error { completion.finish(.failure(HouseholdLinkError.failed(error.localizedDescription))) }
+                else { completion.finish(.success((data, complete))) }
             }
         }
     }

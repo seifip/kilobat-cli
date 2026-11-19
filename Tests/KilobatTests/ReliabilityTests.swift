@@ -72,6 +72,28 @@ import Testing
         #expect(try Data(contentsOf: file) == saved)
     }
 
+    @Test func meteredNetworkDoesNotTightenWhenNotAllowedButStillRestores() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let store = TrafficStore(directory: path, startMonitoring: false)
+        store.preferences.profile = .work
+        store.tightensAutomatically = { false }
+        store.meteredChanged(false)
+        store.meteredChanged(true)
+        #expect(store.preferences.profile == .work)
+        #expect(store.preferences.autoProfileFrom == nil)
+
+        let other = try directory(); defer { try? FileManager.default.removeItem(at: other) }
+        let switched = TrafficStore(directory: other, startMonitoring: false)
+        switched.preferences.profile = .work
+        switched.meteredChanged(false)
+        switched.meteredChanged(true)
+        #expect(switched.preferences.profile == .travel)
+        switched.tightensAutomatically = { false }
+        switched.meteredChanged(false)
+        #expect(switched.preferences.profile == .work)
+        #expect(switched.preferences.autoProfileFrom == nil)
+    }
+
     @Test func unreadableFilesAreKeptAside() throws {
         let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
         try Data("{not json".utf8).write(to: path.appendingPathComponent("preferences.json"))
@@ -81,6 +103,103 @@ import Testing
         _ = NetworkJournal(directory: path)
         #expect(try Data(contentsOf: path.appendingPathComponent("preferences.json.corrupt")) == Data("{not json".utf8))
         #expect(FileManager.default.fileExists(atPath: path.appendingPathComponent("events.json.corrupt").path))
+    }
+
+    @Test func aVisitorLeavesAnUnreadableFileInPlace() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let url = path.appendingPathComponent("things.json")
+        try Data("{not json".utf8).write(to: url)
+        let value: [String]? = StoredJSON.read(url, quarantine: false)
+        #expect(value == nil)
+        #expect(try Data(contentsOf: url) == Data("{not json".utf8))
+        #expect(!FileManager.default.fileExists(atPath: url.appendingPathExtension("corrupt").path))
+    }
+
+    @Test func theOwnerStillMovesItAside() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let url = path.appendingPathComponent("things.json")
+        try Data("{not json".utf8).write(to: url)
+        let value: [String]? = StoredJSON.read(url, quarantine: true)
+        #expect(value == nil)
+        #expect(try Data(contentsOf: url.appendingPathExtension("corrupt")) == Data("{not json".utf8))
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func loadTellsMissingFromUnreadable() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let url = path.appendingPathComponent("things.json")
+        switch StoredJSON.load(url, quarantine: false) as StoredJSON.Loaded<[String]> { case .missing: break; default: Issue.record("expected missing") }
+        try Data("{not json".utf8).write(to: url)
+        switch StoredJSON.load(url, quarantine: false) as StoredJSON.Loaded<[String]> { case .unreadable: break; default: Issue.record("expected unreadable") }
+        try Data(#"["a"]"#.utf8).write(to: url)
+        switch StoredJSON.load(url, quarantine: false) as StoredJSON.Loaded<[String]> { case .value(let v): #expect(v == ["a"]); default: Issue.record("expected value") }
+    }
+
+    @Test func aVisitorNeverSavesOverPreferencesItCouldNotRead() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let file = path.appendingPathComponent("preferences.json")
+        let bytes = Data(#"{"profile":"Work","rules":"not a dictionary"}"#.utf8)
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(SavedPreferences.self, from: bytes) }
+        try bytes.write(to: file)
+        let refusedBefore = LocalFiles.refusedWrites
+        let store = TrafficStore(directory: path, startMonitoring: false, ownsFiles: false)
+        #expect(store.preferencesUnreadable)
+        store.preferences.limitGB = 9
+        #expect(try Data(contentsOf: file) == bytes)
+        #expect(store.error != nil)
+        #expect(LocalFiles.refusedWrites >= refusedBefore + 1)
+        #expect(!FileManager.default.fileExists(atPath: file.appendingPathExtension("corrupt").path))
+    }
+
+    @Test func anOwnerSavesAfterMovingTheFileAside() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let file = path.appendingPathComponent("preferences.json")
+        let bytes = Data(#"{"profile":"Work","rules":"not a dictionary"}"#.utf8)
+        try bytes.write(to: file)
+        let store = TrafficStore(directory: path, startMonitoring: false, ownsFiles: true)
+        #expect(try Data(contentsOf: file.appendingPathExtension("corrupt")) == bytes)
+        #expect(!store.preferencesUnreadable)
+        store.preferences.limitGB = 9
+        let saved = try JSONDecoder().decode(SavedPreferences.self, from: Data(contentsOf: file))
+        #expect(saved.limitGB == 9)
+    }
+
+    @Test func aStoreSavingOverANewerFileKeepsItsKeys() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let file = path.appendingPathComponent("preferences.json")
+        try Data(#"{"profile":"Work","rules":{},"limitGB":5,"autoHotspot":true,"defaultAllow":false,"someFutureSetting":1}"#.utf8).write(to: file)
+        let store = TrafficStore(directory: path, startMonitoring: false)
+        store.preferences.limitGB = 7
+        let object = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(object["limitGB"] as? Double == 7)
+        #expect(object["someFutureSetting"] as? Int == 1)
+    }
+
+    @Test func aVisitorReadsButWontSaveOverANewerSchema() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let file = path.appendingPathComponent("preferences.json")
+        let bytes = Data(#"{"schema":2,"profile":"Work","rules":{"Work":{"com.a":true}},"limitGB":5,"autoHotspot":true,"defaultAllow":false}"#.utf8)
+        try bytes.write(to: file)
+        let visitor = TrafficStore(directory: path, startMonitoring: false, ownsFiles: false)
+        #expect(visitor.preferences.rules["Work"] == ["com.a": true])
+        #expect(visitor.preferencesUnreadable)
+        visitor.preferences.limitGB = 9
+        #expect(try Data(contentsOf: file) == bytes)
+        let owner = TrafficStore(directory: path, startMonitoring: false, ownsFiles: true)
+        #expect(!owner.preferencesUnreadable)
+        owner.preferences.limitGB = 9
+        let saved = try JSONDecoder().decode(SavedPreferences.self, from: Data(contentsOf: file))
+        #expect(saved.limitGB == 9 && saved.schema == SavedPreferences.currentSchema)
+    }
+
+    @Test func aFileWithoutASchemaBehavesAsBefore() throws {
+        let path = try directory(); defer { try? FileManager.default.removeItem(at: path) }
+        let file = path.appendingPathComponent("preferences.json")
+        try Data(#"{"profile":"Work","rules":{},"limitGB":5,"autoHotspot":true,"defaultAllow":false}"#.utf8).write(to: file)
+        let visitor = TrafficStore(directory: path, startMonitoring: false, ownsFiles: false)
+        #expect(!visitor.preferencesUnreadable)
+        visitor.preferences.limitGB = 8
+        #expect(try JSONDecoder().decode(SavedPreferences.self, from: Data(contentsOf: file)).limitGB == 8)
     }
 
     @Test func oldUsageCompactsIntoHourlyBuckets() {

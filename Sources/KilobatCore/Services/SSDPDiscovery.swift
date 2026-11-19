@@ -109,22 +109,8 @@ public enum SSDPDiscovery {
         guard let url = URL(string: location), ["http", "https"].contains(url.scheme), url.host == address, url.user == nil,
               RouterCounters.IPv4PrivateAddress(address) != nil else { return nil }
         var request = URLRequest(url: url); request.timeoutInterval = 3
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.urlCredentialStorage = nil
-        let session = URLSession(configuration: configuration, delegate: DescriptionDelegate(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        // A local device's redirect must not turn discovery into an external request.
-        guard let (data, response) = try? await session.data(for: request),
-              let response = response as? HTTPURLResponse, response.statusCode == 200,
-              data.count <= 262_144 else { return nil }
+        // RouterSession: no proxy, no redirects (a local device's redirect must not turn discovery into an external request), a size cap.
+        guard let (data, response) = try? await RouterSession(pin: nil).send(request, limit: 262_144), response.statusCode == 200 else { return nil }
         return UPnPDescription.parse(data)
-    }
-
-    private final class DescriptionDelegate: NSObject, URLSessionTaskDelegate {
-        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-            completionHandler(nil)
-        }
     }
 }

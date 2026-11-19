@@ -263,3 +263,68 @@ struct BluetoothAudioTests {
         #expect(throws: DiagnosticError.self) { try BluetoothCommand.parse(["bluetooth", "airpods"]) }
     }
 }
+
+/// AirDrop's link is read by ifconfig, and its users by lsof only when a caller needs them.
+struct AWDLCommandTests {
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock(); private var value = 0
+        func bump() { lock.lock(); value += 1; lock.unlock() }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    private static let down = CommandResult(output: "awdl0: flags=8802<BROADCAST,SIMPLEX,MULTICAST> mtu 1484\n\tstatus: inactive\n", status: 0)
+    private static let upIdle = CommandResult(output: "awdl0: flags=8943<UP,BROADCAST,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1484\n\tstatus: inactive\n", status: 0)
+    private static let upActive = CommandResult(output: "awdl0: flags=8943<UP,BROADCAST,RUNNING,PROMISC,SIMPLEX,MULTICAST> mtu 1484\n\tstatus: active\n", status: 0)
+    private static let lsof = CommandResult(output: "p100\ncsharingd\nn[fe80::1%awdl0]:1234\n", status: 0)
+
+    private func run(_ interface: CommandResult, _ mode: NearbyRadios.AWDLUsers) async -> (AWDLStatus, Int) {
+        let launches = Counter()
+        let status = await NearbyRadios.awdlStatus(users: mode, interface: { interface }, sockets: { launches.bump(); return Self.lsof })
+        return (status, launches.count)
+    }
+
+    @Test func lsofNeverRunsWhileTheLinkIsDown() async {
+        for mode in [NearbyRadios.AWDLUsers.whenUp, .whenActive, .never] {
+            let (status, launches) = await run(Self.down, mode)
+            #expect(launches == 0)
+            #expect(status.up == false)
+        }
+    }
+    @Test func lsofRunsOnlyWhenTheModeNeedsIt() async {
+        let idle = [await run(Self.upIdle, .whenUp).1, await run(Self.upIdle, .whenActive).1, await run(Self.upIdle, .never).1]
+        #expect(idle == [1, 0, 0])
+        let active = [await run(Self.upActive, .whenUp).1, await run(Self.upActive, .whenActive).1, await run(Self.upActive, .never).1]
+        #expect(active == [1, 1, 0])
+    }
+    @Test func usersAreFilledWhenListedAndEmptyWhenNot() async {
+        let (listed, _) = await run(Self.upActive, .whenActive)
+        #expect(listed.up && listed.active && listed.processes == ["sharingd"] && listed.users == ["AirDrop"])
+        let (unlisted, _) = await run(Self.upActive, .never)
+        #expect(unlisted.up && unlisted.active && unlisted.users.isEmpty)
+    }
+    @Test func theOnDemandAnswerIsUnchanged() async {
+        let (status, launches) = await run(Self.upIdle, .whenUp)
+        #expect(launches == 1 && status.up && !status.active)
+    }
+
+    @Test func watchersShareOneReadingWithinThirtySeconds() async {
+        let reads = Counter()
+        let watch = AWDLWatch(read: { _ in reads.bump(); return AWDLStatus(available: true, up: true, active: true) })
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        _ = await watch.status(users: true, now: t0)
+        _ = await watch.status(users: true, now: t0.addingTimeInterval(10))
+        _ = await watch.status(users: false, now: t0.addingTimeInterval(12))
+        #expect(reads.count == 1)
+        _ = await watch.status(users: true, now: t0.addingTimeInterval(31))
+        #expect(reads.count == 2)
+    }
+    @Test func aStateOnlyReadingDoesNotAnswerAUsersRequest() async {
+        let modes = Counter()
+        let watch = AWDLWatch(read: { mode in if mode == .whenActive { modes.bump() }; return AWDLStatus(available: true, up: true, active: false) })
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        _ = await watch.status(users: false, now: t0)
+        _ = await watch.status(users: false, now: t0.addingTimeInterval(5))
+        #expect(modes.count == 0)
+        _ = await watch.status(users: true, now: t0.addingTimeInterval(8))
+        #expect(modes.count == 1)
+    }
+}

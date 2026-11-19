@@ -181,8 +181,9 @@ struct PlanCheckTests {
         #expect(PlanSpeeds.explicit(for: "home", defaults) == nil)
         PlanSpeeds.set(500, for: "home", defaults)
         #expect(PlanSpeeds.explicit(for: "home", defaults) == 500)
-        #expect(PlanSpeeds.plan(for: "café", defaults) == 500)
+        #expect(PlanSpeeds.plan(for: "café", defaults) == 100)
         PlanSpeeds.set(nil, for: "home", defaults)
+        #expect(PlanSpeeds.plan(for: "home", defaults) == nil)
         #expect(PlanSpeeds.all(defaults).isEmpty)
         PlanSpeeds.set(300, for: "unknown", defaults)
         #expect(PlanSpeeds.all(defaults).isEmpty)
@@ -196,7 +197,7 @@ struct PlanCheckTests {
         let key = sample.networkKey
         let tests = [test(at(9), down: 300, network: key), test(at(14, days: 1), down: 320, network: key), test(at(10, days: 2), down: 340, network: key),
                      test(at(20, days: 4), down: 150, network: key), test(at(21, days: 5), down: 210, network: key)]
-        let report = SupportReport.make(samples: [sample], events: [], speedTests: tests, hours: 24, planMbps: 100, plans: [key: 500], mac: "Mac", now: at(12, days: 20))
+        let report = SupportReport.make(samples: [sample], events: [], speedTests: tests, hours: 24, planMbps: 100, plans: [key: 500], mac: "Mac", now: at(12, days: 20), calendar: calendar)
         #expect(report.planMbps == 500)
         #expect(report.planCheck?.checks == 5)
         #expect(report.findings.contains { $0.hasPrefix("Over 21 days, 5 scheduled checks: median 300 Mbps of the 500 Mbps you pay for (60%); evenings 180 Mbps.") })

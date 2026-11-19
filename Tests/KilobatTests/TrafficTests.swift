@@ -87,6 +87,41 @@ struct TrafficTests {
         #expect(store.total == 100)
         #expect(store.usage.isEmpty)
     }
+
+    @Test func ratesInBitsUseOneNotation() {
+        let en = Locale(identifier: "en_US")
+        #expect(TrafficFormat.bitRate(0, locale: en) == "0 bps")
+        #expect(TrafficFormat.bitRate(80, locale: en) == "640 bps")
+        #expect(TrafficFormat.bitRate(106_250, locale: en) == "850 kbps")
+        #expect(TrafficFormat.bitRate(400_000, locale: en) == "3.2 Mbps")
+        #expect(TrafficFormat.bitRate(156_250_000, locale: en) == "1.25 Gbps")
+        #expect(TrafficFormat.bitRate(124_990, locale: en) == "1.0 Mbps", "999.92 kbps rounds up a unit, never shows 1,000 kbps")
+        #expect(TrafficFormat.bitRate(400_000, locale: Locale(identifier: "de_DE")) == "3,2 Mbps")
+        #expect(TrafficFormat.bitRate(.infinity) == "—")
+        #expect(TrafficFormat.bitRate(.nan) == "—")
+        #expect(TrafficFormat.bitRate(-1) == "—")
+        // The popover splits the number from the unit at the first space.
+        #expect(TrafficFormat.bitRate(400_000, locale: en).split(separator: " ").count == 2)
+    }
+
+    @Test func theSettingChoosesBitsOrBytes() {
+        let suite = "kilobat-test-bits-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        #expect(TrafficFormat.shownRate(400_000, defaults: defaults) == TrafficFormat.rate(400_000), "bytes until the person asks for bits")
+        defaults.set(true, forKey: TrafficFormat.bitsKey)
+        #expect(TrafficFormat.shownRate(400_000, defaults: defaults) == TrafficFormat.bitRate(400_000))
+        #expect(TrafficFormat.bitsKey == "menu.bits", "the app, the CLI and existing installs share this key")
+    }
+
+    @Test func menuBarRatesAreWholeNumbers() {
+        #expect(TrafficFormat.compactRate(3_000_000, bits: false) == "3 MB/s")
+        #expect(TrafficFormat.compactRate(3_000_000, bits: true) == "24 Mbps")
+        #expect(TrafficFormat.compactRate(100, bits: true) == "800 bps")
+        #expect(TrafficFormat.compactRate(100_000, bits: true) == "800 kbps")
+        #expect(TrafficFormat.compactRate(500, bits: false) == "500 B/s")
+        #expect(TrafficFormat.compactRate(.nan, bits: true) == "—")
+    }
 }
 
 struct ProcessOwnershipTests {
@@ -125,5 +160,21 @@ struct AppTrafficGroupTests {
         b.ownerPath = "/Applications/Two/Example.app"
         let c = AppTraffic(id: "c", name: "Standalone", bundlePath: nil)
         #expect(AppTrafficGroup.make([a, b, c], grouped: true).count == 3)
+    }
+    @Test func commandLineAgentsGoByTheirProductName() {
+        var cli = AppTraffic(id: "claude", name: "claude", bundlePath: "/Users/me/.local/share/claude/versions/2.1.3")
+        cli.processIDs = [20, 21]
+        let groups = AppTrafficGroup.make([cli, AppTraffic(id: "curl", name: "curl", bundlePath: nil)], grouped: true)
+        #expect(groups.first { $0.id == "claude" }?.summary.name == "Claude Code")
+        #expect(groups.first { $0.id == "curl" }?.summary.name == "curl")
+    }
+    @Test func interfaceReadingsPreferTheWideCounters() {
+        let narrow = ByteCount(received: 1_705_032_704, sent: 5)
+        let wide = ExpertTools.reading(name: "en0", up: true, narrow: narrow, wide: ["en0": ByteCount(received: 6_000_000_000, sent: 7_000_000_000)])
+        #expect(wide.received == 6_000_000_000 && wide.sent == 7_000_000_000)
+        let none = ExpertTools.reading(name: "en0", up: true, narrow: narrow, wide: nil)
+        #expect(none.received == 1_705_032_704 && none.sent == 5)
+        let missing = ExpertTools.reading(name: "en0", up: true, narrow: narrow, wide: ["en1": ByteCount(received: 1, sent: 1)])
+        #expect(missing.received == 1_705_032_704 && missing.sent == 5)
     }
 }

@@ -88,7 +88,11 @@ import Testing
             return (Data(#"{"code":"k7m2q9xh4d","url":"https://kilobat.app/r/k7m2q9xh4d","friends":4,"pending":1,"extraMacs":4,"gifts":["KBABC"]}"#.utf8), 200)
         })
         let status = try await client.status(license)
-        #expect(status.code == "k7m2q9xh4d" && status.extraMacs == 4 && status.gifts == ["KBABC"])
+        #expect(status.code == "k7m2q9xh4d" && status.extraMacs == 4 && status.gifts == ["KBABC"] && status.macKeys == nil)
+        let withKeys = ReferralClient(website: URL(string: "https://kilobat.app")!, transport: { _ in
+            (Data(#"{"code":"k7m2q9xh4d","url":"https://kilobat.app/r/k7m2q9xh4d","friends":1,"pending":0,"extraMacs":1,"gifts":[],"macKeys":["KILOBAT-ABC"]}"#.utf8), 200)
+        })
+        #expect(try await withKeys.status(license).macKeys == ["KILOBAT-ABC"])
         #expect(status.friendsToNextGift == 2 && status.shortURL == "kilobat.app/r/k7m2q9xh4d")
         let tampered = ReferralClient(website: URL(string: "https://kilobat.app")!, transport: { _ in
             (Data(#"{"code":"../evil","url":"https://kilobat.app/r/x","friends":0,"pending":0,"extraMacs":0,"gifts":[]}"#.utf8), 200)
@@ -172,5 +176,47 @@ import Testing
     }
     @Test func qrEscapesCredentials() {
         #expect(WiFiShareDetails.payload(name: "Guest;WiFi", password: "a:b\\c", security: "WPA") == "WIFI:T:WPA;S:Guest\\;WiFi;P:a\\:b\\\\c;;")
+    }
+    @Test func aLicenseIsCheckedOnceADay() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let license = AppLicense(key: "KEY", instanceID: "I", businessID: "B", productID: "P", now: start)
+        #expect(!LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_399)))
+        #expect(LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_400)))
+        #expect(!LicenseCheck.due(license, business: "X", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_400)))
+        #expect(!LicenseCheck.due(license, business: "B", products: ["Q"], lastAttempt: nil, now: start.addingTimeInterval(86_400)))
+        #expect(!LicenseCheck.due(nil, business: "B", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_400)))
+    }
+    @Test func aLicenseTheServiceCalledInvalidIsCheckedAgain() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var license = AppLicense(key: "KEY", instanceID: "I", businessID: "B", productID: "P", now: start)
+        license.revoked = true
+        #expect(LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_400)))
+        #expect(!license.matches(business: "B", products: ["P"]))
+    }
+    @Test func aLicenseDeactivatedHereIsLeftAlone() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var license = AppLicense(key: "KEY", instanceID: "I", businessID: "B", productID: "P", now: start)
+        license.revoked = true; license.deactivatedHere = true
+        #expect(!LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: nil, now: start.addingTimeInterval(86_400 * 30)))
+    }
+    @Test func aFailedCheckWaitsAnHour() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let license = AppLicense(key: "KEY", instanceID: "I", businessID: "B", productID: "P", now: start)
+        let now = start.addingTimeInterval(90_000)
+        #expect(LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: nil, now: now))
+        #expect(!LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: start.addingTimeInterval(89_000), now: now))
+        #expect(LicenseCheck.due(license, business: "B", products: ["P"], lastAttempt: start.addingTimeInterval(86_000), now: now))
+    }
+    @Test func licensesSavedEarlierStillRead() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var license = AppLicense(key: "KEY", instanceID: "I", businessID: "B", productID: "P", now: start)
+        license.deactivatedHere = true
+        let data = try JSONEncoder().encode(license)
+        var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object.removeValue(forKey: "deactivatedHere")
+        let old = try JSONDecoder().decode(AppLicense.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(old.deactivatedHere == nil)
+        var expected = license; expected.deactivatedHere = nil
+        #expect(old == expected)
     }
 }

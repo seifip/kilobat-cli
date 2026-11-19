@@ -2,7 +2,8 @@ import Foundation
 import KilobatCore
 
 /// `kilobat history forget <host> [--subdomains]` and `history clear --hour|--today|--all`: the histories that name
-/// hosts (Blocked attempts, the agent network log, agent runs' destinations, Protection's notification memory).
+/// hosts (Blocked attempts, the agent network log, agent runs' destinations, Protection's notification memory,
+/// destination history).
 /// The running app holds them in memory and would write them back, so it does the erasing; otherwise the files change here.
 @MainActor enum HistoryCLI {
     struct Output: Encodable {
@@ -25,7 +26,8 @@ import KilobatCore
         if json { print(String(decoding: try DiagnosticsCLI.encode(output), as: UTF8.self)); return }
         let what = output.host.map { "Forgot \($0)" + (output.subdomains == true ? " and its subdomains" : "") } ?? "Cleared \(output.range == "all" ? "everything" : output.range == "today" ? "today" : "the last hour")"
         let parts = [("blocked attempts", output.removed.blockedAttempts), ("agent network log hosts", output.removed.agentLogHosts),
-                     ("agent run destinations", output.removed.sessionDestinations), ("notification records", output.removed.notices)]
+                     ("agent run destinations", output.removed.sessionDestinations), ("notification records", output.removed.notices),
+                     ("destination history rows", output.removed.destinations)]
             .filter { $0.1 > 0 }.map { "\($0.1) \($0.0)" }
         print("✓ " + what + ": " + (parts.isEmpty ? "nothing matched." : parts.joined(separator: ", ") + "."))
     }

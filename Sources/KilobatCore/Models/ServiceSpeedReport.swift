@@ -165,12 +165,12 @@ public struct ServiceSpeedReport: Codable, Sendable {
                 ? String(localized: "Your provider’s route to \(name) is slow", comment: "Service speed finding title")
                 : String(localized: "Your provider’s route to \(name) is slow \(when)", comment: "Service speed finding title, with tonight or today")
             detail = String(localized: "\(count) downloads from \(name) ran at about \(slowText) while other sites got \(fastText) within the same hour. The slowdown is between your provider and \(name), not your Wi-Fi or this Mac.", comment: "Service speed finding: a count, a service, two speeds")
-            advice = String(localized: "Try a VPN, or another DNS such as 1.1.1.1 so \(name) picks another server; both take another path there. Tell your provider: the provider report includes this. Or try again later.", comment: "Service speed advice for a slow route")
+            advice = String(localized: "Try a VPN, or another DNS such as 1.1.1.1 so \(name) picks another server; both take another path there. If it keeps happening, the report for your provider includes it.", comment: "Service speed advice for a slow route")
         }
         // Peering congestion is the route's story; with the status page reporting a problem it would contradict it.
         if kind == "route", let pattern { evidence.append(pattern.sentence) }
         let trace = log.networks[network]?.traces?[key].flatMap { now.timeIntervalSince($0.date) < ServiceSpeedRules.lookback ? $0 : nil }
-        if kind == "route", let trace { evidence.append(traceSentence(trace)) }
+        if kind == "route", let trace, let sentence = traceSentence(trace) { evidence.append(sentence) }
         let address = corroborated.last?.address
         return Finding(key: key, service: name, kind: kind, headline: headline, detail: detail, evidence: evidence, advice: advice,
                        slowMbps: slowMbps, elsewhereMbps: fastMbps, slowTransfers: count, since: first, latest: latest,
@@ -191,13 +191,15 @@ public struct ServiceSpeedReport: Codable, Sendable {
         return judged > 0
     }
 
-    static func traceSentence(_ trace: ServiceRouteTrace) -> String {
+    /// What a route trace showed; nil when it showed nothing, so a finding never prints "no saved traces" beside a raw address.
+    static func traceSentence(_ trace: ServiceRouteTrace) -> String? {
         if let hop = trace.hop, let rise = trace.riseMs {
             return hop <= 1
                 ? String(localized: "Route trace: the delay rises at your router (+\(String(format: "%.0f", locale: Locale.current, rise)) ms).", comment: "Service speed evidence from a route trace")
                 : String(localized: "Route trace: the delay rises by \(String(format: "%.0f", locale: Locale.current, rise)) ms at hop \(hop), beyond your router, and stays up to \(trace.address).", comment: "Service speed evidence from a route trace: a latency rise, a hop number, the server address")
         }
-        return String(localized: "Route trace to \(trace.address): \(trace.verdict)", comment: "Service speed evidence: a route trace's verdict")
+        guard trace.verdict != RouteHistory.noTraces, trace.verdict != RouteHistory.noHopAnswered else { return nil }
+        return String(localized: "Route trace: \(trace.verdict)", comment: "Service speed evidence: a route trace's verdict")
     }
 
     /// "tonight" when every slow one was this evening, "today" when today, else nothing.
@@ -220,7 +222,7 @@ public struct ServiceSpeedReport: Codable, Sendable {
     public var providerLine: String? {
         guard let finding, finding.kind == "route" else { return nil }
         let pattern = finding.pattern.map { " " + $0.sentence } ?? ""
-        let trace = finding.trace.map { " " + Self.traceSentence($0) } ?? ""
+        let trace = finding.trace.flatMap(Self.traceSentence).map { " " + $0 } ?? ""
         return String(localized: "Downloads from \(finding.service) ran at about \(Self.mbps(finding.slowMbps)) (\(finding.slowTransfers) times since \(finding.since.formatted(.dateTime.weekday(.abbreviated).hour().minute()))) while other sites reached \(Self.mbps(finding.elsewhereMbps)) within the same hour.", comment: "Provider report: a slow route to one service, its speed, a count and when it began, and the speed elsewhere") + pattern + trace
     }
 

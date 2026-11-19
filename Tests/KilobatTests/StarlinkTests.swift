@@ -187,11 +187,11 @@ struct StarlinkTests {
     @Test func theJournalKeepsEachOutageOnceAtItsLongest() {
         var journal = StarlinkJournal()
         let start = Date().addingTimeInterval(-60)
+        journal.select(network: "net", dishID: "dish1")
         journal.merge([StarlinkOutage(cause: .obstructed, start: start, seconds: 2)])
         journal.merge([StarlinkOutage(cause: .obstructed, start: start.addingTimeInterval(0.5), seconds: 6), StarlinkOutage(cause: .noSatellites, start: start, seconds: 1)])
         #expect(journal.outages.count == 2)
         #expect(journal.outages.first { $0.cause == .obstructed }?.seconds == 6)
-        journal.network = "net"; journal.lastSeen = Date()
         #expect(journal.evidence(network: "net", hours: 24)?.outages.count == 2)
         #expect(journal.evidence(network: "other", hours: 24) == nil)
     }

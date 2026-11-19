@@ -70,7 +70,7 @@ import KilobatCore
             let port = args.count > 4 ? args[4] : "", direction = args.count > 5 ? args[5] : "any"
             guard port.isEmpty || Int(port).map({ (1...65535).contains($0) }) == true, ["any", "incoming", "outgoing"].contains(direction) else { throw CLIError("Invalid port or direction.") }
             let store = TrafficStore(startMonitoring: false)
-            guard store.preferences.profile != .unrestricted else { throw CLIError("Select Travel or Work before saving a connection rule.") }
+            guard store.preferences.profile != .unrestricted else { throw CLIError("Select Essentials or Work before saving a connection rule.") }
             var rules = store.preferences.connectionRules ?? []; rules.append(ConnectionRule(app: args[2], host: args[3], port: port, direction: direction, allowed: args[1] == "allow", profile: store.preferences.profile.rawValue)); store.preferences.connectionRules = rules
             print("Rule saved. Requires an active signed filter; existing flows are unaffected.")
         case "signature":
@@ -87,23 +87,7 @@ import KilobatCore
             try allow(["--json"])
             let rows = ExpertTools.interfaces()
             if args.contains("--json") { try json(rows) } else { for row in rows { print("\(row.name)\t\(row.up ? "up" : "down")\t↓ \(row.received)\t↑ \(row.sent)\(row.vpn ? "\tVPN (overlaps physical counters)" : "")") } }
-        case "trace":
-            let usage = "Use trace <host> [--rounds 2…10] [--json]."
-            let rest = try positional(args, ["--rounds", "--json"], valued: ["--rounds"])
-            guard rest.count == 1, let host = rest.first else { throw CLIError(usage) }
-            var rounds = 1
-            if let index = args.firstIndex(of: "--rounds") {
-                guard index + 1 < args.count, let value = Int(args[index + 1]), (2...10).contains(value) else { throw CLIError(usage) }
-                rounds = value
-            }
-            let journal = SurveyJournal()
-            if rounds == 1 && !args.contains("--json") { let result = try await ExpertTools.route(to: host); journal.saveRoute(host: host, output: result); print(result); return }
-            try await ExpertTools.routeRounds(to: host, rounds: rounds) { output in
-                journal.saveRoute(host: host, output: output)
-                FileHandle.standardError.write(Data("Trace \(journal.routes.filter { $0.host == host }.count) saved.\n".utf8))
-            }
-            let history = RouteHistory(host: host, routes: journal.routes)
-            if args.contains("--json") { try json(history) } else { print(history.text) }
+        case "trace": try await TraceCLI.run(args)
         case "ip":
             try allow(["--public", "--json"])
             let path = await ExitPath.current(lookup: args.contains("--public"))
@@ -130,7 +114,7 @@ import KilobatCore
             }
             let comparison = SpeedComparison(pair.0, pair.1)
             if args.contains("--json") { try json(comparison) } else { print(comparison.text) }
-        case "dns-benchmark": try allow(["--json"]); try json(await ExpertTools.benchmarkDNS())
+        case "dns-benchmark": try allow(["--json"]); try json(await ExpertTools.benchmarkDNS(candidates: DiagnosticsCLI.dnsCandidates()))
         case "dns-profile":
             guard args.count == 2 else { throw CLIError("Use dns-profile <https-endpoint> > Kilobat-DNS.mobileconfig. Review and install manually.") }; print(String(decoding: try ExpertTools.encryptedDNSProfile(url: args[1]), as: UTF8.self))
         case "lan-test":
@@ -153,14 +137,18 @@ import KilobatCore
                 journal.removeSpot(id); print("✓ Spot removed.")
             default: throw CLIError("Use spots, spots save <name> or spots remove <id>.")
             }
-        case "scan-history": try allow(["--json"]); try json(SurveyJournal().scans)
+        case "scan-history":
+            try allow(["--json", "--csv"])
+            // CSV carries every field and each scan's note, one row per access point; JSON stays the default.
+            if args.contains("--csv") { print(WiFiScanExport.csv(SurveyJournal().scans), terminator: "") } else { try json(SurveyJournal().scans) }
         case "route-history":
+            if try TraceCLI.history(args) { return }
             try allow(["--host", "--json"], valued: ["--host"])
-            let routes = SurveyJournal().routes
+            let survey = SurveyJournal(), routes = survey.routes
             guard let index = args.firstIndex(of: "--host") else { try json(routes); return }
-            guard index + 1 < args.count else { throw CLIError("Use route-history [--host <host>] [--json]. Hosts: " + RouteHistory.hosts(routes).joined(separator: ", ")) }
-            let history = RouteHistory(host: args[index + 1], routes: routes)
-            guard history.runs > 0 else { throw CLIError("No saved traces to \(args[index + 1]). Run kilobat trace \(args[index + 1]) --rounds 3.") }
+            guard index + 1 < args.count else { throw CLIError("Use route-history [--host <host>] [--json], --watches, or --watch <id> [--json|--csv]. Hosts: " + RouteHistory.hosts(routes).joined(separator: ", ")) }
+            let history = RouteHistory(host: args[index + 1], routes: routes, watches: survey.watches)
+            guard history.runs > 0 else { throw CLIError("No saved traces to \(args[index + 1]). Run kilobat trace \(args[index + 1]) --rounds 3, or --watch.") }
             if args.contains("--json") { try json(history) } else { print(history.text) }
         case "outages", "speed-history":
             try allow(["--days", "--json"], valued: ["--days"])
@@ -170,7 +158,7 @@ import KilobatCore
                 since = Date().addingTimeInterval(-Double(days) * 86400)
             }
             let journal = NetworkJournal()
-            if command == "outages" { try json(journal.events.filter { $0.start >= since }) } else { try json(journal.speedTests.filter { $0.result.date >= since }) }
+            if command == "outages" { try json(journal.events.filter { $0.start >= since }.map(\.withoutNetworkKey)) } else { try json(journal.speedTests.filter { $0.result.date >= since }) }
         default: throw CLIError("Unknown expert command.")
         }
     }

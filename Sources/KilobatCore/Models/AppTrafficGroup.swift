@@ -11,6 +11,13 @@ public struct AppTrafficGroup: Identifiable {
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
     }
 
+    /// "Claude Code" for the `claude` command-line tool, as the agent log names it, so it doesn't read as a lowercase twin
+    /// of the Claude app. Desktop apps keep their bundle's name.
+    static func agentName(_ app: AppTraffic) -> String? {
+        guard let agent = AgentIdentifier.identify(path: app.bundlePath, name: app.name), !agent.app else { return nil }
+        return agent.name
+    }
+
     /// The group of macOS services that download for apps and the system.
     public static let systemDownloads = "system:downloads"
 
@@ -18,11 +25,13 @@ public struct AppTrafficGroup: Identifiable {
         let buckets = Dictionary(grouping: apps) { app in
             guard grouped else { return app.id }
             if SystemDownloads.service(for: app) != nil { return systemDownloads }
-            return (app.ownerPath ?? app.bundlePath.flatMap(ProcessOwnership.outerApplication)).map { "owner:" + $0 } ?? app.id
+            let owner = app.ownerPath ?? app.bundlePath.flatMap(ProcessOwnership.outerApplication)
+                ?? ProcessOwnership.helperApplication(for: app.executablePath ?? app.bundlePath)
+            return owner.map { "owner:" + $0 } ?? app.id
         }
         return buckets.map { key, members in
             let path = key.hasPrefix("owner:") ? String(key.dropFirst(6)) : nil
-            let name = key == systemDownloads ? String(localized: "System downloads") : path.map(displayName) ?? members[0].name
+            let name = key == systemDownloads ? String(localized: "System downloads") : path.map(displayName) ?? agentName(members[0]) ?? members[0].name
             var summary = AppTraffic(id: key, name: name, bundlePath: path ?? (key == systemDownloads ? nil : members[0].bundlePath))
             for member in members {
                 summary.received += member.received; summary.sent += member.sent

@@ -70,12 +70,17 @@ extension FilterPolicy.Reason {
         case .budget: "budget"
         case .quota: "quota"
         case .updaterPaused: "updaterPaused"
+        case .syncPaused: "syncPaused"
         case .appRule: "appRule"
         case .recentDecision: "approval"
         case .appleSoftware: "appleSoftware"
         case .askNewApps: "askNewApps"
         case .newAppDefault: "profileDefault"
         case .noAppRule: "noAppRule"
+        // Recorded under the names older readers know, with a field more, so their journal still reads.
+        case .subscribedList: "blocklist"
+        case .teamRule: "appRule"
+        case .askNewDestination: "askNewDestination"
         }
     }
 }
@@ -97,7 +102,7 @@ extension FilterPolicy.Verdict: Codable {
 }
 
 extension DecisionTrace.Match: Codable {
-    private enum Keys: String, CodingKey { case rule, verdict, allowed, expires, until, destination, protection, entry, app, helper, exemption, name }
+    private enum Keys: String, CodingKey { case rule, verdict, allowed, expires, until, destination, protection, entry, app, helper, exemption, name, pid, list, team }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: Keys.self)
         verdict = try values.decode(FilterPolicy.Verdict.self, forKey: .verdict)
@@ -119,12 +124,18 @@ extension DecisionTrace.Match: Codable {
         case "destinationRule": reason = .connectionRule(try values.decode(ConnectionRule.self, forKey: .destination))
         case "protection": reason = .protection(try values.decode(ProtectionDetail.self, forKey: .protection))
         case "allowedSite": reason = .siteAllowed(try text(.entry))
-        case "blocklist": reason = .blocklist(try text(.entry))
-        case "timedRule": reason = .temporaryRule(TemporaryRule(allowed: try allowed(), expires: try values.decode(Date.self, forKey: .expires)))
+        case "blocklist":
+            if let list = try values.decodeIfPresent(String.self, forKey: .list) { reason = .subscribedList(entry: try text(.entry), list: list) }
+            else { reason = .blocklist(try text(.entry)) }
+        case "timedRule": reason = .temporaryRule(TemporaryRule(allowed: try allowed(), expires: try values.decode(Date.self, forKey: .expires), pid: try values.decodeIfPresent(Int32.self, forKey: .pid)))
         case "budget": reason = .budget
         case "quota": reason = .quota(try text(.app))
         case "updaterPaused": reason = .updaterPaused(try text(.helper))
-        case "appRule": reason = .appRule(try allowed())
+        case "syncPaused": reason = .syncPaused(try text(.helper))
+        case "appRule":
+            if let team = try values.decodeIfPresent(String.self, forKey: .team) { reason = .teamRule(team: team, allowed: try allowed()) }
+            else { reason = .appRule(try allowed()) }
+        case "askNewDestination": reason = .askNewDestination
         case "approval": reason = .recentDecision(try allowed())
         case "appleSoftware": reason = .appleSoftware
         case "askNewApps": reason = .askNewApps
@@ -150,11 +161,13 @@ extension DecisionTrace.Match: Codable {
         case .protection(let detail): try values.encode(detail, forKey: .protection)
         case .siteAllowed(let site): try values.encode(site, forKey: .entry)
         case .blocklist(let entry): try values.encode(entry, forKey: .entry)
-        case .temporaryRule(let rule): try values.encode(rule.allowed, forKey: .allowed); try values.encode(rule.expires, forKey: .expires)
+        case .temporaryRule(let rule): try values.encode(rule.allowed, forKey: .allowed); try values.encode(rule.expires, forKey: .expires); try values.encodeIfPresent(rule.pid, forKey: .pid)
         case .quota(let key): try values.encode(key, forKey: .app)
-        case .updaterPaused(let helper): try values.encode(helper, forKey: .helper)
+        case .updaterPaused(let helper), .syncPaused(let helper): try values.encode(helper, forKey: .helper)
         case .appRule(let allowed), .recentDecision(let allowed), .newAppDefault(let allowed): try values.encode(allowed, forKey: .allowed)
-        case .filterOff, .unrestricted, .killSwitch, .budget, .appleSoftware, .askNewApps, .noAppRule: break
+        case .subscribedList(let entry, let list): try values.encode(entry, forKey: .entry); try values.encode(list, forKey: .list)
+        case .teamRule(let team, let allowed): try values.encode(allowed, forKey: .allowed); try values.encode(team, forKey: .team)
+        case .filterOff, .unrestricted, .killSwitch, .budget, .appleSoftware, .askNewApps, .askNewDestination, .noAppRule: break
         }
     }
 }

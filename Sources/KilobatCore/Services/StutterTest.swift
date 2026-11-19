@@ -31,6 +31,9 @@ public struct StutterResult: Codable, Sendable {
     public var starlink: Bool? = nil
     /// The Wi-Fi's sign-in page was in the way at the end of the test.
     public var portal: Bool? = nil
+    /// The Wi-Fi channel and band during the test, for whether AirDrop's link has to leave it; nil off Wi-Fi.
+    public var channel: Int? = nil
+    public var band: String? = nil
     public var received: Int { samples.compactMap { $0 }.count }
     public var lossPercent: Double { samples.isEmpty ? 0 : Double(samples.count - received) / Double(samples.count) * 100 }
     public var seconds: Double { Double(samples.count) * interval }
@@ -84,9 +87,11 @@ public struct StutterResult: Codable, Sendable {
             }
             let link: String
             if let awdl, awdl.available, !awdl.up { link = String(localized: "AirDrop/AWDL was paused, so it isn't the cause here.") }
-            else if let awdl, awdl.up, !awdl.users.isEmpty { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning, and the AirDrop link was in use by \(NearbyRadios.list(awdl.users)). Try the low-latency pause and run the test again.") }
-            else { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning. Try the low-latency pause and run the test again.") }
-            return String(localized: "Regular spikes \(every) on your local network, up to \(peak).") + " " + link + loss
+            else if let awdl, awdl.up, !awdl.users.isEmpty { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning, and the AirDrop link was in use by \(NearbyRadios.list(awdl.users)). Pause AirDrop and run the test again.") }
+            else { link = String(localized: "That pattern often comes from AirDrop/AWDL scanning. Pause AirDrop and run the test again.") }
+            // Whether AirDrop's link has to leave this channel, unless it was paused and so can't be the cause.
+            let channelNote = awdl.map { $0.available && !$0.up } == true ? nil : AWDLChannels.note(channel: channel, band: band)
+            return String(localized: "Regular spikes \(every) on your local network, up to \(peak).") + " " + link + (channelNote.map { " " + $0 } ?? "") + loss
         case .irregular:
             return (local ? String(localized: "Spikes at irregular times on your local network, up to \(peak).") + " " + String(localized: "A busy network, interference or weak signal is more likely than a scan cycle.")
                           : String(localized: "Spikes at irregular times, up to \(peak).") + " " + String(localized: "Test your router too: if they don't show there, they come from beyond your network.")) + loss
@@ -209,10 +214,13 @@ public enum StutterTest {
         }
         var awdl = await before
         let after = await NearbyRadios.awdlStatus()
+        let radio = await DiagnosticProbe().radio()
         awdl.up = awdl.up && after.up; awdl.active = awdl.active || after.active
         for user in after.users where !awdl.users.contains(user) { awdl.users.append(user) }
         awdl.processes = Array(Set(awdl.processes + after.processes)).sorted()
-        return analyze(parse(result.output, count: count), target: target, host: host, interval: interval, awdl: awdl, started: started, starlink: onStarlink)
+        var analyzed = analyze(parse(result.output, count: count), target: target, host: host, interval: interval, awdl: awdl, started: started, starlink: onStarlink)
+        analyzed.channel = radio.channel; analyzed.band = radio.band
+        return analyzed
     }
     private static func ping(_ host: String, count: Int, interval: Double) async -> CommandResult {
         await CommandRunner.run("/sbin/ping", ["-n", "-c", String(count), "-i", String(interval), "-W", "1000", host], timeout: Double(count) * interval + 5)

@@ -62,10 +62,52 @@ public enum DomainPolicy {
         guard !(exceptions[app] ?? []).contains(where: hit) else { return nil }
         return domains.first(where: hit)
     }
+
+    /// A blocklist parsed once: each entry is an address range or a normalised domain. `first` gives what
+    /// `blocked(_:address:app:domains:exceptions:)` gives for the same lists, without parsing every entry per flow.
+    public struct Compiled: Sendable {
+        enum Entry: Sendable { case range(AddressRange), domain(String) }
+        let domains: [(text: String, entry: Entry)]
+        let exceptions: [String: [Entry]]
+        public init(domains: [String] = [], exceptions: [String: [String]] = [:]) {
+            self.domains = domains.map { ($0, Self.entry($0)) }
+            self.exceptions = exceptions.mapValues { $0.map(Self.entry) }
+        }
+        static func entry(_ text: String) -> Entry {
+            if let range = AddressRange(text) { return .range(range) }
+            var domain = text.lowercased()
+            if domain.hasPrefix("*.") { domain.removeFirst(2) }
+            return .domain(domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+        }
+        public func first(_ host: String?, address: String? = nil, app: String) -> String? {
+            let ip = address.flatMap(AddressRange.parse) ?? host.flatMap(AddressRange.parse)
+            let name = host.map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            func hit(_ entry: Entry) -> Bool {
+                switch entry {
+                case .range(let range): return ip.map(range.contains) ?? false
+                case .domain(let domain): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix("." + domain)) } ?? false
+                }
+            }
+            guard !(exceptions[app] ?? []).contains(where: hit) else { return nil }
+            return domains.first { hit($0.entry) }?.text
+        }
+        /// Whether the app has an exception covering this host or address ("despite the blocklist").
+        public func excepts(_ host: String?, address: String? = nil, app: String) -> Bool {
+            guard let list = exceptions[app], !list.isEmpty else { return false }
+            let ip = address.flatMap(AddressRange.parse) ?? host.flatMap(AddressRange.parse)
+            let name = host.map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) }
+            return list.contains { entry in
+                switch entry {
+                case .range(let range): return ip.map(range.contains) ?? false
+                case .domain(let domain): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix("." + domain)) } ?? false
+                }
+            }
+        }
+    }
 }
 
 /// An IPv4 or IPv6 address, or a CIDR range of them.
-struct AddressRange: CustomStringConvertible {
+struct AddressRange: CustomStringConvertible, Sendable {
     let bytes: [UInt8]
     let prefix: Int
     init?(_ text: String) {
@@ -111,4 +153,15 @@ struct AddressRange: CustomStringConvertible {
 extension AddressRange {
     /// One whole address.
     init(bytes: [UInt8]) { self.bytes = bytes; prefix = bytes.count * 8 }
+    private init(bytes: [UInt8], prefix: Int) { self.bytes = bytes; self.prefix = prefix }
+    /// The range with the host bits cleared: 10.1.2.3/8 is 10.0.0.0/8.
+    var network: AddressRange {
+        var masked = bytes, remaining = prefix
+        for index in masked.indices {
+            let take = min(8, max(0, remaining))
+            masked[index] &= take == 0 ? 0 : UInt8(truncatingIfNeeded: 0xFF << (8 - take))
+            remaining -= take
+        }
+        return AddressRange(bytes: masked, prefix: prefix)
+    }
 }

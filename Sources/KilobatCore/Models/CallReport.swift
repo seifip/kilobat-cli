@@ -102,7 +102,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
                 ?? String(localized: "\(device ?? "") was busy during the freeze, as Kilobat on that Mac reported. Pause its downloads or uploads before calls, or turn on call mode in Kilobat on that Mac.", comment: "Call report advice; the argument is a paired Mac's name, such as “Anna’s MacBook”")
             case .otherDevice: device.map { String(localized: "\($0) joined your network just before the freeze, while your router saw another device busy. Pause its downloads or streams before calls, or turn on your router’s QoS for calls.", comment: "Call report advice; the argument is a device's name, such as “Rita’s iPad”") }
                 ?? String(localized: "A TV, console or phone on your network was busy. Pause its download or stream before calls, or turn on your router’s QoS for calls.", comment: "Call report advice")
-            case .airDrop: String(localized: "Turn on low latency before calls; it pauses AirDrop until you turn it off.", comment: "Call report advice")
+            case .airDrop: String(localized: "Pause AirDrop before calls, from the AirDrop switch in Wi-Fi & Bluetooth.", comment: "Call report advice")
             case .beyondRouter: String(localized: "If it keeps happening, the report for your provider shows it over time.", comment: "Call report advice")
             case .starlink: CallSamples.Dish.advice(dish)
             case .portal: String(localized: "Sign in again on the Wi-Fi’s page. Once Kilobat has seen how long sign-ins last here, it warns you five minutes before the next one runs out.", comment: "Call report advice after a hotel or café Wi-Fi's sign-in ran out")
@@ -118,10 +118,23 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
         public var top: String? = nil
         public init(kind: Kind, seconds: Double, top: String? = nil) { self.kind = kind; self.seconds = seconds; self.top = top }
         private var length: String { Duration.seconds(max(60, seconds)).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)) }
+        /// Compilers and linkers: "quit swift-frontend" is advice nobody can follow; "pause the build" is.
+        public static func build(_ process: String) -> Bool {
+            ["swift-frontend", "swift-driver", "swift-build", "swiftc", "clang", "clang++", "cc1", "cc1plus", "ld", "ld64", "ld-prime",
+             "rustc", "cargo", "go", "gcc", "g++", "javac", "kotlin-daemon", "xcodebuild", "XCBBuildService"].contains(process)
+        }
+        /// "Quit Zoom during calls…", or "Pause builds during calls…" when a compiler was the one.
+        public static func cpuAdvice(_ top: String?) -> String {
+            guard let top else { return String(localized: "Quit heavy apps during calls, or turn off video effects in the call app.", comment: "Call report advice") }
+            if build(top) { return String(localized: "Pause builds during calls, or turn off video effects in the call app.", comment: "Call report advice when a compiler such as Xcode's used the CPU") }
+            return String(localized: "Quit \(top) during calls, or turn off video effects in the call app.", comment: "Call report advice; the argument is a process")
+        }
         /// "The CPU was maxed out for 3 min, mostly by Xcode."
         public var sentence: String {
             switch kind {
-            case .cpu: top.map { String(localized: "The Mac’s CPU was maxed out for \(length), mostly by \($0).", comment: "Call report; the arguments are a duration and a process") }
+            case .cpu: top.map { top in Self.build(top)
+                ? String(localized: "The Mac’s CPU was maxed out for \(length), mostly by a code build (\(top)).", comment: "Call report; the arguments are a duration and a compiler process such as swift-frontend")
+                : String(localized: "The Mac’s CPU was maxed out for \(length), mostly by \(top).", comment: "Call report; the arguments are a duration and a process") }
                 ?? String(localized: "The Mac’s CPU was maxed out for \(length).", comment: "Call report; the argument is a duration")
             case .memory: String(localized: "The Mac ran out of memory for \(length).", comment: "Call report; the argument is a duration")
             case .thermal: String(localized: "The Mac was hot and slowed itself down for \(length).", comment: "Call report; the argument is a duration")
@@ -130,8 +143,7 @@ public struct CallReport: Codable, Identifiable, Sendable, Equatable {
         }
         public var advice: String {
             switch kind {
-            case .cpu: top.map { String(localized: "Quit \($0) during calls, or turn off video effects in the call app.", comment: "Call report advice; the argument is a process") }
-                ?? String(localized: "Quit heavy apps during calls, or turn off video effects in the call app.", comment: "Call report advice")
+            case .cpu: Self.cpuAdvice(top)
             case .memory: String(localized: "Quit apps and close browser tabs you don’t need during calls.", comment: "Call report advice")
             case .thermal: String(localized: "Keep the Mac on a hard surface and out of the sun, with fewer heavy apps open.", comment: "Call report advice")
             case .gpu: String(localized: "Turn off background blur and other video effects in the call app.", comment: "Call report advice")

@@ -11,6 +11,9 @@ public struct AppLicense: Codable, Sendable, Equatable {
     public var revoked: Bool
     /// Dodo's lic_ id for the key, saved from 1.4 on. It saves the referral server a search; it grants nothing.
     public let keyID: String?
+    /// True when the person deactivated this Mac themselves. Such a license is never checked again; one the license
+    /// service called invalid is, so it can come back. Nil on records saved before this was kept.
+    public var deactivatedHere: Bool? = nil
 
     public init(key: String, instanceID: String, businessID: String, productID: String, keyID: String? = nil, now: Date = Date()) {
         self.key = key; self.instanceID = instanceID; self.businessID = businessID
@@ -73,5 +76,35 @@ public enum ReferralCode {
 public enum ProAccess {
     public static func unlocked(license: AppLicense?, trial: AppTrial?, business: String, products: Set<String>, configured: Bool, now: Date) -> Bool {
         license?.matches(business: business, products: products) == true || (configured && (trial?.remaining(at: now) ?? 0) > 0)
+    }
+}
+
+/// How a locked Pro control presents itself, wherever it is.
+public enum ProLock {
+    /// What a Pro switch shows: off without Pro, whatever is stored. The stored value is never changed. A setting that
+    /// `stillActs` without Pro (the filter keeps enforcing it) shows what is stored, so the switch never under-reports it.
+    public static func shown(_ stored: Bool, pro: Bool, stillActs: Bool = false) -> Bool { (pro || stillActs) && stored }
+    /// Whether turning a Pro switch `on` or off goes through: always with Pro; without it, only turning off a setting
+    /// that still acts, since that only lets more through.
+    public static func permits(_ on: Bool, pro: Bool, stillActs: Bool = false) -> Bool { pro || (stillActs && !on) }
+    /// A menu or button title, marked while locked. "Pro" is never translated.
+    public static func title(_ title: String, pro: Bool) -> String { pro ? title : title + " · Pro" }
+    /// Files of the person's own (rules, settings, usage): writing one out is part of Pro.
+    public static func permitsExport(pro: Bool) -> Bool { pro }
+    /// Reading one of those files back never is: putting your own things back is never gated, and it unlocks nothing,
+    /// since settings that need Pro stay stored and inert without it.
+    public static func permitsImport(pro: Bool) -> Bool { true }
+}
+
+/// When to ask the license service whether a saved license still stands.
+public enum LicenseCheck {
+    public static let interval: TimeInterval = 86_400
+    /// After a check that couldn't reach the service, wait this long before the next.
+    public static let retry: TimeInterval = 3_600
+    /// Due once a day for this product's license, revoked or not, unless the person deactivated it here.
+    public static func due(_ license: AppLicense?, business: String, products: Set<String>, lastAttempt: Date?, now: Date) -> Bool {
+        guard let license, license.deactivatedHere != true, license.businessID == business, products.contains(license.productID) else { return false }
+        if let lastAttempt, now.timeIntervalSince(lastAttempt) < retry { return false }
+        return now.timeIntervalSince(license.lastValidatedAt) >= interval
     }
 }

@@ -1,5 +1,6 @@
 // The outage-credit rules Kilobat knows, as published by regulators and providers. Edit by hand; every entry
-// carries the page it was read from and the day it was checked (the source URL and checked date are included below). Only rules read on the regulator's or provider's own pages go in `policies`. A provider whose terms
+// carries the page it was read from and the day it was checked (see Release/RESEARCH-DECISIONS.md, "Outage credit
+// claim"). Only rules read on the regulator's or provider's own pages go in `policies`. A provider whose terms
 // couldn't be read gets no `policy` and a `note` saying what was found, so Kilobat can still name it and say
 // "you can still ask". Amounts change (Ofcom's every 1 April): re-check `checked` before each release.
 

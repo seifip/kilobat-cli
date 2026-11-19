@@ -18,11 +18,19 @@ public enum RouterCounters {
     }
     /// The WAN counters' control URL of the router at `gateway`, found with UPnP's M-SEARCH: asked of the router
     /// directly, then on the multicast group. Nil when the router doesn't offer UPnP; nothing is changed either way.
-    public static func discover(gateway: String) async -> String? {
+    public static func discover(gateway: String) async -> String? { await device(gateway: gateway)?.control }
+
+    /// The counters' control URL and the model name the router gives.
+    public struct Device: Sendable, Equatable {
+        public let control: String
+        public let model: String?
+    }
+
+    public static func device(gateway: String) async -> Device? {
         guard IPv4PrivateAddress(gateway) != nil else { return nil }
         for target in [gateway, "239.255.255.250"] {
             for location in await search(target) where URL(string: location)?.host == gateway {
-                if let control = await controlURL(location) { return control }
+                if let device = await device(location: location) { return device }
             }
         }
         return nil
@@ -56,19 +64,33 @@ public enum RouterCounters {
     }
 
     /// The WANCommonInterfaceConfig control URL in a device description, resolved against where it came from.
-    static func controlURL(_ location: String) async -> String? {
+    static func device(location: String) async -> Device? {
         guard let url = URL(string: location), let host = url.host, IPv4PrivateAddress(host) != nil else { return nil }
         var request = URLRequest(url: url); request.timeoutInterval = 4
-        guard let (data, _) = try? await URLSession.shared.data(for: request), data.count <= 262_144 else { return nil }
-        return controlURL(description: data, base: url)
+        guard let (data, _) = try? await RouterSession(pin: nil).send(request, limit: 262_144), let control = controlURL(description: data, base: url) else { return nil }
+        return Device(control: control, model: modelName(description: data))
+    }
+
+    /// The router's model, else the name it calls itself.
+    public static func modelName(description data: Data) -> String? {
+        let text = String(decoding: data, as: UTF8.self)
+        for pattern in [#"<modelName>\s*([^<]+?)\s*</modelName>"#, #"<friendlyName>\s*([^<]+?)\s*</friendlyName>"#] {
+            if let name = DiagnosticProbe.matches(pattern, in: text).first, !name.isEmpty { return name.replacingOccurrences(of: "&amp;", with: "&") }
+        }
+        return nil
     }
 
     public static func controlURL(description data: Data, base: URL) -> String? {
         let text = String(decoding: data, as: UTF8.self)
+        let declared = DiagnosticProbe.matches(#"<URLBase>\s*([^<]+?)\s*</URLBase>"#, in: text).first
+        let descriptionBase = declared.flatMap { URL(string: $0) } ?? base
         for service in text.components(separatedBy: "<service>").dropFirst() where service.contains("WANCommonInterfaceConfig") {
             guard let start = service.range(of: "<controlURL>"), let end = service.range(of: "</controlURL>", range: start.upperBound..<service.endIndex) else { continue }
             let path = service[start.upperBound..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
-            return URL(string: path, relativeTo: base)?.absoluteString
+            guard let url = URL(string: path, relativeTo: descriptionBase)?.absoluteURL,
+                  ["http", "https"].contains(url.scheme), url.user == nil, url.password == nil,
+                  let host = url.host, IPv4PrivateAddress(host) != nil else { continue }
+            return url.absoluteString
         }
         return nil
     }
@@ -85,8 +107,8 @@ public enum RouterCounters {
         request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
         request.setValue("\"\(service)#\(action)\"", forHTTPHeaderField: "SOAPAction")
         request.httpBody = Data("<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:\(action) xmlns:u=\"\(service)\"/></s:Body></s:Envelope>".utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 65536 else { throw DiagnosticError(String(localized: "Router does not expose this counter at that control URL.")) }
+        let reply = try? await RouterSession(pin: nil).send(request, limit: 65_536)
+        guard let (data, response) = reply, response.statusCode == 200 else { throw DiagnosticError(String(localized: "Router does not expose this counter at that control URL.")) }
         return try parse(data, field: field)
     }
     public static func parse(_ data: Data, field: String) throws -> UInt64 {

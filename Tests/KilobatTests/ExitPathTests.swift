@@ -4,7 +4,54 @@ import Testing
 
 /// Where traffic leaves (VPN and public IP), speed-test comparisons, route history and the iperf3 reader.
 struct ExitPathTests {
+    @Test func connectionIconsUseTransportNotMeteredCostOrDeviceNumber() {
+        #expect(ExitPath.connectionSymbol(port: "iPhone USB") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Bluetooth PAN") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Android USB tethering") == "personalhotspot")
+        #expect(ExitPath.connectionSymbol(port: "Wi-Fi") == nil)
+        #expect(ExitPath.connectionSymbol(port: "Thunderbolt Ethernet") == "network")
+        #expect(ExitPath.connectionSymbol(port: nil) == "network")
+        #expect(ExitPath.connectionSymbol(port: "iPhone USB", tunnel: true) != "personalhotspot")
+    }
+
+    @Test func secondaryPhoneDoesNotOverridePrimaryWiFi() {
+        var path = ExitPath(interface: "en0", port: "Wi-Fi")
+        path.connectedPorts = ["en0": "Wi-Fi", "en5": "iPhone USB"]
+        #expect(path.connectionSymbol == nil)
+        path.interface = "en5"; path.port = "iPhone USB"
+        #expect(path.connectionSymbol == "personalhotspot")
+        let data = try? JSONEncoder().encode(path)
+        #expect(data.flatMap { try? JSONDecoder().decode(ExitPath.self, from: $0) } == path)
+    }
+
+    @Test func ipv6OnlyAndNoRouteHaveHonestConnectionStates() {
+        var path = ExitPath(interface: nil)
+        #expect(path.connectionSymbol == nil)
+        #expect(path.routeTitle == nil)
+        path.ipv6Interface = "en7"
+        path.connectedPorts = ["en7": "Bluetooth PAN"]
+        #expect(path.connectionSymbol == "personalhotspot")
+        #expect(path.routeTitle?.contains("Bluetooth PAN") == true)
+    }
+
+    @Test func oldSavedPathsDecodeWithoutConnectedPorts() throws {
+        let path = ExitPath(interface: "en0", port: "Wi-Fi")
+        let data = try JSONEncoder().encode(path)
+        let decoded = try JSONDecoder().decode(ExitPath.self, from: data)
+        #expect(decoded.connectedPorts == nil)
+        #expect(decoded.interface == "en0")
+    }
+
     // MARK: Exit path
+
+    @Test func missingIPv6DefaultIsRecognisedEvenWhenRouteExitsSuccessfully() {
+        let missing = "route: writing to routing socket: not in table\n"
+        #expect(ExitPath.ipv6DefaultMissing(status: 0, output: missing))
+        #expect(ExitPath.ipv6DefaultMissing(status: 1, output: missing))
+        #expect(!ExitPath.ipv6DefaultMissing(status: -1, output: missing))
+        #expect(!ExitPath.ipv6DefaultMissing(status: 1, output: "route: socket: Operation not permitted"))
+        #expect(!ExitPath.ipv6DefaultMissing(status: 0, output: ""))
+    }
 
     @Test func connectedVPNsComeOnlyFromConnectedServices() {
         let output = """
@@ -44,7 +91,7 @@ struct ExitPathTests {
         #expect(ExitPath(interface: "en0", port: "Wi-Fi").summary == "Traffic leaves through Wi-Fi (en0)")
         #expect(ExitPath(interface: "en3", port: "Ethernet Adapter (en3)").interfaceLabel == "Ethernet Adapter (en3)")
         #expect(path.summary.hasSuffix("(registry data)"))
-        #expect(path.badge == "On DE")
+        #expect(path.badge == "On 🇩🇪")
         for text in [path.summary, ExitPath.registryNote, ExitPath.lookupNote] {
             #expect(!text.lowercased().contains("you are private") && !text.lowercased().contains("protected"))
         }
@@ -264,5 +311,68 @@ struct ExitPathTests {
         #expect(throws: DiagnosticError.self) { try LANTestResult.parse(Data(#"{"error":"unable to connect to server: Connection refused"}"#.utf8), host: "x", reverse: true) }
         #expect(throws: DiagnosticError.self) { try LANTestResult.parse(Data("not json".utf8), host: "x", reverse: true) }
         #expect(ExpertTools.iperf3(path: "/nonexistent") == nil || FileManager.default.isExecutableFile(atPath: ExpertTools.iperf3(path: "/nonexistent")!))
+    }
+}
+
+@Test func aTunnelOnTheDefaultRouteIsThroughTheVPNEvenWithIPv6Unchecked() {
+    var path = ExitPath(interface: "utun8")
+    path.ipv6RouteKnown = false
+    // The kill switch keeps the strict reading; the menu, the badge and the CLI's label say where traffic goes.
+    #expect(path.vpn == .partial && path.throughVPN && path.badge.hasPrefix("On"))
+    path.ipv6Interface = "en0"
+    #expect(path.ipv6Outside && !path.throughVPN && path.badge.hasPrefix("Split"))
+    #expect(ExitPath.flag("jp") == "🇯🇵")
+    #expect(VPNApps.disconnected(#"* (Disconnected)   B536 VPN (io.tailscale.ipn.macsys) "Tailscale" [VPN:io.tailscale.ipn.macsys]"#) == ["io.tailscale.ipn.macsys"])
+    #expect(VPNApps.isVPN("com.nordvpn.macos") && !VPNApps.isVPN("com.google.Chrome"))
+}
+
+@Test func onlyLosingATunnelNeedsASecondLook() {
+    let vpn = ExitPath(interface: "utun8"), wifi = ExitPath(interface: "en0"), none = ExitPath(interface: nil)
+    #expect(ExitPath.lostTunnel(previous: vpn, current: wifi) && ExitPath.lostTunnel(previous: vpn, current: none))
+    // Gaining a VPN, or no change, shows at once.
+    #expect(!ExitPath.lostTunnel(previous: wifi, current: vpn) && !ExitPath.lostTunnel(previous: vpn, current: vpn) && !ExitPath.lostTunnel(previous: nil, current: wifi))
+}
+
+/// OpenVPN's def1 and wg-quick leave the default route on Wi-Fi and send both halves of IPv4 through the tunnel.
+struct TwoHalfVPNTests {
+    private func followed() -> ExitPath {
+        var path = ExitPath(interface: "en0", port: "Wi-Fi")
+        path.ipv6RouteKnown = true
+        path.follow(ipv4Carrier: "utun4")
+        return path
+    }
+
+    @Test func aTunnelCarryingBothHalvesIsTheVPNRoute() {
+        let path = followed()
+        #expect(path.interface == "utun4" && path.tunnel && path.port == nil)
+        #expect(path.vpn == .full && path.throughVPN && path.badge.hasPrefix("On"))
+    }
+
+    @Test func aPhysicalCarrierChangesNothing() {
+        let before = ExitPath(interface: "en0", port: "Wi-Fi")
+        var physical = before, unknown = before
+        physical.follow(ipv4Carrier: "en0")
+        unknown.follow(ipv4Carrier: nil)
+        #expect(physical == before && unknown == before && before.vpn == .off)
+    }
+
+    @Test func aTunnelDefaultRouteIsLeftAlone() {
+        var path = ExitPath(interface: "utun3")
+        path.follow(ipv4Carrier: "utun4")
+        #expect(path.interface == "utun3" && path.tunnel)
+    }
+
+    @Test func noRouteStaysNoRoute() {
+        var path = ExitPath(interface: nil)
+        path.follow(ipv4Carrier: "utun4")
+        #expect(path.interface == nil && !path.tunnel)
+    }
+
+    @Test func theKillSwitchArmsOnATwoHalfVPN() {
+        var preferences = SavedPreferences()
+        preferences.killSwitch = true
+        let state = KillSwitchState.evaluate(preferences, pro: true, filterActive: true, exit: followed(), armed: true)
+        #expect(state.status == .protected && state.tunnel == "utun4")
+        #expect(state.policy() == KillSwitchPolicy(armed: true, vpnDown: false, tunnel: "utun4"))
     }
 }

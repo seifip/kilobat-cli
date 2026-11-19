@@ -47,13 +47,26 @@ import Testing
 
     @Test func connectionRowsBelongToTheirProcess() {
         var rows: [ProcessTraffic] = []
+        var orphaned = false
         for line in ["sharingd.730,,19389,16460,", "udp6 fe80::1%awdl0.65253<->fe80::2%awdl0.50123,awdl0,6752,5962,",
                      "Browser Helper.774,,1000,500,", "tcp4 192.168.1.1:61511<->172.64.148.10:443,en0,900,400,", "tcp4 192.168.1.1:61512<->192.168.1.7:8080,en0,100,100,"] {
-            NettopMonitor.parse(line, into: &rows)
+            NettopMonitor.parse(line, into: &rows, orphaned: &orphaned)
         }
         #expect(rows.map(\.pid) == [730, 774] && rows[1].process == "Browser Helper")
         #expect(rows[0].connections.map(\.route) == [.local] && rows[1].connections.map(\.route) == [.internet, .local])
         #expect(rows[1].connections[0].interface == "en0")
+    }
+
+    @Test func connectionsOfAnUnreadableProcessAreDropped() {
+        var rows: [ProcessTraffic] = []
+        var orphaned = false
+        for line in ["sharingd.730,,100,100,", "tcp4 192.168.1.1:1<->1.1.1.1:443,en0,10,10,",
+                     "Acme, Inc Helper.812,,5000,400,", "tcp4 192.168.1.1:2<->172.64.148.10:443,en0,5000,400,",
+                     "Browser Helper.774,,1000,500,", "tcp4 192.168.1.1:3<->172.64.148.10:443,en0,900,400,"] {
+            NettopMonitor.parse(line, into: &rows, orphaned: &orphaned)
+        }
+        #expect(rows.map(\.pid) == [730, 774])
+        #expect(rows[0].connections.count == 1 && rows[1].connections.count == 1)
     }
 
     @Test func budgetsAndQuotasCountOnlyInternetBytes() throws {
@@ -70,11 +83,11 @@ import Testing
         #expect(store.apps.first?.total == 11_000 && store.apps.first?.internet == 3_000 && store.apps.first?.local == 8_000)
         // Local bytes still show as activity.
         #expect(store.download == 11_000)
-        store.preferences.quotas = [AppQuota(name: "sync", apps: ["process:sync"], bytes: 5_000)]
+        store.preferences.quotas = [AppLimit(name: "sync", apps: ["process:sync"], bytes: 5_000)]
         store.flush()
         let entry = try #require(store.usage.last)
         #expect(entry.total == 3_000 && entry.apps["sync"] == 3_000 && entry.localBytes == 8_000 && entry.appsLocal?["sync"] == 8_000)
-        #expect(store.budgetUsedBytes == 3_000 && store.quotaUsed(store.preferences.quotas![0]) == 3_000 && store.quotaReached.isEmpty)
+        #expect(store.budgetUsedBytes == 3_000 && store.limitUsed(store.preferences.quotas![0]) == 3_000 && store.quotaReached.isEmpty)
         #expect(UsageSummary(store.usage, days: 1).topApps.first?.bytes == 3_000 && UsageSummary(store.usage, days: 1).localBytes == 8_000)
     }
 
@@ -165,6 +178,67 @@ import Testing
         #expect(store.total == 3_030)
     }
 
+    @Test func ownerLookupsPerSample() {
+        let start = Date()
+        let starts: [Int32: Date] = [70: start.addingTimeInterval(-3_600), 71: start.addingTimeInterval(-3_600), 72: start.addingTimeInterval(-3_600)]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TrafficStore(directory: directory, startMonitoring: false)
+        store.startTime = { starts[$0] }
+        var lookups: [Int32] = []
+        store.ownerPath = { pid in MainActor.assumeIsolated { lookups.append(pid) }; return pid == 71 ? "/Applications/Example.app" : nil }
+        for second in 0...10 {
+            store.consume(TrafficSnapshot(timestamp: start.addingTimeInterval(Double(second)), processes: [70, 71, 72].map {
+                ProcessTraffic(pid: $0, process: "p\($0)", received: UInt64(1_000 * (second + 1)), sent: 0)
+            }))
+        }
+        print("OWNER LOOKUPS over 10 samples of 3 processes:", lookups.count)
+        #expect(lookups.sorted() == [70, 71, 72])
+        #expect(store.apps.first { $0.processIDs.contains(71) }?.ownerPath == "/Applications/Example.app")
+        // One real lookup's cost on this Mac, for scale.
+        let clock = ContinuousClock(), me = getpid()
+        let each = clock.measure { for _ in 0..<1_000 { _ = ProcessOwnership.applicationPath(pid: me) } } / 1_000
+        print("OWNER LOOKUP cost for this test process:", each)
+    }
+
+    @Test func aReusedPidIsLookedUpAgain() {
+        let start = Date()
+        var starts: [Int32: Date] = [72: start.addingTimeInterval(-3_600)]
+        var owner = "/Applications/A.app"
+        var lookups: [Int32] = []
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TrafficStore(directory: directory, startMonitoring: false)
+        store.startTime = { pid in MainActor.assumeIsolated { starts[pid] } }
+        store.ownerPath = { pid in MainActor.assumeIsolated { lookups.append(pid); return owner } }
+        func sample(_ second: Double, _ name: String, _ received: UInt64) {
+            store.consume(TrafficSnapshot(timestamp: start.addingTimeInterval(second), processes: [ProcessTraffic(pid: 72, process: name, received: received, sent: 0)]))
+        }
+        sample(0, "helper", 1_000); sample(1, "helper", 2_000); sample(2, "helper", 3_000)
+        #expect(lookups == [72] && store.apps.first?.ownerPath == "/Applications/A.app")
+        // The pid comes back as another process with another start time.
+        owner = "/Applications/B.app"
+        starts[72] = start.addingTimeInterval(2.5)
+        sample(3, "other", 400); sample(4, "other", 900)
+        // The old name's row is still listed, without processes; the pid's row is the one that counts.
+        #expect(lookups == [72, 72] && store.apps.first { $0.processIDs.contains(72) }?.ownerPath == "/Applications/B.app")
+    }
+
+    @Test func historyCountsAHelperUnderItsOwner() {
+        let start = Date()
+        let starts: [Int32: Date] = [71: start.addingTimeInterval(-3_600)]
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = TrafficStore(directory: directory, startMonitoring: false)
+        store.startTime = { starts[$0] }
+        store.ownerPath = { _ in "/Applications/Example.app" }
+        for second in 0...3 {
+            store.consume(TrafficSnapshot(timestamp: start.addingTimeInterval(Double(second)), processes: [ProcessTraffic(pid: 71, process: "helper", received: UInt64(1_000 * (second + 1)), sent: 0)]))
+        }
+        store.flush()
+        #expect(store.usage.last?.apps[AppTrafficGroup.displayName("/Applications/Example.app")] == 3_000)
+    }
+
     @Test func runsCountOnlyTheirOwnHelpers() {
         let processes = FakeProcesses()
         // Two Claude Code sessions (800, 900) each run curl (801, 901); another curl (999) belongs to neither.
@@ -226,4 +300,13 @@ import Testing
             #expect(!CommandLineTools.unrecognized(path), "\(path)")
         }
     }
+}
+
+@Test func privilegedHelperGroupsUnderItsApp() {
+    let apps = ["com.nordvpn.macos": "/Applications/NordVPN.app", "com.example": "/Applications/Example.app"]
+    #expect(ProcessOwnership.helperApplication(named: "com.nordvpn.macos.helper", lookup: { apps[$0] }) == "/Applications/NordVPN.app")
+    // Two parts at least, and only a real app bundle counts.
+    #expect(ProcessOwnership.helperApplication(named: "nordvpnd", lookup: { apps[$0] }) == nil)
+    #expect(ProcessOwnership.helperApplication(named: "com.other.helper", lookup: { apps[$0] }) == nil)
+    #expect(ProcessOwnership.helperApplication(named: "com.example.agent.helper", lookup: { apps[$0] }) == "/Applications/Example.app")
 }

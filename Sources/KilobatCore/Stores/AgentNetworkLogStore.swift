@@ -122,9 +122,8 @@ public struct HostLookup: Sendable {
     }
     /// Agents running now that have contacted something, most recently active first.
     public var running: [AgentLogEntry] {
-        report.filter(\.running).sorted { a, b in
-            (sessions.first { $0.id == a.id }?.lastActive ?? a.start) > (sessions.first { $0.id == b.id }?.lastActive ?? b.start)
-        }
+        let active = Dictionary(sessions.map { ($0.id, $0.lastActive) }, uniquingKeysWith: { first, _ in first })
+        return report.filter(\.running).sorted { (active[$0.id] ?? $0.start) > (active[$1.id] ?? $1.start) }
     }
 
     public func clear() {
@@ -147,15 +146,30 @@ public struct HostLookup: Sendable {
         dirty = true
         if let file, !previewing {
             let saved = AgentLogFile(recording: allowed(), updated: now, sessions: sessions.filter { !$0.hosts.isEmpty || $0.end == nil }, pastHosts: pastHosts.sorted())
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try saved.data().write(to: file, options: .atomic)
+            // Through the writer, after any save already waiting there: written directly, an older save could land
+            // later and put the forgotten hosts back.
+            try Self.writer.sync {
+                try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try saved.data().write(to: file, options: .atomic)
+            }
         }
         dirty = false; lastPersist = now
         return removed
     }
 
     /// One nettop sample. Its first sighting of a process only sets the baseline, unless the process started after the last sample.
+    /// Nothing on screen shows the log: sessions keep recording, views just aren't told.
+    @ObservationIgnored public var viewsAreHidden: () -> Bool = { false }
+    @ObservationIgnored private var quietSample = false
+    @ObservationIgnored private var heldBack = false
+    private var sampleSessions: [AgentNetworkSession] {
+        get { _sessions }
+        _modify { if quietSample { heldBack = true; yield &_sessions } else { yield &sessions } }
+    }
+
     public func consume(_ snapshot: TrafficSnapshot) {
+        quietSample = viewsAreHidden()
+        if !quietSample && heldBack { heldBack = false; withMutation(keyPath: \.sessions) {} }
         let now = snapshot.timestamp
         guard allowed(), !previewing else {
             polling.on = false
@@ -204,8 +218,9 @@ public struct HostLookup: Sendable {
                 guard let endpoint = Self.endpoint(id), isNew || received + sent > 0 else { continue }
                 record(endpoint, process: member.process, received: received, sent: sent, opened: isNew, at: now, in: position, filterNames: names)
             }
-            sessions[position].unmatchedReceived += totalReceived > matchedReceived ? totalReceived - matchedReceived : 0
-            sessions[position].unmatchedSent += totalSent > matchedSent ? totalSent - matchedSent : 0
+            // Only when something moved: writing even a zero tells every view showing the log to redraw.
+            if totalReceived > matchedReceived { sampleSessions[position].unmatchedReceived += totalReceived - matchedReceived }
+            if totalSent > matchedSent { sampleSessions[position].unmatchedSent += totalSent - matchedSent }
             if totalReceived + totalSent > 0 { dirty = true }
         }
         // A process keeps its counters while it runs, even through samples without it, so it is never counted again from scratch.
@@ -219,22 +234,34 @@ public struct HostLookup: Sendable {
         persist(now: now)
     }
 
+    /// Where a host sits in a session's records, without walking up to 3,000 of them per connection per second.
+    /// Rebuilt whenever the records have been added to or cleared some other way.
+    private func hostPosition(_ key: String, in position: Int) -> Int? {
+        let session = sessions[position]
+        if hostIndex.count > sessions.count + 16 { hostIndex = [:] }
+        if hostIndex[session.id]?.count != session.hosts.count {
+            hostIndex[session.id] = Dictionary(session.hosts.enumerated().map { ($0.element.key, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        }
+        return hostIndex[session.id]?[key]
+    }
+
     private func record(_ endpoint: (address: String, port: String, transport: String), process: String, received: UInt64, sent: UInt64, opened: Bool,
                         at now: Date, in position: Int, filterNames: [String: String]) {
         let key = process + "|" + endpoint.address + "|" + endpoint.port + "|" + endpoint.transport
         if names[endpoint.address]?.source != "filter", let host = filterNames[endpoint.address] { names[endpoint.address] = (host, "filter") }
         let name = names[endpoint.address]
-        if let at = sessions[position].hosts.firstIndex(where: { $0.key == key }) {
-            sessions[position].hosts[at].received += received; sessions[position].hosts[at].sent += sent
-            sessions[position].hosts[at].last = now
-            if opened { sessions[position].hosts[at].connections += 1 }
-            if let name, sessions[position].hosts[at].nameSource != name.source { sessions[position].hosts[at].host = name.host; sessions[position].hosts[at].nameSource = name.source }
-        } else if sessions[position].hosts.count < Self.maxRecords {
-            sessions[position].hosts.append(AgentHostRecord(process: process, address: endpoint.address, port: endpoint.port, transport: endpoint.transport,
+        if let at = hostPosition(key, in: position) {
+            sampleSessions[position].hosts[at].received += received; sampleSessions[position].hosts[at].sent += sent
+            sampleSessions[position].hosts[at].last = now
+            if opened { sampleSessions[position].hosts[at].connections += 1 }
+            if let name, sampleSessions[position].hosts[at].nameSource != name.source { sampleSessions[position].hosts[at].host = name.host; sampleSessions[position].hosts[at].nameSource = name.source }
+        } else if sampleSessions[position].hosts.count < Self.maxRecords {
+            sampleSessions[position].hosts.append(AgentHostRecord(process: process, address: endpoint.address, port: endpoint.port, transport: endpoint.transport,
                                                             host: name?.host, nameSource: name?.source, first: now, last: now,
                                                             sent: sent, received: received, connections: opened ? 1 : 0))
+            hostIndex[sessions[position].id]?[key] = sampleSessions[position].hosts.count - 1
         } else {
-            sessions[position].unmatchedReceived += received; sessions[position].unmatchedSent += sent
+            sampleSessions[position].unmatchedReceived += received; sampleSessions[position].unmatchedSent += sent
         }
         dirty = true
     }
@@ -351,9 +378,17 @@ public struct HostLookup: Sendable {
         guard let file, dirty, !previewing, force || now.timeIntervalSince(lastPersist) >= 10 else { return }
         dirty = false; lastPersist = now
         let saved = AgentLogFile(recording: allowed(), updated: now, sessions: sessions.filter { !$0.hosts.isEmpty || $0.end == nil }, pastHosts: pastHosts.sorted())
-        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? saved.data().write(to: file, options: [.atomic])
+        // Encoding a long log takes real time, so it's done off the main thread, in order. A forced save finishes first.
+        let write: @Sendable () -> Void = {
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? saved.data().write(to: file, options: [.atomic])
+        }
+        if force { Self.writer.sync(execute: write) } else { Self.writer.async(execute: write) }
     }
+    private nonisolated static let writer = DispatchQueue(label: "co.seifi.kilobat.agent-log-write", qos: .utility)
+    /// Returns once every save queued so far has been written (for tests).
+    func waitForWrites() { Self.writer.sync {} }
+    @ObservationIgnored private var hostIndex: [UUID: [String: Int]] = [:]
 
     #if DEBUG
     /// Sample sessions for screenshots and the debug snapshot; nothing from this Mac.

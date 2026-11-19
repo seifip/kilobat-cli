@@ -111,7 +111,7 @@ Run the tests with `swift test`.
 
 ## MCP tool reference
 
-The following names and titles are defined in [v0.45.1](https://github.com/seifip/kilobat-cli/tree/v0.45.1/Sources/KilobatCLI/MCPCLI.swift). Use your installed server's `tools/list` for its full descriptions, input schemas, and annotations. Availability and returned data can depend on the companion app, its license tier, permissions, and configuration.
+The following names and titles are defined in [v0.46.0](https://github.com/seifip/kilobat-cli/tree/v0.46.0/Sources/KilobatCLI/MCPCLI.swift). Use your installed server's `tools/list` for its full descriptions, input schemas, and annotations. Availability and returned data can depend on the companion app, its license tier, permissions, and configuration.
 
 <details>
 <summary>Browse the MCP tools</summary>

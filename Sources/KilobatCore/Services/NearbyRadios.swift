@@ -154,13 +154,20 @@ public enum NearbyRadios {
         if name.hasPrefix("airplay") { return "AirPlay" }
         return process
     }
-    public static func awdlStatus() async -> AWDLStatus {
-        let interface = await CommandRunner.run("/sbin/ifconfig", ["awdl0"])
+    public enum AWDLUsers: Sendable { case whenUp, whenActive, never }
+    /// `users`: the on-demand callers list who uses the link whenever it is up (`.whenUp`); watchers that only act on an
+    /// active link ask `.whenActive`, and those that only need the link's state `.never`, so lsof doesn't run for nothing.
+    public static func awdlStatus(users: AWDLUsers = .whenUp) async -> AWDLStatus {
+        await awdlStatus(users: users, interface: { await CommandRunner.run("/sbin/ifconfig", ["awdl0"]) }, sockets: { await CommandRunner.run("/usr/sbin/lsof", ["-nP", "-i6", "+c", "0", "-F", "pcn"], timeout: 5) })
+    }
+    static func awdlStatus(users mode: AWDLUsers, interface: () async -> CommandResult, sockets: () async -> CommandResult) async -> AWDLStatus {
+        let interface = await interface()
         guard interface.status == 0, let state = parseInterface(interface.output) else { return AWDLStatus(available: false, up: false, active: false) }
         guard state.up else { return AWDLStatus(available: true, up: false, active: false) }
+        guard mode == .whenUp || (mode == .whenActive && state.active) else { return AWDLStatus(available: true, up: true, active: state.active) }
         let indices: [Int] = ["awdl0", "llw0"].map { (name: String) in Int(if_nametoindex(name)) }
         let scopes = Set(indices.filter { $0 > 0 })
-        let sockets = await CommandRunner.run("/usr/sbin/lsof", ["-nP", "-i6", "+c", "0", "-F", "pcn"], timeout: 5)
+        let sockets = await sockets()
         let processes = scopedProcesses(lsof: sockets.output, scopes: scopes, names: ["awdl0", "llw0"])
         var users: [String] = []
         for feature in processes.map(feature) where !users.contains(feature) { users.append(feature) }
@@ -248,5 +255,21 @@ public enum NearbyRadios {
         if let message = NearbyRadios.connectionError(status, connecting: connecting, name: device.name) { error = message; return }
         if let index = devices.firstIndex(where: { $0.id == device.id }) { devices[index].connected = connecting }
         devices = NearbyRadios.sorted(devices)
+    }
+}
+
+/// One AWDL reading for the watchers that ask every 30 seconds while audio plays, a cast runs or a call is on.
+public actor AWDLWatch {
+    public static let shared = AWDLWatch()
+    private var last: (status: AWDLStatus, at: Date, listed: Bool)?
+    private let read: @Sendable (NearbyRadios.AWDLUsers) async -> AWDLStatus
+    public init() { read = { await NearbyRadios.awdlStatus(users: $0) } }
+    init(read: @escaping @Sendable (NearbyRadios.AWDLUsers) async -> AWDLStatus) { self.read = read }
+    /// A reading no older than `maxAge`; `users` false when only the link's state is wanted.
+    public func status(users: Bool, maxAge: TimeInterval = 30, now: Date = Date()) async -> AWDLStatus {
+        if let last, now.timeIntervalSince(last.at) < maxAge, !users || last.listed { return last.status }
+        let status = await read(users ? .whenActive : .never)
+        last = (status, now, users)
+        return status
     }
 }

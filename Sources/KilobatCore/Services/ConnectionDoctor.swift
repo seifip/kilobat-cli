@@ -47,6 +47,9 @@ public struct DoctorStep: Codable, Identifiable, Sendable {
         case "Wi-Fi sign-in": String(localized: "Wi-Fi sign-in", comment: "Connection check layer: a hotel or café Wi-Fi's sign-in page")
         case "Network block": String(localized: "Network block", comment: "Connection check layer: whether the network the Mac is on blocks the site")
         case "Region": String(localized: "Region", comment: "Connection check layer: whether the service refuses by where the connection appears to be")
+        case "Sources": String(localized: "Sources", comment: "Connection check layer: what public reports expect in this country. Not a live measurement.")
+        case "Local Network": String(localized: "Local Network", comment: "Connection check layer: macOS's Local Network permission for an app")
+        case "Network software": String(localized: "Network software", comment: "Connection check layer: other products' filters, proxies and security software on this Mac")
         default: layer
         }
     }
@@ -100,6 +103,10 @@ public struct DoctorReport: Codable, Sendable {
     public var services: [ServiceStatus]? = nil
     /// A block on this network, or the service refusing this region, when the measurements show one.
     public var block: NetworkBlock? = nil
+    /// What public reports expect for this country and target. Never a live verdict, and never a replacement for `block`.
+    public var expected: ExpectedRestrictions.Note? = nil
+    /// Other software in this Mac's network path, Kilobat's own filter included, read when the check ran.
+    public var software: PathSoftware? = nil
     public var ok: Bool { !steps.contains { $0.status == .failed } }
 }
 
@@ -234,9 +241,30 @@ public enum ConnectionDoctor {
     /// `appError` is the error the app got, as the person or agent pastes it: a service's own regional refusal is recognised from it.
     public static func run(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil,
                            appError: String? = nil) async -> DoctorReport {
-        let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt)
+        let report = await checks(target, app: app, proxy: proxy, context: context, policy: policy, failedAt: failedAt, appError: appError)
         guard !report.steps.isEmpty else { return report }
-        return await withBlockCheck(await withServiceStatus(await withPortal(await withProxyApp(report))), target: target, policy: policy, appError: appError)
+        let checked = await withBlockCheck(await withServiceStatus(await withPortal(await withProxyApp(report))), target: target, policy: policy, appError: appError)
+        return withSoftware(withExpected(checked), await PathSoftware.current())
+    }
+
+    /// The layers a filter, proxy or security agent on this Mac can break: a failure there, or a whole Mac offline.
+    static let softwareLayers: Set<String> = ["Network", "DNS", "IPv4", "IPv6", "Secure connection", "Request", "Redirect IPv4", "Redirect IPv6", "Redirects"]
+
+    /// Other software in the path, as one more layer when the check failed where it could be the cause: its suspects
+    /// and the test the person runs, added to what to do next. Never a verdict: Kilobat can't see inside another product.
+    static func withSoftware(_ report: DoctorReport, _ software: PathSoftware, now: Date = Date()) -> DoctorReport {
+        var report = report
+        report.software = software
+        // A block, a sign-in page or macOS's Local Network permission already explain it.
+        guard report.block == nil, report.steps.first(where: { $0.layer == "Wi-Fi sign-in" }) == nil,
+              !report.steps.contains(where: { $0.layer == "Local Network" && $0.status != .skipped }),
+              let failed = report.steps.first(where: { $0.status == .failed }), softwareLayers.contains(failed.layer),
+              // A refusal is the server's own answer: the connection got there.
+              !failed.says(.refused, "refused the connection"),
+              let advice = software.failureAdvice(now: now) else { return report }
+        report.steps.append(DoctorStep(layer: "Network software", status: .warning, detail: advice.detail))
+        report.next += " " + advice.test
+        return report
     }
 
     /// Why a block check doesn't apply, or nil when it does. A sign-in page, Kilobat's own rules, a request made elsewhere,
@@ -282,6 +310,18 @@ public enum ConnectionDoctor {
         return withBlock(report, found)
     }
 
+    /// A guide note when the Mac's time zone country and this target match the snapshot. Verdict, next and block stay as measured.
+    static func withExpected(_ report: DoctorReport, guide: ExpectedRestrictions.File? = try? ExpectedRestrictions.load(), country: String? = NetworkBlockCheck.timeZoneCountry()) -> DoctorReport {
+        guard let guide, let country else { return report }
+        let services = ServiceTriggers.services(for: report)
+        let hosts = [report.host] + services.flatMap { $0.hosts + $0.endpoints }
+        guard let note = ExpectedRestrictions.note(in: guide, country: country, countryBasis: "time_zone", target: report.host, serviceIDs: services.map(\.id), hosts: hosts) else { return report }
+        var copy = report
+        copy.expected = note
+        copy.steps.append(DoctorStep(layer: "Sources", status: .skipped, detail: note.sentence))
+        return copy
+    }
+
     /// The finding as a layer, the verdict and what to do next.
     static func withBlock(_ report: DoctorReport, _ block: NetworkBlock) -> DoctorReport {
         var report = report
@@ -295,7 +335,7 @@ public enum ConnectionDoctor {
     /// The saved preferences, read without the app (the CLI, an intent). Nil when there are none.
     static func storedPreferences() -> SavedPreferences? {
         let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat/preferences.json")
-        return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(SavedPreferences.self, from: $0) }
+        return (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(SavedPreferences.self, from: $0) }.map { var preferences = $0; preferences.settleProfiles(); return preferences }
     }
 
     /// A failed check behind the Wi-Fi's sign-in page: that page is the cause, not DNS, the secure connection or the server.
@@ -374,7 +414,8 @@ public enum ConnectionDoctor {
         return report
     }
 
-    static func checks(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil) async -> DoctorReport {
+    static func checks(_ target: String, app: String? = nil, proxy: String? = nil, context: Context? = nil, policy: Policy? = nil, failedAt: Date? = nil,
+                       appError: String? = nil) async -> DoctorReport {
         let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = requestURL(trimmed), let host = url.host, ExpertTools.validHost(host) else {
             return DoctorReport(target: requestURL(trimmed).map(ConnectionProbe.redacted) ?? trimmed, host: trimmed, app: app, verdict: String(localized: "That doesn’t look like a website or host."), next: String(localized: "Enter a domain such as example.com or a full https:// address."), steps: [], date: Date())
@@ -395,8 +436,9 @@ public enum ConnectionDoctor {
             return report(shown, host, app, [DoctorStep(layer: "Network", status: .failed, detail: String(localized: "This Mac has no route to the internet."))] + [note].compactMap { $0 },
                           client: client, failedAt: failedAt)
         }
-        let gateway = path.gateways.lazy.compactMap(ConnectionProbe.address).first
-        async let router = answers(gateway)
+        let routerPing = Self.routerPing(path.gateways, interface: primary.name)
+        let gateway = routerPing?.address
+        async let router = answers(routerPing)
         async let system = ConnectionProbe.systemProxy(for: url)
         async let resolvers = CommandRunner.run("/usr/sbin/scutil", ["--dns"], timeout: 3)
         async let environment = appEnvironment(app)
@@ -554,6 +596,19 @@ public enum ConnectionDoctor {
             }
         }
 
+        // Local Network access, for a device on this network: this check's own attempt against what the app got.
+        var localWords: (step: DoctorStep, verdict: String?, next: String)?
+        if let local = addresses.first(where: LocalNetworkCheck.isLocal) ?? (LocalNetworkCheck.isLocal(host) ? host : nil) {
+            let own = families.map(\.tcp), appOpen = steps.contains { $0.layer == "Open connections" && $0.status != .skipped }
+            if let finding = LocalNetworkCheck.judge(local: local, isGateway: local == gateway, selfDenied: own.contains(where: \.localNetworkDenied),
+                                                     selfInstant: own.contains(where: \.unreachableAtOnce), selfConnected: reached,
+                                                     app: app, appError: appError, appOpen: appOpen) {
+                let words = LocalNetworkCheck.words(finding, app: client.flatMap { $0.name == $0.id ? nil : $0.name }, host: host)
+                steps.insert(words.step, at: steps.firstIndex { $0.layer == "IPv4" || $0.layer == "IPv6" } ?? steps.count)
+                localWords = words
+            }
+        }
+
         // Nothing shown keeps a query value or password, even in an error message that quotes the URL.
         let urls = [url] + hops.map(\.url)
         let shownSteps = (steps + [note].compactMap { $0 }).map { DoctorStep(layer: $0.layer, status: $0.status, detail: ConnectionProbe.scrubbed($0.detail, urls), cues: $0.cues) }
@@ -563,7 +618,11 @@ public enum ConnectionDoctor {
                              error: status == nil ? ConnectionProbe.scrubbed(describe(hop.answer), urls) : nil)
         }
         let over = route.map { String(localized: "over \(used.label) through \($0.via)") } ?? String(localized: "over \(used.label)")
-        return report(shown, host, app, shownSteps, hops: shownHops, over: over, client: client, path: taken, failedAt: failedAt)
+        var checked = report(shown, host, app, shownSteps, hops: shownHops, over: over, client: client, path: taken, failedAt: failedAt)
+        if let localWords {
+            if let verdict = localWords.verdict { checked.verdict = verdict; checked.next = localWords.next } else { checked.next += " " + localWords.next }
+        }
+        return checked
     }
 
     /// The URL to request, exactly as given, path and query included; a bare host becomes https://host.
@@ -609,9 +668,26 @@ public enum ConnectionDoctor {
         return await ConnectionProbe.directLookup(host, server: resolver.server)
     }
 
-    static func answers(_ gateway: String?) async -> Bool? {
-        guard let gateway else { return nil }
-        return await CommandRunner.run("/sbin/ping", ["-c", "1", "-t", "2", gateway], timeout: 3).status == 0
+    /// The router to ping, and with what: an IPv4 router with ping when there is one; otherwise an IPv6 one with
+    /// ping6, which needs the interface for a link-local (fe80::) address.
+    static func routerPing(_ gateways: [NWEndpoint], interface: String?) -> (address: String, tool: String, arguments: [String])? {
+        for case .hostPort(let host, _) in gateways {
+            if case .ipv4 = host, let address = ConnectionProbe.address(.hostPort(host: host, port: 0)) {
+                return (address, "/sbin/ping", ["-c", "1", "-t", "2", address])
+            }
+        }
+        for case .hostPort(let host, _) in gateways {
+            if case .ipv6 = host, let address = ConnectionProbe.address(.hostPort(host: host, port: 0)) {
+                let target = address.lowercased().hasPrefix("fe80") && interface != nil ? address + "%" + interface! : address
+                return (address, "/sbin/ping6", ["-c", "1", target])
+            }
+        }
+        return nil
+    }
+
+    static func answers(_ ping: (address: String, tool: String, arguments: [String])?) async -> Bool? {
+        guard let ping else { return nil }
+        return await CommandRunner.run(ping.tool, ping.arguments, timeout: 3).status == 0
     }
 
     static func probe(_ host: String, port: Int, version: NWProtocolIP.Options.Version, tls: Bool) async -> FamilyProbe {
@@ -712,7 +788,7 @@ public enum ConnectionDoctor {
         let address = probe.tcp.address.map { named ? String(localized: "\(host) at \($0)") : $0 } ?? host
         switch probe.tcp.outcome {
         case .connected: break
-        case .refused: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "\(address) refused the connection on port \(port)."))
+        case .refused: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "\(address) refused the connection on port \(port)."), cues: [.refused])
         case .timedOut: return DoctorStep(layer: layer, status: .failed, detail: String(localized: "No answer from \(address) on port \(port) within 5 seconds."))
         case .failed(let message), .tlsFailed(let message): return DoctorStep(layer: layer, status: .failed, detail: String(localized: "Couldn’t connect to \(address): \(message)."))
         case .noAddress: break
@@ -964,9 +1040,11 @@ public enum ConnectionDoctor {
             let until = rule.expires.formatted(date: .omitted, time: .shortened)
             return rule.allowed ? step(.ok, String(localized: "A temporary rule allows this app until \(until).")) : step(blocked, String(localized: "A temporary rule blocks this app until \(until)."))
         case .budget: return step(blocked, String(localized: "This network’s data budget is used up, which stops new connections."))
-        case .quota: return step(blocked, String(localized: "This app used up its data quota, which stops its new connections until the quota resets."))
+        case .quota: return step(blocked, String(localized: "This app used up its data limit, which stops its new connections until the limit starts over."))
         case .updaterPaused(let name):
             return step(blocked, String(localized: "\(name) is an updater, and Kilobat pauses updaters while this network is metered. Allow it for a while, or turn off pausing updaters."))
+        case .syncPaused(let name):
+            return step(blocked, String(localized: "\(name) syncs files, and Kilobat pauses cloud sync while this network is metered. It catches up on its own on an unmetered network. Allow it for a while, or turn off pausing cloud sync."))
         case .appRule(let allowed): return allowed ? step(.ok, String(localized: "This app is allowed in the \(profile) profile.")) : step(blocked, String(localized: "This app is blocked in the \(profile) profile."))
         case .recentDecision(let allowed): return allowed ? step(.ok, String(localized: "You allowed this app when asked.")) : step(blocked, String(localized: "You blocked this app when asked."))
         case .appleSoftware: return step(.ok, String(localized: "Apple software is allowed in \(profile)."))
@@ -974,6 +1052,11 @@ public enum ConnectionDoctor {
         case .newAppDefault(let allowed):
             return allowed ? step(.ok, String(localized: "Nothing in Kilobat blocks this app here.")) : step(blocked, String(localized: "New apps are blocked in \(profile), and this app has no rule."))
         case .noAppRule: return step(.ok, String(localized: "Nothing in Kilobat blocks this."))
+        case .subscribedList(let entry, let list): return step(blocked, String(localized: "\(host) matches \(entry) on \(list), a blocklist you subscribed to. Allow the site in Settings › Protection if it’s a mistake."))
+        case .teamRule(_, let allowed):
+            return allowed ? step(.ok, String(localized: "Everything from this app’s developer is allowed in \(profile)."))
+                           : step(blocked, String(localized: "Everything from this app’s developer is blocked in \(profile)."))
+        case .askNewDestination: return step(.warning, String(localized: "This app asks before it reaches a new destination. Answer in the approval window."))
         }
     }
 
@@ -1047,7 +1130,7 @@ public enum ConnectionDoctor {
             elsewhere = true
             (verdict, next) = (context == nil ? String(localized: "The name doesn’t resolve.") : String(localized: "The name doesn’t resolve on this Mac."),
                                String(localized: "Check the spelling. If other sites work, switch DNS to Cloudflare or Google in the Connection tab and try again."))
-        case "Kilobat rules": (verdict, next) = (String(localized: "Kilobat is blocking it."), String(localized: "Allow the app or remove the rule in Tools › Diagnostics & rules, or switch profile."))
+        case "Kilobat rules": (verdict, next) = (String(localized: "Kilobat is blocking it."), String(localized: "Allow the app or remove the rule in Connections › Rules, or switch profile."))
         case let layer? where layer == "IPv4" || layer == "IPv6":
             let other = layer == "IPv4" ? "IPv6" : "IPv4"
             if step(other)?.status == .ok {

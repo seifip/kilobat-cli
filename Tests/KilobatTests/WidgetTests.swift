@@ -44,6 +44,12 @@ struct WidgetTests {
         #expect(free.budget == nil && !free.pro && free.todayBytes == 1_100_000_000)
     }
 
+    @Test func noLimitIsNoBudget() {
+        let none = WidgetSnapshot(now: Self.now, connected: true, kind: String(localized: "Wi-Fi"), metered: false, diagnostic: Self.sample(), samples: [],
+                                  today: (1, 1, []), budget: .init(usedBytes: 5_000_000_000, limitBytes: 0, period: "session"), speed: nil, pro: true)
+        #expect(none.budget == nil)
+    }
+
     @Test func offlineDropsStaleLatency() {
         let offline = Self.snapshot(connected: false)
         #expect(offline.status == .offline && offline.link == nil && offline.internetMs == nil)
@@ -93,5 +99,31 @@ struct WidgetTests {
         // Quitting redraws everything.
         snapshot.running = false
         #expect(plan.due(snapshot, now: Self.now.addingTimeInterval(700 + WidgetReloadPlan.keepAlive)) == WidgetSnapshot.Kind.all)
+    }
+}
+
+struct WidgetFeedPlanTests {
+    private let now = Date(timeIntervalSince1970: 2_000_000)
+    @Test func noWidgetsMeansNoSnapshot() {
+        #expect(WidgetFeedPlan.build(widgetsInstalled: false) == false)
+        #expect(WidgetFeedPlan.build(widgetsInstalled: true))
+    }
+    @Test func writesOnlyWithARedrawOrAnOldFile() {
+        #expect(WidgetFeedPlan.write(reloading: ["status"], lastWrite: now.addingTimeInterval(-5), now: now))
+        #expect(WidgetFeedPlan.write(reloading: [], lastWrite: now.addingTimeInterval(-100), now: now) == false)
+        #expect(WidgetFeedPlan.write(reloading: [], lastWrite: now.addingTimeInterval(-300), now: now))
+        #expect(WidgetFeedPlan.write(reloading: [], lastWrite: nil, now: now))
+    }
+    @Test func theKeepAliveRedrawIsStillWritten() {
+        var plan = WidgetReloadPlan()
+        let snapshot = WidgetSnapshot(date: now, status: .checking)
+        _ = plan.due(snapshot, now: now)
+        // Nothing moved, yet a redraw is due before the widgets would call the figures stale, and it carries a write.
+        let later = now.addingTimeInterval(WidgetReloadPlan.keepAlive)
+        let kinds = plan.due(snapshot, now: later)
+        #expect(kinds.isEmpty == false)
+        #expect(WidgetFeedPlan.write(reloading: kinds, lastWrite: later.addingTimeInterval(-10), now: later))
+        // With no redraw due, the file is still rewritten at least every `interval`, well inside the stale limit.
+        #expect(WidgetReloadPlan.interval < WidgetSnapshot.staleAfter)
     }
 }

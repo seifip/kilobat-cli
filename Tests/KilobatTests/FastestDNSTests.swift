@@ -42,7 +42,7 @@ struct FastestDNSTests {
         let runs = [run(0, network: 48, [("quad9", 12)]), run(0, hour: 16, network: 48, [("quad9", 12)]), run(1, network: 48, [("quad9", 12)])]
         let verdict = decide(runs)
         #expect(verdict.state == .learning && verdict.choice == "network" && verdict.days == 2 && verdict.leader == "quad9")
-        #expect(FastestDNS.headline(verdict)?.hasPrefix("So far Quad9 at 12 ms · 2 of 3 days") == true)
+        #expect(FastestDNS.headline(verdict)?.hasPrefix("Quad9 leads · 2 of 3 days") == true)
     }
 
     @Test func aSmallLeadKeepsTheNetworksOwn() {
@@ -458,7 +458,7 @@ struct FastestDNSTests {
         for offset in [0.0, 60, 120] { await watch.observe(context(lookupWorked: offset == 0), now: now.addingTimeInterval(offset)) }
         #expect(watch.applied?.onFallback == true)
         var restored: [String] = []
-        watch.quit { service in restored.append(service); system.servers = []; return true }
+        watch.quit { service, _ in restored.append(service); system.servers = []; return true }
         #expect(restored == ["Wi-Fi"] && watch.applied == nil && system.servers.isEmpty && watch.switches.last?.reason == .quit)
     }
 
@@ -537,6 +537,150 @@ struct FastestDNSTests {
         #expect(quad9.days.compactMap { $0 }.count == 2 && quad9.answered == 40 && quad9.successRate == 1 && quad9.slowRate == 0)
         // Out of the window, nothing.
         #expect(FastestDNS.history(tallies, now: at(30), calendar: calendar).isEmpty)
+    }
+
+    @MainActor @Test func lateDNSWriteRemainsRecoverableAfterRelaunch() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = applied()
+        let saved = FastestDNSWatch.Saved(current: "home", networks: [], switches: [], applied: nil, pending: target)
+        try JSONEncoder().encode(saved).write(to: folder.appendingPathComponent(FastestDNSWatch.fileName))
+
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        let context = context(lookupWorked: true)
+        await watch.observe(context, now: target.date + 31)
+        #expect(FastestDNSWatch.load(directory: folder).pending == target)
+        #expect(applier.calls == 0)
+
+        let relaunched = FastestDNSWatch(directory: folder, system: system)
+        relaunched.applier = applier
+        system.servers = ["203.0.113.53"]
+        await relaunched.observe(context, now: target.date + 32)
+        #expect(system.servers == ["203.0.113.53"])
+        #expect(FastestDNSWatch.load(directory: folder).pending == target)
+
+        system.servers = target.servers
+        await relaunched.observe(context, now: target.date + 33)
+        #expect(applier.history == [[]])
+        #expect(system.servers.isEmpty)
+        #expect(FastestDNSWatch.load(directory: folder).pending == nil)
+    }
+
+    /// A saved watch holding a pending change, as the relaunch test builds it.
+    @MainActor private func pendingFolder(_ target: DNSApplied) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let saved = FastestDNSWatch.Saved(current: "home", networks: [], switches: [], applied: nil, pending: target)
+        try JSONEncoder().encode(saved).write(to: folder.appendingPathComponent(FastestDNSWatch.fileName))
+        return folder
+    }
+
+    @MainActor @Test func aPendingChangeThatNeverLandedClears() async throws {
+        let target = applied()
+        let folder = try pendingFolder(target)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        await watch.observe(context(lookupWorked: true), now: target.date + 60)
+        #expect(FastestDNSWatch.load(directory: folder).pending == target)
+        #expect(applier.calls == 0)
+        await watch.observe(context(lookupWorked: true), now: target.date + FastestDNSWatch.pendingLifetime)
+        #expect(FastestDNSWatch.load(directory: folder).pending == nil)
+        #expect(applier.calls == 0 && watch.error == nil && system.servers.isEmpty)
+    }
+
+    @MainActor @Test func aLapsedPendingChangeLeavesOtherDNSAlone() async throws {
+        let target = applied()
+        let folder = try pendingFolder(target)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        system.servers = ["203.0.113.53"]
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        await watch.observe(context(lookupWorked: true), now: target.date + FastestDNSWatch.pendingLifetime + 1)
+        #expect(FastestDNSWatch.load(directory: folder).pending == nil)
+        #expect(system.servers == ["203.0.113.53"] && applier.calls == 0)
+    }
+
+    @MainActor @Test func aLateWriteIsUndoneHoweverOld() async throws {
+        let target = applied()
+        let folder = try pendingFolder(target)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        system.servers = target.servers
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        await watch.observe(context(lookupWorked: true), now: target.date + 2 * FastestDNSWatch.pendingLifetime)
+        #expect(applier.history == [[]])
+        #expect(system.servers.isEmpty)
+        #expect(FastestDNSWatch.load(directory: folder).pending == nil)
+    }
+
+    @MainActor @Test func aHelperFailureWithNothingWrittenDoesNotWedgeSwitching() async throws {
+        let system = FakeSystem()
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: nil, system: system, probe: FakeProbe(lookups: ["1.1.1.1": 15]), calendar: calendar)
+        var preferences = SavedPreferences(); preferences.setFastestDNS(true, network: nil); preferences.setDNSFallback(.cloudflare)
+        var record = DNSNetworkRecord(network: "home", name: "Home", lastSeen: at(3))
+        record.runs = (0..<4).map { run($0, network: 48, [("quad9", 12)]) }
+        watch.preview(record)
+        watch.allowed = { true }; watch.preferences = { preferences }; watch.applier = applier
+        let now = at(3, 12)
+        applier.failWithoutWriting = true
+        await watch.observe(context(lookupWorked: true), now: now)
+        #expect(applier.calls == 1)
+        #expect(watch.applied == nil && system.servers.isEmpty)
+        applier.failWithoutWriting = false
+        await watch.observe(context(lookupWorked: true), now: now.addingTimeInterval(FastestDNSWatch.pendingLifetime + 60))
+        #expect(watch.applied != nil)
+        #expect(system.servers == watch.applied?.servers)
+    }
+
+    @MainActor private func savedFolder(applied: DNSApplied?, pending: DNSApplied?) throws -> URL {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let saved = FastestDNSWatch.Saved(current: "home", networks: [], switches: [], applied: applied, pending: pending)
+        try JSONEncoder().encode(saved).write(to: folder.appendingPathComponent(FastestDNSWatch.fileName))
+        return folder
+    }
+
+    @MainActor @Test func undoingAFixSaysWhenItCouldNot() async throws {
+        let folder = try savedFolder(applied: applied(), pending: applied("cloudflare"))
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        system.servers = applied().servers
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        await #expect(throws: (any Error).self) { try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true) }
+        #expect(applier.calls == 0)
+        #expect(system.servers == applied().servers)
+    }
+
+    @MainActor @Test func undoingAFixThatIsAlreadyGoneSucceeds() async throws {
+        let watch = FastestDNSWatch(directory: nil, system: FakeSystem())
+        try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true)
+    }
+
+    @MainActor @Test func undoingATrackedFixPutsAutomaticBack() async throws {
+        let folder = try savedFolder(applied: applied(), pending: nil)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        system.servers = applied().servers
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true)
+        #expect(system.servers.isEmpty)
+        #expect(applier.history == [[]])
     }
 
     @MainActor @Test func savedRecordsWithoutHistoryStillRead() throws {
@@ -684,6 +828,33 @@ struct FastestDNSTests {
         #expect(later.fallback?.id == "cloudflare" && later.fallback?.label == "Cloudflare · United States" && later.applied?.fallback == true)
         #expect(later.networks[0].pausedUntil.keys.sorted() == ["quad9"])
     }
+
+    @Test func dayGradeFollowsAnswersThenSlowness() {
+        func grade(_ answered: Int, _ failed: Int, slow: Int = 0) -> DNSDayGrade? { DNSTally(day: at(0), resolver: "quad9", answered: answered, failed: failed, slow: slow).grade }
+        #expect(grade(0, 0) == nil)
+        #expect(grade(8, 2) == .failing)
+        #expect(grade(95, 5) == .patchy)
+        #expect(grade(99, 1) == .fine)
+        #expect(grade(99, 1, slow: 20) == .slow)
+        #expect(grade(100, 0, slow: 10) == .fine)
+        #expect(grade(100, 0, slow: 11) == .slow)
+        #expect(grade(89, 11, slow: 80) == .failing)
+    }
+
+    @Test func historyIsUnreliableUnderNinetyFivePercent() {
+        func history(_ answered: Int, _ failed: Int) -> DNSHistory { DNSHistory(resolver: "quad9", days: [DNSTally(day: at(0), resolver: "quad9", answered: answered, failed: failed)]) }
+        #expect(history(94, 6).unreliable)
+        #expect(!history(95, 5).unreliable)
+        #expect(!DNSHistory(resolver: "quad9", days: [nil, nil]).unreliable)
+    }
+
+    @Test func customResolverRejectsWhatIsNotAnAddress() {
+        for bad in ["", "   ", "dns.google", "1.1.1", "999.1.1.1", "https://9.9.9.9"] { #expect(DNSResolverChoice.custom(bad) == nil, "\(bad)") }
+        #expect(DNSResolverChoice.custom(" 203.0.113.53 ")?.id == "custom:203.0.113.53")
+        #expect(DNSResolverChoice.custom("2001:db8::53")?.servers == ["2001:db8::53"])
+        let preset = DNSResolverChoice.presets[0]
+        #expect(DNSResolverChoice.custom(preset.servers[0])?.id == preset.id)
+    }
 }
 
 /// Answers every lookup from a table: a server's time, its CDN address, and NXDOMAIN unless it rewrites.
@@ -719,8 +890,11 @@ private final class FakeSystem: DNSSystem, @unchecked Sendable {
     var calls: Int { history.count }
     /// Servers it fails to set, leaving the service half changed, as a helper error might.
     var refuse: [String]?
+    /// Fails every change without writing anything, as a helper timeout would.
+    var failWithoutWriting = false
     func apply(servers: [String], service: String) async throws {
         history.append(servers)
+        if failWithoutWriting { throw FakeError() }
         if servers == refuse { system.servers = Array(servers.prefix(1)); throw FakeError() }
         system.servers = servers
     }

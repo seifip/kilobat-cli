@@ -20,15 +20,21 @@ public final class NettopMonitor: @unchecked Sendable {
 
     /// With the interface column, a process row (`name.pid,,in,out,`) is followed by its connections
     /// (`tcp4 local<->remote,en0,in,out,`), which say whether its bytes went to the Internet, the local network or a tunnel.
-    static func parse(_ line: String, into rows: inout [ProcessTraffic]) {
+    /// `orphaned` is set by a row that is neither a connection nor a readable process (a name with a comma shifts the
+    /// columns): the connections after it belong to that process, not to the one before, so they are dropped.
+    static func parse(_ line: String, into rows: inout [ProcessTraffic], orphaned: inout Bool) {
         let columns = line.split(separator: ",", omittingEmptySubsequences: false)
-        guard columns.count >= 4, let received = UInt64(columns[2]), let sent = UInt64(columns[3]) else { return }
+        guard columns.count >= 4 else { return }
+        let counters = UInt64(columns[2]).flatMap { received in UInt64(columns[3]).map { (received, $0) } }
         if columns[0].contains("<->") {
-            guard !rows.isEmpty else { return }
+            guard !orphaned, !rows.isEmpty, let (received, sent) = counters else { return }
             rows[rows.count - 1].connections.append(ConnectionTraffic(id: String(columns[0]), route: TrafficRoute.classify(columns[0], interface: columns[1]),
                                                                     interface: String(columns[1]), received: received, sent: sent))
-        } else if let dot = columns[0].lastIndex(of: "."), let pid = Int32(columns[0][columns[0].index(after: dot)...]) {
+        } else if let (received, sent) = counters, let dot = columns[0].lastIndex(of: "."), let pid = Int32(columns[0][columns[0].index(after: dot)...]) {
             rows.append(ProcessTraffic(pid: pid, process: String(columns[0][..<dot]), received: received, sent: sent))
+            orphaned = false
+        } else {
+            orphaned = true
         }
     }
 
@@ -73,19 +79,28 @@ public final class NettopMonitor: @unchecked Sendable {
         // a new interface scope or publish an error after intentional cancellation.
         queue.async { [weak self] in
             guard let self else { return }
-            var buffer = "", rows: [ProcessTraffic] = [], sawHeader = false, sampled = false
-            while process.isRunning && self.current(id) {
-                let data = output.fileHandleForReading.availableData
-                guard !data.isEmpty, self.current(id) else { break }
-                buffer += String(decoding: data, as: UTF8.self).replacingOccurrences(of: "\r", with: "")
-                while let newline = buffer.firstIndex(of: "\n") {
-                    let line = String(buffer[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    buffer.removeSubrange(...newline)
-                    if line.contains(",bytes_in,bytes_out,") {
-                        if sawHeader && self.current(id) { onSample(TrafficSnapshot(timestamp: Date(), processes: rows)); sampled = true }
-                        rows = []; sawHeader = true
-                    } else { Self.parse(line, into: &rows) }
+            var pending = Data(), rows: [ProcessTraffic] = [], orphaned = false, sawHeader = false, sampled = false
+            reading: while process.isRunning && self.current(id) {
+                // This block runs as long as nettop does, so without its own pool every autoreleased chunk stays
+                // in memory for good.
+                let more: Bool = autoreleasepool {
+                    let data = output.fileHandleForReading.availableData
+                    guard !data.isEmpty, self.current(id) else { return false }
+                    pending.append(data)
+                    // Bytes, not Characters, and one trim at the end: a second's output can be thousands of lines.
+                    var start = pending.startIndex
+                    while let newline = pending[start...].firstIndex(of: 0x0A) {
+                        let line = String(decoding: pending[start..<newline], as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                        start = pending.index(after: newline)
+                        if line.contains(",bytes_in,bytes_out,") {
+                            if sawHeader && self.current(id) { onSample(TrafficSnapshot(timestamp: Date(), processes: rows)); sampled = true }
+                            rows = []; orphaned = false; sawHeader = true
+                        } else { Self.parse(line, into: &rows, orphaned: &orphaned) }
+                    }
+                    pending = Data(pending[start...])
+                    return true
                 }
+                if !more { break reading }
             }
             process.waitUntilExit()
             retry(sampled)

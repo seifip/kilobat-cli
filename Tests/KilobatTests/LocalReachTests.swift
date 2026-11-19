@@ -296,3 +296,26 @@ struct LocalReachTests {
         #expect(faster.advice.first?.action == .joinFasterBand && faster.advice.first?.text.contains("Home-5G") == true)
     }
 }
+
+struct LocalDeviceTests {
+    @Test func oneRowPerDeviceWithItsKind() {
+        let devices = LocalDevice.group([
+            LocalService(kind: .cast, name: "TVcast-0260", model: "Chromecast"),
+            LocalService(kind: .airPlay, name: "TVcast-0260"),
+            LocalService(kind: .airPlay, name: "MacBook Air (4)", model: "MacBookAir10,1"),
+            LocalService(kind: .airPlay, name: "Living Room", model: "AppleTV14,1"),
+            LocalService(kind: .airPlay, name: "Kitchen", model: "AudioAccessory5,1"),
+            LocalService(kind: .printer, name: "HP LaserJet", model: "HP LaserJet Pro"),
+            LocalService(kind: .companion, name: "Phone"),
+        ])
+        #expect(devices.map(\.name) == ["TVcast-0260", "MacBook Air (4)", "Living Room", "Kitchen", "HP LaserJet"])
+        #expect(devices.map(\.kind) == [.tv, .laptop, .appleTV, .homePod, .printer])
+        #expect(devices[0].label == "Google Cast · AirPlay")
+    }
+
+    @Test func sameNameWithASuffixIsAnotherDevice() {
+        let devices = LocalDevice.group([LocalService(kind: .airPlay, name: "MacBook Air", model: "MacBookAir10,1"),
+                                         LocalService(kind: .airPlay, name: "MacBook Air (2)", model: "MacBookAir10,1")])
+        #expect(devices.count == 2)
+    }
+}

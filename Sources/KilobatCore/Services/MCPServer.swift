@@ -72,11 +72,24 @@ public struct MCPToolError: LocalizedError {
         guard let message = try? JSONSerialization.jsonObject(with: line) else { return send(Self.failure(NSNull(), -32700, "Parse error")) }
         if let batch = message as? [Any] {
             guard !batch.isEmpty else { return send(Self.failure(NSNull(), -32600, "Invalid Request")) }
+            var replies: [Int: [String: Any]] = [:]
+            var tasks: [Task<Void, Never>] = []
+            for (index, item) in batch.enumerated() {
+                let key = (item as? [String: Any])?["id"].map(Self.key)
+                let token = UUID()
+                if let key { requests[key] = token }
+                let task = Task { @MainActor in
+                    if !Task.isCancelled, let reply = await self.respond(to: item), !Task.isCancelled { replies[index] = reply }
+                    if let key, self.requests[key] == token { self.requests.removeValue(forKey: key) }
+                    self.running.removeValue(forKey: token)
+                }
+                tasks.append(task)
+                running[token] = task
+            }
             let token = UUID()
             running[token] = Task { @MainActor in
-                var replies: [[String: Any]] = []
-                for item in batch { if let reply = await self.respond(to: item) { replies.append(reply) } }
-                if !replies.isEmpty { self.send(replies) }
+                for task in tasks { await task.value }
+                if !replies.isEmpty { self.send(replies.keys.sorted().compactMap { replies[$0] }) }
                 self.running.removeValue(forKey: token)
             }
             return
@@ -132,7 +145,14 @@ public struct MCPToolError: LocalizedError {
                 step += 1
                 self.send(["jsonrpc": "2.0", "method": "notifications/progress", "params": ["progressToken": token, "progress": step, "message": message]])
             }
-            do { return Self.success(id, Self.result(try await tool.handler(params["arguments"] as? [String: Any] ?? [:], context))) }
+            let refusedBefore = LocalFiles.refusedWrites
+            do {
+                let output = try await tool.handler(params["arguments"] as? [String: Any] ?? [:], context)
+                if LocalFiles.refusedWrites > refusedBefore {
+                    return Self.success(id, ["content": [["type": "text", "text": "Nothing was changed. preferences.json was saved by a newer Kilobat than this one; update the command line."]], "isError": true])
+                }
+                return Self.success(id, Self.result(output))
+            }
             // Tool failures go back to the model as results so it can correct itself.
             catch { return Self.success(id, ["content": [["type": "text", "text": error.localizedDescription]], "isError": true]) }
         default:

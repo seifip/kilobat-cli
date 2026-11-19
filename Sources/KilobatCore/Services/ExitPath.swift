@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 /// Where this Mac's traffic leaves: the default route's interface, whether that is a tunnel, the VPN services macOS
 /// lists as connected and, only when asked, the public address one outside service sees. Reading the route and the
@@ -6,7 +7,7 @@ import Foundation
 /// None of this says a connection is private or anonymous: it says which way packets go and what one server saw.
 public struct ExitPath: Codable, Sendable, Equatable {
     public enum VPN: String, Codable, Sendable {
-        /// The default route leaves through a tunnel.
+        /// Traffic leaves through a tunnel: the default route's, or one carrying both halves of IPv4.
         case full
         /// A VPN is connected but the default route doesn't use it, so only some destinations go through it.
         case partial
@@ -24,15 +25,44 @@ public struct ExitPath: Codable, Sendable, Equatable {
     }
 
     public var date: Date
-    /// The default route's interface, such as en0 or utun3.
+    /// The interface internet traffic leaves through, such as en0 or utun3: the default route's, or the tunnel that
+    /// carries both halves of IPv4.
     public var interface: String?
-    /// The default route's interface is a tunnel (utun, ipsec, ppp, tun, tap).
+    /// That interface is a tunnel (utun, ipsec, ppp, tun, tap).
     public var tunnel: Bool
     /// VPN configurations macOS lists as connected (`scutil --nc list`), by the names they were given.
     public var connected: [String]
     public var publicAddress: PublicAddress?
     /// macOS's name for the interface's hardware port, such as Wi-Fi or Thunderbolt Ethernet; nil for tunnels.
     public var port: String?
+    /// The default IPv6 route, when one exists.
+    public var ipv6Interface: String?
+    /// Addressed physical interfaces, including secondary USB and Bluetooth links.
+    public var connectedPorts: [String: String]?
+
+    public static func connectionSymbol(port: String?, tunnel: Bool = false) -> String? {
+        if tunnel { return "network.badge.shield.half.filled" }
+        guard let name = port?.lowercased() else { return "network" }
+        if name.contains("iphone") || name.contains("ipad") || name.contains("tether") || name.contains("bluetooth") { return "personalhotspot" }
+        if name.contains("wi-fi") || name.contains("wifi") || name.contains("airport") { return nil }
+        return "network"
+    }
+
+    public var connectionSymbol: String? {
+        let device = interface ?? ipv6Interface
+        guard let device else { return nil }
+        return Self.connectionSymbol(port: port ?? connectedPorts?[device], tunnel: tunnel || TrafficRoute.tunnelInterface(Substring(device)))
+    }
+    public var routeTitle: String? {
+        guard interface != nil else {
+            if let ipv6Interface { return String(localized: "IPv6 internet route · \(connectedPorts?[ipv6Interface] ?? ipv6Interface)") }
+            return nil
+        }
+        return String(localized: "Internet route · \(interfaceLabel)")
+    }
+
+    /// False when the route check failed for a reason other than there being no IPv6 route.
+    public var ipv6RouteKnown: Bool?
 
     public init(date: Date = Date(), interface: String?, tunnel: Bool? = nil, connected: [String] = [], publicAddress: PublicAddress? = nil, port: String? = nil) {
         self.date = date; self.interface = interface; self.port = port
@@ -40,9 +70,36 @@ public struct ExitPath: Codable, Sendable, Equatable {
         self.connected = connected; self.publicAddress = publicAddress
     }
 
-    public var vpn: VPN { tunnel ? .full : connected.isEmpty ? .off : .partial }
+    /// A VPN that leaves the default route on the physical interface and sends both halves of IPv4 through its tunnel
+    /// (OpenVPN's def1, wg-quick) carries the traffic all the same: the tunnel is then the route that matters.
+    /// `carrier` is the interface that carries all of IPv4, by the rule the filter's kill switch uses.
+    mutating func follow(ipv4Carrier carrier: String?) {
+        guard !tunnel, interface != nil, let carrier, TrafficRoute.tunnelInterface(Substring(carrier)) else { return }
+        interface = carrier; tunnel = true; port = nil
+    }
+
+    public var vpn: VPN {
+        if tunnel {
+            return ipv6RouteKnown == false || ipv6Interface.map({ !TrafficRoute.tunnelInterface(Substring($0)) }) == true ? .partial : .full
+        }
+        return connected.isEmpty && ipv6Interface.map({ TrafficRoute.tunnelInterface(Substring($0)) }) != true ? .off : .partial
+    }
     /// The VPN's name when macOS lists exactly one connected; with several, which one carries the route isn't known.
-    public var vpnName: String? { connected.count == 1 ? connected[0] : nil }
+    /// VPN apps that don't register with macOS's VPN list, such as NordVPN, are named from the one VPN app running.
+    public var vpnName: String? { connected.count == 1 ? connected[0] : connected.isEmpty ? vpnApp : nil }
+    /// The one known VPN app running while a tunnel carries traffic and macOS lists no VPN as connected.
+    public var vpnApp: String?
+    /// IPv6 leaves outside the tunnel that carries IPv4.
+    public var ipv6Outside: Bool { ipv6Interface.map { !TrafficRoute.tunnelInterface(Substring($0)) } == true }
+    /// Traffic goes through the VPN: the default route is a tunnel and IPv6 doesn't go around it. Unlike `vpn`, an IPv6
+    /// route that couldn't be checked doesn't count against it; the kill switch keeps that stricter reading.
+    public var throughVPN: Bool { tunnel && !ipv6Outside }
+    /// A read that shows no tunnel right after one that did: worth a second look before saying the VPN is off.
+    public static func lostTunnel(previous: ExitPath?, current: ExitPath) -> Bool { previous?.tunnel == true && !current.tunnel }
+    /// A flag for an ISO country code, such as 🇯🇵 for JP.
+    public static func flag(_ code: String) -> String {
+        String(String.UnicodeScalarView(code.uppercased().unicodeScalars.compactMap { UnicodeScalar(127397 + $0.value) }))
+    }
 
     /// "utun3 (Tailscale)", "Wi-Fi (en0)", or the interface alone.
     public var interfaceLabel: String {
@@ -68,12 +125,12 @@ public struct ExitPath: Codable, Sendable, Equatable {
 
     /// The menu bar's short form: "On", "Split" or "Off", with the registry country code when the address was looked up.
     public var badge: String {
-        let state = switch vpn {
+        let state = switch throughVPN ? .full : vpn {
         case .full: String(localized: "On", comment: "VPN state in the menu bar")
         case .partial: String(localized: "Split", comment: "VPN state in the menu bar: only some traffic goes through it")
         case .off: String(localized: "Off", comment: "VPN state in the menu bar")
         }
-        return state + (publicAddress?.country.map { " " + $0 } ?? "")
+        return state + (publicAddress?.country.map { " " + Self.flag($0) } ?? "")
     }
 
     /// What the registry country means, worded the same everywhere it's shown.
@@ -99,13 +156,38 @@ public struct ExitPath: Codable, Sendable, Equatable {
     /// `ports` names the hardware port, which costs a third command.
     public static func read(lookup: Bool = false, ports: Bool = true) async -> (path: ExitPath, services: String) {
         async let route = CommandRunner.run("/sbin/route", ["-n", "get", "default"], timeout: 3)
+        async let route6 = CommandRunner.run("/sbin/route", ["-n", "get", "-inet6", "default"], timeout: 3)
         async let services = CommandRunner.run("/usr/sbin/scutil", ["--nc", "list"], timeout: 3)
         async let hardware = ports ? CommandRunner.run("/usr/sbin/networksetup", ["-listallhardwareports"], timeout: 3).output : ""
         let list = await services.output
         var path = ExitPath(interface: DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: await route.output).first, connected: connectedVPNs(list))
-        if ports, !path.tunnel, let interface = path.interface { path.port = hardwarePorts(await hardware)[interface] }
+        path.follow(ipv4Carrier: KillSwitchPolicy.ipv4CarrierName())
+        let ipv6 = await route6
+        path.ipv6Interface = DiagnosticProbe.matches(#"interface:\s+(\S+)"#, in: ipv6.output).first
+        path.ipv6RouteKnown = (path.ipv6Interface != nil || ipv6DefaultMissing(status: ipv6.status, output: ipv6.output)) && KillSwitchPolicy.ipv6Covered()
+        if ports {
+            let names = hardwarePorts(await hardware)
+            if !path.tunnel, let interface = path.interface { path.port = names[interface] }
+            if let store = SCDynamicStoreCreate(nil, "Kilobat connection overview" as CFString, nil, nil) {
+                path.connectedPorts = names.filter { device, _ in
+                    ["IPv4", "IPv6"].contains { family in
+                        let key = "State:/Network/Interface/\(device)/\(family)" as CFString
+                        let state = SCDynamicStoreCopyValue(store, key) as? [String: Any]
+                        return !(state?["Addresses"] as? [String] ?? []).isEmpty
+                    }
+                }
+            }
+        }
+        if path.connected.isEmpty, path.tunnel || path.ipv6Interface.map({ TrafficRoute.tunnelInterface(Substring($0)) }) == true {
+            path.vpnApp = await MainActor.run { VPNApps.running(disconnected: VPNApps.disconnected(list)) }
+        }
         if lookup, path.interface != nil { path.publicAddress = try? await publicAddress() }
         return (path, list)
+    }
+
+    /// Some versions of route(8) report a missing route on stderr and still exit successfully.
+    static func ipv6DefaultMissing(status: Int32, output: String) -> Bool {
+        (status == 0 || status == 1) && output.trimmingCharacters(in: .whitespacesAndNewlines) == "route: writing to routing socket: not in table"
     }
 
     /// Names of the services `scutil --nc list` reports as Connected, e.g. `* (Connected) 1F… VPN (io.tailscale.ipn.macsys) "Tailscale" [VPN:…]`.

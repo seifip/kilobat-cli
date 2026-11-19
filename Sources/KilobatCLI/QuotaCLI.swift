@@ -10,7 +10,7 @@ import KilobatCore
     }
 
     static func limit(_ args: [String], store: TrafficStore, app: [String: Any]?) throws {
-        var gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, index = 1
+        var gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, mode: NetworkBudgetMode?, index = 1
         func value() throws -> String {
             guard index + 1 < args.count else { throw CLIError("\(args[index]) needs a value. Run kilobat limit --help.") }
             defer { index += 2 }
@@ -18,6 +18,9 @@ import KilobatCore
         }
         while index < args.count {
             switch args[index] {
+            case "--mode":
+                guard let selected = NetworkBudgetMode(rawValue: try value()) else { throw CLIError("--mode takes off, alert or block.") }
+                mode = selected
             case "--cycle": cycle = try value()
             case "--reset-day":
                 guard let day = Int(try value()) else { throw CLIError("--reset-day takes a number: 1–31 for monthly, 1 (Monday) to 7 (Sunday) for weekly.") }
@@ -32,6 +35,7 @@ import KilobatCore
         let network = currentNetwork(store, app: app)
         if args.count == 1 {
             let budget = budgetJSON(store, app: app)
+            guard budget["mode"] as? String != NetworkBudgetMode.off.rawValue else { print("Budget: off"); return }
             let used = (budget["usedBytes"] as? UInt64) ?? 0
             print("Budget: \(store.preferences.limitGB.formatted()) GB · \(store.budgetCycle.summary())")
             if network != nil { print("  " + store.budgetCycle.progress(used: used, limitGB: store.preferences.limitGB)) }
@@ -39,16 +43,24 @@ import KilobatCore
             print(Terminal.dim("  Usage is sampled, so the cap is approximate. Blocking needs the app's network filter."))
             return
         }
-        try applyBudget(store, gb: gb, cycle: cycle, resetDay: resetDay, alerts: alerts, network: network)
+        try applyBudget(store, gb: gb, cycle: cycle, resetDay: resetDay, alerts: alerts, network: network, mode: mode)
+        let selected = network.map { store.preferences.budgetMode(for: $0) } ?? .off
+        guard selected != .off else { print("✓ Budget: off"); return }
         let thresholds = store.budgetCycle.thresholds
         print("✓ Budget: \(store.preferences.limitGB.formatted()) GB · \(store.budgetCycle.summary()) · alerts \(thresholds.isEmpty ? "off" : "at " + thresholds.map { "\($0)%" }.joined(separator: ", "))")
-        print("  With the app's network filter on, new connections stop at the limit. Usage is sampled, so it's approximate.")
+        print("  Mode: \(selected.title).")
     }
 
     /// Shared by `limit` and the set_budget MCP tool. `network` also records the budget for that network,
     /// so the app keeps it after a relaunch.
-    @discardableResult static func applyBudget(_ store: TrafficStore, gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, network: String?) throws -> [String: Any] {
-        var preferences = store.preferences, next = store.budgetCycle
+    @discardableResult static func applyBudget(_ store: TrafficStore, gb: Double?, cycle: String?, resetDay: Int?, alerts: String?, network: String?, mode: NetworkBudgetMode? = nil) throws -> [String: Any] {
+        guard let network else { throw CLIError("Kilobat could not identify the current network.") }
+        var preferences = store.preferences
+        let current = preferences.budgetMode(for: network)
+        let selected = mode ?? (current == .off ? .alert : current)
+        preferences.limitGB = preferences.networkLimits?[network] ?? 5
+        preferences.setBudgetMode(selected, for: network)
+        var next = preferences.networkCycles?[network] ?? BudgetCycle()
         if let gb {
             guard gb.isFinite, (0.1...10_000).contains(gb) else { throw CLIError("The budget must be between 0.1 and 10000 GB.") }
             preferences.limitGB = gb
@@ -76,13 +88,11 @@ import KilobatCore
             }
         }
         preferences.budgetCycle = next == BudgetCycle() ? nil : next
-        if let network {
-            preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([network: preferences.limitGB]) { $1 }
-            if let cycle = preferences.budgetCycle { preferences.networkCycles = (preferences.networkCycles ?? [:]).merging([network: cycle]) { $1 } }
-            else { preferences.networkCycles?[network] = nil }
-        }
+        preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([network: preferences.limitGB]) { $1 }
+        if let cycle = preferences.budgetCycle { preferences.networkCycles = (preferences.networkCycles ?? [:]).merging([network: cycle]) { $1 } }
+        else { preferences.networkCycles?[network] = nil }
         store.preferences = preferences
-        return ["limitGB": preferences.limitGB, "cycle": next.period.rawValue, "resetDay": resetDayJSON(next), "alerts": next.thresholds, "saved": true]
+        return ["mode": selected.rawValue, "limitGB": preferences.limitGB, "cycle": next.period.rawValue, "resetDay": resetDayJSON(next), "alerts": next.thresholds, "saved": true]
     }
 
     static func quota(_ args: [String], store: TrafficStore, app: [String: Any]?) throws {
@@ -113,15 +123,20 @@ import KilobatCore
         }
         guard values.count == 2, let gb = Double(values[1]) else { throw CLIError("Use quota <bundle-id> <GB> [--upload] [--all-networks].") }
         let quota = try setQuota(id, gb: gb, uploadOnly: flags.contains("--upload"), everyNetwork: flags.contains("--all-networks"), network: network, store: store)
-        print("✓ \(quota.name) may use \(TrafficFormat.bytes(quota.bytes))\(quota.uploadOnly ? " of uploads" : "") \(quota.network == nil ? "on every network" : "on this network"), " + resets(store.budgetCycle) + ".")
-        print("  With the app's network filter on, its new connections stop once it's used up. Usage is sampled, so it's approximate.")
+        print("✓ \(quota.name) may use \(TrafficFormat.bytes(quota.bytes))\(quota.uploadOnly ? " of uploads" : "") \(quota.network == nil ? "on every network" : "on this network") · " + quota.resolvedCycle(budget: budget(for: quota, store: store, network: network)).resets() + ".")
+        print(quota.blocks ? "  With the app's network filter on, its new connections stop once it's used up. Usage is sampled, so it's approximate."
+                           : "  Kilobat notifies you as it's used up; it doesn't block. Usage is sampled, so it's approximate.")
     }
 
-    static func setQuota(_ id: String, gb: Double, uploadOnly: Bool, everyNetwork: Bool, network: String?, store: TrafficStore) throws -> AppQuota {
+    static func setQuota(_ id: String, gb: Double, uploadOnly: Bool, everyNetwork: Bool, network: String?, store: TrafficStore) throws -> AppLimit {
         guard id.contains(".") || id.hasPrefix("process:"), !id.contains(" ") else { throw CLIError("Use a bundle ID such as com.example.App, or process:<name>, as kilobat status shows them.") }
         guard gb.isFinite, (0.01...10_000).contains(gb) else { throw CLIError("A quota must be between 0.01 and 10000 GB.") }
         guard everyNetwork || network != nil else { throw CLIError("Open Kilobat so the quota can apply to this network, or pass --all-networks.") }
-        let quota = AppQuota(name: displayName(id), apps: [id], bytes: UInt64(gb * 1_000_000_000), uploadOnly: uploadOnly, network: everyNetwork ? nil : network)
+        let scope = everyNetwork ? nil : network
+        // Replacing an app's limit keeps the mode and period chosen in the app.
+        let previous = (store.preferences.quotas ?? []).first { $0.apps.contains(id) && $0.network == scope }
+        var quota = AppLimit(name: displayName(id), apps: [id], bytes: UInt64(gb * 1_000_000_000), uploadOnly: uploadOnly, network: scope, mode: previous?.mode, cycle: previous?.cycle)
+        if let previous { quota.id = previous.id }
         store.preferences.quotas = (store.preferences.quotas ?? []).filter { !($0.apps.contains(id) && $0.network == quota.network) } + [quota]
         return quota
     }
@@ -146,13 +161,10 @@ import KilobatCore
         return store.usage.last?.networkKey.flatMap { $0 == "unknown" ? nil : $0 }
     }
 
-    static func cycle(for quota: AppQuota, store: TrafficStore, network: String?) -> BudgetCycle {
+    /// The budget cycle of the network a limit counts on; the CLI's store isn't on any network, so `network` says which is current.
+    static func budget(for quota: AppLimit, store: TrafficStore, network: String?) -> BudgetCycle {
         guard let key = quota.network, key != network else { return store.budgetCycle }
         return store.preferences.networkCycles?[key] ?? BudgetCycle()
-    }
-
-    static func resets(_ cycle: BudgetCycle) -> String {
-        switch cycle.period { case .session, .daily: "resetting each day"; case .weekly: "resetting each week"; case .monthly: "resetting each month" }
     }
 
     /// Weekly reset days count from Monday (1) to Sunday (7), as `--reset-day` takes them.
@@ -166,20 +178,22 @@ import KilobatCore
         let cycle = store.budgetCycle, network = currentNetwork(store, app: app)
         let used = (app?["cycleBytes"] as? NSNumber)?.uint64Value ?? network.map { store.budgetUsed(on: $0, cycle: cycle) } ?? 0
         let resets = cycle.interval(containing: Date())?.end
-        return ["limitGB": store.preferences.limitGB, "cycle": cycle.period.rawValue, "resetDay": resetDayJSON(cycle), "alerts": cycle.thresholds,
+        let mode = network.map { store.preferences.budgetMode(for: $0) } ?? .off
+        return ["mode": mode.rawValue, "limitGB": store.preferences.limitGB, "cycle": cycle.period.rawValue, "resetDay": resetDayJSON(cycle), "alerts": cycle.thresholds,
                 "usedBytes": used, "usedFraction": (Double(used) / max(1, store.preferences.limitGB * 1_000_000_000) * 1000).rounded() / 1000,
                 "resets": resets.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(), "network": network ?? NSNull()]
     }
 
+    /// App limits, under the name they had as quotas; `mode` (alert or block) was added with limits.
     static func quotasJSON(_ store: TrafficStore, app: [String: Any]?) -> [[String: Any]] {
         let network = currentNetwork(store, app: app), reached = Set(app?["quotaReached"] as? [String] ?? [])
         return (store.preferences.quotas ?? []).map { quota in
-            let cycle = cycle(for: quota, store: store, network: network)
-            let used = quota.used(store.usage, cycle: cycle)
+            let budget = budget(for: quota, store: store, network: network)
+            let used = quota.used(store.usage, budget: budget)
             return ["id": quota.id.uuidString, "name": quota.name, "apps": quota.apps, "limitBytes": quota.bytes, "uploadOnly": quota.uploadOnly,
                     "network": quota.network ?? NSNull(), "networkName": quota.network.flatMap { store.networkSessions[$0]?.name } ?? NSNull(),
-                    "usedBytes": used, "reached": used >= quota.bytes || !reached.isDisjoint(with: quota.apps),
-                    "resets": ISO8601DateFormatter().string(from: cycle.quotaInterval(containing: Date()).end)]
+                    "usedBytes": used, "reached": used >= quota.bytes || !reached.isDisjoint(with: quota.apps), "mode": quota.effectiveMode.rawValue,
+                    "resets": ISO8601DateFormatter().string(from: quota.resolvedCycle(budget: budget).limitInterval(containing: Date()).end)]
         }
     }
 }

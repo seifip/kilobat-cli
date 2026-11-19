@@ -11,6 +11,7 @@ import Observation
     public private(set) var network: String?
     public private(set) var checking = false
     @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored var probe = SmartHomeWatch.runProbe
     static let rememberedKey = "smartHomeNetworks"
     static let stale: TimeInterval = 1800
 
@@ -23,22 +24,26 @@ import Observation
             guard !Task.isCancelled else { return }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, diagnostics.snapshot?.networkKey == network else { return }
         checking = true; defer { checking = false }
-        let startingNetwork = diagnostics.snapshot?.networkKey
+        let revision = diagnostics.networkRevision
+        let result = await probe(diagnostics)
+        // A task tied to Devices is cancelled when its network changes. Never publish its old report.
+        guard !Task.isCancelled, diagnostics.networkRevision == revision, diagnostics.snapshot?.networkKey == network else { return }
+        report = result; self.network = network
+        remember(network, found: result.devicesFound)
+    }
+
+    private static func runProbe(_ diagnostics: DiagnosticStore) async -> SmartHomeReport {
         let radio: RadioSample
         if let sample = diagnostics.radio { radio = sample } else { radio = await DiagnosticProbe().radio() }
         let cached = diagnostics.networks, allowed = diagnostics.locationAllowed
         let scanning = radio.interface != nil && radio.band != "2.4 GHz"
-        let result = await SmartHomeProbe.run(wifiInterface: radio.interface, ssid: radio.ssid, band: radio.band) {
+        return await SmartHomeProbe.run(wifiInterface: radio.interface, ssid: radio.ssid, band: radio.band) {
             guard scanning else { return nil }
             if !cached.isEmpty { return cached }
             return allowed ? try? await DiagnosticProbe().scan() : nil
         }
-        // A task tied to Devices is cancelled when its network changes. Never publish its old report.
-        guard !Task.isCancelled, diagnostics.snapshot?.networkKey == startingNetwork else { return }
-        report = result; self.network = network
-        remember(network, found: result.devicesFound)
     }
 
     /// Health: checks again on a network that had smart-home devices, when the last check is old or from elsewhere.

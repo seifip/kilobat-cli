@@ -62,7 +62,7 @@ public struct SetupNetworkMatch: Codable, Sendable, Equatable {
 }
 
 /// A small curated table of the names devices give their own Wi-Fi, from the makers' documentation. Each row's
-/// `source` is the page the pattern comes from. Names are only
+/// `source` is the page the pattern comes from; Release/RESEARCH-DECISIONS.md keeps the reasoning. Names are only
 /// half the signal: `judge` also needs the internet to be unreachable (or no router at all), because anyone can name a
 /// home network DIRECT-…, and a phone or laptop running Wi-Fi Direct can share its internet.
 public enum SetupNetworks {

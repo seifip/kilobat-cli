@@ -53,6 +53,28 @@ import KilobatCore
                 print("→ " + report.next)
             }
             if !report.ok { fflush(stdout); exit(1) }
+        case "path":
+            try KilobatCLI.allow(args, ["--json"])
+            let software = await PathSoftware.current()
+            let dns = await DNSPath.current(software: software)
+            if args.contains("--json") { print(String(decoding: try pathJSON(software, dns), as: UTF8.self)); return }
+            print("Kilobat · network path")
+            let others = software.items.filter { !$0.kilobat }, own = software.items.filter(\.kilobat)
+            if software.items.isEmpty { print("  No other filters, proxies, VPNs or security software found.") }
+            for item in others + own {
+                let state = item.on == true ? (item.kind == .vpn ? "connected" : "on") : item.on == false ? (item.kind == .vpn ? "not connected" : "off") : "unknown"
+                print("  \(KilobatCLI.pad(item.kindTitle, 20))\(KilobatCLI.pad(item.name + (item.kilobat ? " (this app)" : ""), 26))\(state)")
+            }
+            if let proxy = software.systemProxy { print("  \(KilobatCLI.pad("System proxy", 20))\(proxy)") }
+            print("\nDNS")
+            print("  \(KilobatCLI.pad("Default", 20))\((dns.defaultServers.isEmpty ? "none" : dns.defaultServers.joined(separator: ", ")))")
+            for scoped in dns.scoped { print("  \(KilobatCLI.pad(scoped.domain, 20))\(scoped.servers.joined(separator: ", "))\(scoped.interface.map { " (\($0))" } ?? "")") }
+            for item in dns.encrypted + dns.proxies { print("  \(KilobatCLI.pad(item.kindTitle, 20))\(DNSPath.itemValue(item))") }
+            print("  \(KilobatCLI.pad("Private Relay", 20))\(dns.relayValue)")
+            if let note = software.updateNote() { print("\n" + note) }
+            if let advice = software.failureAdvice(), !software.others.isEmpty {
+                print(Terminal.dim("\nIf the internet stops working, test them one at a time. " + advice.test))
+            }
         case "conditions":
             try KilobatCLI.allow(args, ["--json"])
             let value = await conditions()
@@ -234,7 +256,7 @@ import KilobatCore
 
     /// Asks the app for a lid hold owned by this process; the app's answer says why when it can't.
     static func holdLid(until: Date, reason: String) async throws -> LidLease {
-        let setup = "Turn on “Allow running with the lid closed” in Kilobat Settings › Awake & agents."
+        let setup = "Turn on “Allow running with the lid closed” in Kilobat › Settings › Calls, streaming & Awake › Awake & agents."
         guard AppRelay.appRunning else { throw CLIError("--lid-closed needs the Kilobat app running. Open it, then: " + setup) }
         guard let data = await AppRelay.ask(LidRelayRequest.hold(until: until, owner: getpid(), reason: reason).action, timeout: .seconds(4)),
               let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -275,7 +297,7 @@ import KilobatCore
     static func policy() async -> ConnectionDoctor.Policy {
         let preferences = TrafficStore(startMonitoring: false).preferences, app = await WiFiCLI.connection()
         // Unrestricted only tracks the budget; it never stops connections.
-        let budgetReached = ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
+        let budgetReached = (app?["budgetMode"] as? String ?? "block") == "block" && ((app?["budgetUsed"] as? NSNumber)?.doubleValue ?? 0) >= 1 && preferences.profile != .unrestricted
         // The app reports the current network's effective cost, which decides whether updaters are paused.
         // While the kill switch blocks, the doctor names it; the filter's own exemptions follow from the policy.
         let killSwitch = app?["killSwitch"] as? [String: Any], blocking = killSwitch?["state"] as? String == "blocking"
@@ -294,6 +316,16 @@ import KilobatCore
         return [[report.method, path].compactMap { $0 }.joined(separator: " "), "checked " + time(report.date), report.failedAt.map { "app failed " + time($0) }]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
+    /// `kilobat path --json` and MCP get_network_path: the inventory, the DNS path and, when other software is on, the test.
+    static func pathJSON(_ software: PathSoftware, _ dns: DNSPath) throws -> Data {
+        var object: [String: Any] = [:]
+        object["software"] = try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(software))
+        object["dns"] = try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(dns))
+        object["recentMacOSUpdate"] = software.updatedRecently()
+        if let advice = software.failureAdvice() { object["suspects"] = advice.detail; object["test"] = advice.test }
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
     static func doctorJSON(_ report: DoctorReport) throws -> Data {
         var object = (try JSONSerialization.jsonObject(with: try DiagnosticsCLI.encode(report))) as? [String: Any] ?? [:]
         object["ok"] = report.ok

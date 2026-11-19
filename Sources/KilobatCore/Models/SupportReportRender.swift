@@ -6,7 +6,17 @@ public extension SupportReport {
         return hours % 24 == 0 && hours > 24 ? String(localized: "\(date) · last \(hours / 24) days", comment: "When the provider report was made and the days it covers")
             : String(localized: "\(date) · last \(hours) hours", comment: "When the provider report was made and the hours it covers")
     }
+    private var serviceLine: String? { service?.heading }
     private var leftOutLine: String { String(localized: "Left out for privacy: \(leftOut.joined(separator: "; ")).", comment: "Items joined with semicolons") }
+    private var observedLine: String? {
+        guard let firstCheck, let lastCheck else { return nil }
+        let first = firstCheck.formatted(date: .abbreviated, time: .shortened)
+        let last = lastCheck.formatted(date: .abbreviated, time: .shortened)
+        return String(localized: "Recorded checks: \(first) – \(last). Gaps may occur when the app is not running.")
+    }
+    private static func loaded(_ test: Speed) -> String {
+        String(localized: "download \(ms(test.downloadLoadedMs)), upload \(ms(test.uploadLoadedMs))")
+    }
     private static func result(_ status: String) -> String {
         switch status {
         case "ok": String(localized: "OK", comment: "A connection check layer passed, in the provider report")
@@ -48,10 +58,21 @@ public extension SupportReport {
            route.trace.map { (String(localized: "Route", comment: "Provider report: what a route trace to the service showed"), $0) }].compactMap { $0 }
     }
     private static func grade(_ bufferbloat: String) -> String { Bundle.main.localizedString(forKey: bufferbloat, value: bufferbloat, table: nil) }
+    /// "Before and after macOS 27.0 → 27.2, 7 days each side"
+    private static func upgradeHeading(_ upgrade: MacOSUpgradeComparison) -> String {
+        String(localized: "Before and after \(upgrade.title), up to \(upgrade.days) days each side", comment: "A heading in the provider report: a macOS upgrade, such as macOS 27.0 → 27.2, and the days compared")
+    }
+    /// Label, before and after, for each measure both sides had.
+    private static func upgradeRows(_ upgrade: MacOSUpgradeComparison) -> [(String, String, String, Bool)] {
+        upgrade.changes.map { (MacOSUpgradeComparison.label($0.metric), MacOSUpgradeComparison.value($0.metric, $0.before), MacOSUpgradeComparison.value($0.metric, $0.after), $0.worse) }
+    }
 
     /// For pasting into a support chat or an email.
     var text: String {
-        var lines = [String(localized: "Network report · \(dateLine)", comment: "The provider report’s title line, then when it was made and what it covers"), "\(mac) · \(connection)", ""]
+        var lines = [String(localized: "Network report · \(dateLine)", comment: "The provider report’s title line, then when it was made and what it covers"), "\(mac) · \(connection)"]
+            + [serviceLine].compactMap { $0 } + [""]
+        if let observedLine { lines += [observedLine, ""] }
+        if let placeURL { lines += [String(localized: "Place: \(placeURL)"), ""] }
         lines += findings.map { "• " + $0 }
         if let latency {
             lines += ["", ([String(localized: "Checks: \(latency.checks)", comment: "How many health checks the provider report covers"),
@@ -71,16 +92,21 @@ public extension SupportReport {
         if !speedTests.isEmpty {
             lines += ["", String(localized: "Speed tests:", comment: "A heading in the provider report")] + speedTests.map { test in
                 let when = test.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
-                return "  " + String(localized: "\(when)  ↓ \(Self.mbps(test.downloadMbps))  ↑ \(Self.mbps(test.uploadMbps))  idle \(Self.ms(test.idleMs))  under load \(Self.grade(test.bufferbloat))", comment: "One speed test in the provider report: when, download, upload, idle latency and the bufferbloat grade (Low, Moderate, High)")
+                return "  " + String(localized: "\(when)  ↓ \(Self.mbps(test.downloadMbps))  ↑ \(Self.mbps(test.uploadMbps))  idle \(Self.ms(test.idleMs))  under load \(Self.loaded(test)) (\(Self.grade(test.bufferbloat)))")
             }
         }
         if let planCheck {
             lines += ["", planHeading + ":", "  " + Self.planRows(planCheck).map { "\($0.0) \($0.1)" }.joined(separator: " · ")]
         }
+        if let upgrade = macOSUpgrade {
+            lines += ["", Self.upgradeHeading(upgrade) + ":"]
+            lines += Self.upgradeRows(upgrade).map { "  \($0.0): \($0.1) → \($0.2)" + ($0.3 ? "  (" + String(localized: "worse", comment: "Provider report: a measure got worse after a macOS upgrade") + ")" : "") }
+        }
         if let route = serviceRoute {
             lines += ["", String(localized: "Slow route to \(route.service):", comment: "A heading in the provider report: one service much slower than the rest")]
             lines += Self.routeRows(route).map { "  \($0.0): \($0.1)" }
         }
+        lines += routeText
         if let check {
             lines += ["", String(localized: "Check of \(check.host):", comment: "A heading in the provider report: a site that was checked layer by layer")]
                 + check.steps.map { "  \(Self.result($0.status).uppercased().padding(toLength: 7, withPad: " ", startingAt: 0)) \($0.layer): \($0.detail)" }
@@ -90,7 +116,9 @@ public extension SupportReport {
     }
 
     var markdown: String {
-        var lines = ["# Network report", "", "\(dateLine)  ", "\(mac) · \(connection)", "", "## What was measured", ""]
+        var lines = ["# Network report", "", "\(dateLine)  ", "\(mac) · \(connection)" + (serviceLine.map { "  \n" + $0 } ?? ""), "", "## What was measured", ""]
+        if let observedLine { lines.insert(observedLine, at: 4) }
+        if let placeURL { lines.insert("Place: \(placeURL)", at: 4) }
         lines += findings.map { "- " + $0 }
         if let latency {
             lines += ["", "## Latency", "", "| Router | Internet | Internet p95 | DNS | Loss | Checks |", "|---|---|---|---|---|---|",
@@ -106,16 +134,21 @@ public extension SupportReport {
         }
         if !speedTests.isEmpty {
             lines += ["", "## Speed tests", "", "| When | Download | Upload | Idle latency | Under load |", "|---|---|---|---|---|"]
-            lines += speedTests.map { "| \($0.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \(Self.mbps($0.downloadMbps)) | \(Self.mbps($0.uploadMbps)) | \(Self.ms($0.idleMs)) | \($0.bufferbloat) |" }
+            lines += speedTests.map { "| \($0.date.formatted(.dateTime.weekday(.abbreviated).hour().minute())) | \(Self.mbps($0.downloadMbps)) | \(Self.mbps($0.uploadMbps)) | \(Self.ms($0.idleMs)) | \(Self.loaded($0)) (\($0.bufferbloat)) |" }
         }
         if let planCheck {
             let rows = Self.planRows(planCheck)
             lines += ["", "## " + planHeading, "", "| " + rows.map(\.0).joined(separator: " | ") + " |", "|" + String(repeating: "---|", count: rows.count), "| " + rows.map(\.1).joined(separator: " | ") + " |"]
         }
+        if let upgrade = macOSUpgrade {
+            lines += ["", "## " + Self.upgradeHeading(upgrade), "", "| | macOS \(upgrade.from) | macOS \(upgrade.to) |", "|---|---|---|"]
+            lines += Self.upgradeRows(upgrade).map { "| \($0.0) | \($0.1) | \($0.3 ? "**\($0.2)**" : $0.2) |" }
+        }
         if let route = serviceRoute {
             lines += ["", "## " + String(localized: "Slow route to \(route.service)", comment: "A heading in the provider report: one service much slower than the rest"), ""]
             lines += Self.routeRows(route).map { "- **\($0.0):** \($0.1)" }
         }
+        lines += routeMarkdown
         if let check {
             lines += ["", "## Check of \(check.host)", "", "| Layer | Result | Detail |", "|---|---|---|"]
             lines += check.steps.map { "| \($0.layer) | \($0.status) | \($0.detail.replacingOccurrences(of: "|", with: "\\|")) |" }
@@ -130,7 +163,9 @@ public extension SupportReport {
         func when(_ d: Date) -> String { esc(d.formatted(.dateTime.weekday(.abbreviated).hour().minute())) }
         var body = """
         <header><div class="brand">\(batSVG)<span>kilobat</span></div><div class="meta">\(esc(String(localized: "Network report", comment: "The provider report’s title")))<br><span>\(esc(dateLine))</span></div></header>
-        <p class="device">\(esc(mac)) · \(esc(connection))</p>
+        <p class="device">\(esc(mac)) · \(esc(connection))\(serviceLine.map { "<br>" + esc($0) } ?? "")</p>
+        \(observedLine.map { "<p>\(esc($0))</p>" } ?? "")
+        \(placeURL.map { "<p>\(esc(String(localized: "Place: \($0)")))</p>" } ?? "")
         <section class="findings"><h2>\(esc(String(localized: "What was measured", comment: "A heading in the provider report")))</h2><ul>\(findings.map { "<li>\(esc($0))</li>" }.joined())</ul></section>
         """
         if let latency {
@@ -159,18 +194,24 @@ public extension SupportReport {
         if !speedTests.isEmpty {
             body += "<section><h2>\(esc(String(localized: "Speed tests", comment: "A heading in the provider report")))</h2><table><tr>"
                 + [String(localized: "When"), String(localized: "Download"), String(localized: "Upload"), String(localized: "Idle latency"), String(localized: "Under load")].map { "<th>\(esc($0))</th>" }.joined() + "</tr>"
-            body += speedTests.map { "<tr><td>\(when($0.date))</td><td>\(esc(Self.mbps($0.downloadMbps)))</td><td>\(esc(Self.mbps($0.uploadMbps)))</td><td>\(esc(Self.ms($0.idleMs)))</td><td>\(esc(Self.grade($0.bufferbloat)))</td></tr>" }.joined()
+            body += speedTests.map { "<tr><td>\(when($0.date))</td><td>\(esc(Self.mbps($0.downloadMbps)))</td><td>\(esc(Self.mbps($0.uploadMbps)))</td><td>\(esc(Self.ms($0.idleMs)))</td><td>\(esc(Self.loaded($0))) (\(esc(Self.grade($0.bufferbloat))))</td></tr>" }.joined()
             body += "</table>" + (planMbps.map { "<p class=\"note\">\(esc(String(localized: "Plan: \(Self.mbps($0)) download.", comment: "The internet plan’s download speed, in the provider report")))</p>" } ?? "") + "</section>"
         }
         if let planCheck {
             body += "<section><h2>\(esc(planHeading))</h2><div class=\"stats\">" + Self.planRows(planCheck).map { "<div><span>\(esc($0.0))</span><b>\(esc($0.1))</b></div>" }.joined()
             body += "</div><p class=\"note\">\(esc(String(localized: "Evenings are 7 to 11 pm, when home connections are busiest. Under half: tests below half the plan’s speed.", comment: "The provider report’s plan check note")))</p></section>"
         }
+        if let upgrade = macOSUpgrade {
+            body += "<section><h2>\(esc(Self.upgradeHeading(upgrade)))</h2><table><tr><th></th><th>macOS \(esc(upgrade.from))</th><th>macOS \(esc(upgrade.to))</th></tr>"
+            body += Self.upgradeRows(upgrade).map { "<tr><th>\(esc($0.0))</th><td>\(esc($0.1))</td><td\($0.3 ? " class=\"bad\"" : "")>\(esc($0.2))</td></tr>" }.joined()
+            body += "</table><p class=\"note\">\(esc(String(localized: "The same network’s checks and speed tests before and after the update. It shows what changed, not why.", comment: "The provider report’s note under the macOS before-and-after table")))</p></section>"
+        }
         if let route = serviceRoute {
             body += "<section><h2>\(esc(String(localized: "Slow route to \(route.service)", comment: "A heading in the provider report: one service much slower than the rest")))</h2><table>"
             body += Self.routeRows(route).map { "<tr><th>\(esc($0.0))</th><td>\(esc($0.1))</td></tr>" }.joined()
             body += "</table><p class=\"note\">\(esc(String(localized: "Measured from this Mac’s own downloads of 5 MB or more, against other downloads and speed tests within the same hour.", comment: "The provider report’s note under a slow route to one service")))</p></section>"
         }
+        body += routeHTML(esc)
         if let check {
             body += "<section><h2>\(esc(String(localized: "Check of \(check.host)", comment: "A heading in the provider report: a site that was checked layer by layer")))</h2><p class=\"\(check.ok ? "ok" : "bad")\">\(esc(check.verdict))</p><table>"
             body += check.steps.map { "<tr><td class=\"s-\($0.status)\">\(esc(Self.result($0.status)))</td><th>\(esc($0.layer))</th><td>\(esc($0.detail))</td></tr>" }.joined()

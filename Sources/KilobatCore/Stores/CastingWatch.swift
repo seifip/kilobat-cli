@@ -92,7 +92,7 @@ public struct CastingApp: Sendable {
         let radio = diagnostics.radio
         var conditions = CastingConditions()
         conditions.wifiBand = radio?.band; conditions.wifiName = radio?.ssid; conditions.rssi = radio?.rssi
-        if now.timeIntervalSince(lastAWDL) >= 30 { lastAWDL = now; awdl = await NearbyRadios.awdlStatus() }
+        if now.timeIntervalSince(lastAWDL) >= 30 { lastAWDL = now; awdl = await AWDLWatch.shared.status(users: true) }
         conditions.airDropActive = awdl.map { $0.up && $0.active }
         conditions.airDropUsers = awdl?.users ?? []
         if let top = apps.filter({ $0.name != activity.sender }).max(by: { $0.upload + $0.download < $1.upload + $1.download }), top.upload + top.download >= CastingCheck.heavyBytesPerSecond / 4 {

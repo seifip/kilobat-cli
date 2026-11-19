@@ -1,13 +1,38 @@
 import AppKit
 import Darwin
+import os
 
 /// Presentation attribution only: ownership never replaces a process's firewall identity.
 public enum ProcessOwnership {
     public static func outerApplication(in path: String) -> String? {
-        let parts = URL(fileURLWithPath: path).standardized.pathComponents
+        let parts = URL(fileURLWithPath: path, isDirectory: false).standardized.pathComponents
         guard let end = parts.firstIndex(where: { $0.hasSuffix(".app") }) else { return nil }
         return NSString.path(withComponents: Array(parts[...end]))
     }
+
+    /// The app a privileged helper or launch daemon belongs to, when it lives outside the app, as
+    /// /Library/PrivilegedHelperTools/com.nordvpn.macos.helper does: the helper is named by reverse DNS after its app,
+    /// so the longest prefix that is an installed app's bundle identifier names the owner. Apple's own are left alone.
+    public static func helperApplication(for path: String?) -> String? {
+        guard let path, let name = path.split(separator: "/").last.map(String.init),
+              !name.hasPrefix("com.apple.") else { return nil }
+        if let cached = helperCache.withLock({ $0[name] }) { return cached.isEmpty ? nil : cached }
+        let found = helperApplication(named: name) { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)?.path }
+        helperCache.withLock { $0[name] = found ?? "" }
+        return found
+    }
+    /// The lookup apart from the system, for tests: tries `com.nordvpn.macos.helper`, then `com.nordvpn.macos`, then
+    /// `com.nordvpn`, never fewer than two parts.
+    static func helperApplication(named name: String, lookup: (String) -> String?) -> String? {
+        var parts = name.split(separator: ".").map(String.init)
+        guard parts.count >= 3, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+        while parts.count >= 2 {
+            if let app = lookup(parts.joined(separator: ".")), app.hasSuffix(".app") { return app }
+            parts.removeLast()
+        }
+        return nil
+    }
+    private static let helperCache = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
 
     public static func executablePath(pid: Int32) -> String? {
         var buffer = [UInt8](repeating: 0, count: 4096)

@@ -41,7 +41,7 @@ enum HouseholdCLI {
             else { status = "no answer yet" }
             lines.append("  \(KilobatCLI.pad(peer.name, 28))\(status)")
         }
-        lines.append("Pairing, sharing and names are in the app: Kilobat › Settings › Household Macs.")
+        lines.append("Pairing, sharing and names are in the app: Kilobat › Settings › Calls, streaming & Awake › Household Macs.")
         return lines.joined(separator: "\n")
     }
 }

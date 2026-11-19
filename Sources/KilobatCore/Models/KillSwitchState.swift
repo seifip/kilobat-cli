@@ -60,19 +60,57 @@ public struct KillSwitchState: Codable, Sendable, Equatable {
                                vpnName: exit.vpnName, tunnel: vpnUp ? exit.interface : nil, allowedUntil: status == .allowed ? until : nil, filterActive: filterActive)
     }
 
-    /// The boot the kill switch was armed on, after this reading: it arms when the VPN carries all traffic with the
-    /// setting on, stays armed for the rest of that boot, and is forgotten when the setting goes off or the Mac restarts.
-    public static func arm(armedBoot: Double?, boot: Double, enabled: Bool, vpnUp: Bool) -> Double? {
+    /// The boot session the kill switch was armed in, after this reading: it arms when the VPN carries all traffic with
+    /// the setting on, stays armed for the rest of that boot, and is forgotten when the setting goes off or the Mac restarts.
+    public static func arm(armedBoot: String?, boot: String, enabled: Bool, vpnUp: Bool) -> String? {
         guard enabled else { return nil }
         if armedBoot == boot { return boot }
         return vpnUp ? boot : nil
     }
 
-    /// When this Mac booted, in seconds since 1970, which tells one boot from the next.
+    /// When this Mac booted, in seconds since 1970. Kept to carry over what older versions saved, and as a fallback.
     public static func bootTime() -> Double {
         var time = timeval(), size = MemoryLayout<timeval>.size
         guard sysctlbyname("kern.boottime", &time, &size, nil, 0) == 0 else { return 0 }
         return Double(time.tv_sec)
+    }
+
+    /// This boot, as the kernel names it. Unlike the boot time, it can't move when the clock is set.
+    /// Falls back to the boot time when it can't be read, so arming still works.
+    public static func bootSession() -> String {
+        var size = 0
+        if sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 {
+            var buffer = [CChar](repeating: 0, count: size)
+            if sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 {
+                let value = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                if !value.isEmpty { return value }
+            }
+        }
+        return String(Int(bootTime()))
+    }
+
+    /// What was saved as "armed", in today's terms: a boot session as it is, and a boot time from before sessions
+    /// were used only if it is still this boot's, so an update doesn't disarm a kill switch that is on guard.
+    public static func armedSession(saved: Any?, boot: String, bootTime: Double) -> String? {
+        if let session = saved as? String { return session }
+        if let time = saved as? Double, time == bootTime { return boot }
+        return nil
+    }
+
+    /// How long the monitor trusts a route reading with no change reported. Events (the path monitor and the routing
+    /// socket) trigger a read within a second; this only catches what they might miss, such as a VPN app that reports
+    /// itself disconnected while its tunnel and routes stay up. The filter checks the tunnel's routes on its own.
+    public static let fallbackRead: TimeInterval = 30
+    /// Whether the monitor should read the route and VPN list now. A clock set back counts as due.
+    public static func readDue(changed: Bool, hasReading: Bool, sinceLast: TimeInterval) -> Bool {
+        changed || !hasReading || !(0..<fallbackRead).contains(sinceLast)
+    }
+
+    /// Why an armed kill switch stopped enforcing without the person turning it off: Pro ended, or the network
+    /// filter went off. Nil for every other change, the setting going off included.
+    public static func lapse(wasArmed: Bool, next: KillSwitchState?) -> Status? {
+        guard wasArmed, let status = next?.status, status == .needsPro || status == .needsFilter else { return nil }
+        return status
     }
 
     /// What the filter gets. Only an armed kill switch the filter can enforce carries anything.
@@ -83,6 +121,8 @@ public struct KillSwitchState: Codable, Sendable, Equatable {
 
     /// Whether new connections are being refused now.
     public var blocking: Bool { status == .blocking }
+    /// Whether the filter is holding the Mac to the VPN in this state (the states `policy` arms).
+    public var enforcing: Bool { [.protected, .blocking, .allowed].contains(status) }
 
     // MARK: Words
 

@@ -9,21 +9,12 @@ enum DiagnosticsCLI {
             guard args.dropFirst().allSatisfy({ $0 == "--json" }) else { throw CLIError("Use diagnose [--json].") }
             let snapshot = await DiagnosticProbe().snapshot()
             let ssid = snapshot.radio.ssid == nil ? await WiFiCLI.appSSID() : nil
-            if args.contains("--json") { print(String(decoding: try diagnoseJSON(snapshot, ssid: ssid), as: UTF8.self)) }
+            if args.contains("--json") { print(String(decoding: try diagnoseJSON(snapshot, ssid: ssid, ipv6: await IPv6Probe.summary()), as: UTF8.self)) }
             else {
                 let report = DiagnosticStore.report(snapshot)
                 print(ssid.map { report.replacingOccurrences(of: "Network: Name unavailable (Location permission may be required)", with: "Network: " + $0) } ?? report)
             }
-        case "scan":
-            guard args.dropFirst().allSatisfy({ $0 == "--json" }) else { throw CLIError("Use scan [--json].") }
-            let networks = try await WiFiCLI.nearbyNetworks()
-            if args.contains("--json") { print(String(decoding: try scanJSON(networks), as: UTF8.self)) }
-            else {
-                print("Nearby Wi-Fi networks · macOS Location permission may be required\n")
-                for network in networks { print("\(KilobatCLI.pad(network.ssid, 30)) \(network.rssi) dBm · Ch \(network.channel > 0 ? String(network.channel) : "—") · \(network.band == "Unknown" ? "—" : network.band) · \(network.widthMHz) MHz\(network.security.map { " · \($0)" } ?? "")") }
-                if networks.isEmpty { print("No networks returned. Enable Wi-Fi scanning in the Kilobat app.") }
-                else if networks.allSatisfy({ $0.ssid == "Hidden network" }) { print("\nNames are hidden: macOS shows them only to apps with Location permission. Open the Kilobat app and run this again.") }
-            }
+        case "scan": try await WiFiCLI.scan(Array(args.dropFirst()))
         case "radar":
             guard args.dropFirst().allSatisfy({ ["--watch", "--json"].contains($0) }) else { throw CLIError("Use radar [--watch] [--json].") }
             let probe = DiagnosticProbe()
@@ -91,27 +82,28 @@ enum DiagnosticsCLI {
             do {
                 if let command = try FastestDNSCommand.parse(Array(args.dropFirst())) { try await DNSCLI.run(command); return }
             } catch let error as FastestDNSCommand.CommandError { throw CLIError(error.message) }
-            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|flush]. Changes require administrator approval. " + FastestDNSCommand.usage) }
+            guard args.count <= 2 else { throw CLIError("Use dns [automatic|cloudflare|google|quad9|<IP address>|flush]. Changes require administrator approval. " + FastestDNSCommand.usage) }
             if args.count == 2 && args[1] == "flush" {
                 try await NetworkTools.flushDNS(); print("✓ DNS cache flushed."); return
             }
             if args.count == 1 { print("Resolvers: " + (await DiagnosticProbe().snapshot()).dnsServers.joined(separator: ", ")); return }
-            let (provider, service) = try await setDNS(args[1])
-            print("✓ \(service) now uses \(provider.rawValue) DNS.")
+            let (choice, service) = try await setDNS(args[1])
+            print("✓ \(service) now uses \(choice.isNetwork ? "Network DNS" : choice.name + " for DNS").")
         default: throw CLIError("Unknown diagnostics command.")
         }
     }
     // The --json shapes below are shared with `kilobat mcp`, so agents see the same fields either way.
     /// `ssid` fills in the name macOS hides from the CLI, as the running app reports it.
-    static func diagnoseJSON(_ snapshot: DiagnosticSnapshot, ssid: String? = nil) throws -> Data {
+    static func diagnoseJSON(_ snapshot: DiagnosticSnapshot, ssid: String? = nil, ipv6: IPv6Summary? = nil) throws -> Data {
         try encode(DiagnosticOutput(measurements: snapshot, ssid: snapshot.radio.ssid ?? ssid, health: snapshot.health.rawValue, advice: snapshot.advice, signalScore: snapshot.radio.score, signalNoiseRatio: snapshot.radio.snr,
-                                    routerLatencyMs: snapshot.router?.average, internetLatencyMs: snapshot.internet.average, internetJitterMs: snapshot.internet.jitter))
+                                    routerLatencyMs: snapshot.router?.average, internetLatencyMs: snapshot.internet.average, internetJitterMs: snapshot.internet.jitter, ipv6: ipv6))
     }
     /// Scan results with unmeasured noise, channel and band as null, so agents never compute SNR against 0 dBm.
     static func scanJSON(_ networks: [NearbyNetwork]) throws -> Data {
         try encode(networks.map { ScanOutput(id: $0.id, ssid: $0.ssid, rssi: $0.rssi, noise: $0.noise == 0 ? nil : $0.noise, channel: $0.channel > 0 ? $0.channel : nil,
                                              band: $0.band == "Unknown" ? nil : $0.band, widthMHz: $0.widthMHz,
-                                             security: $0.security, securityLevel: $0.securityInfo?.level.rawValue) })
+                                             security: $0.security, securityLevel: $0.securityInfo?.level.rawValue,
+                                             generation: $0.details?.generation?.name, dfs: $0.channel > 0 ? ChannelPlan.touchesDFS($0.span, band: $0.band) : nil, details: $0.details) })
     }
     static func speedJSON(_ result: SpeedTestResult) throws -> Data {
         try encode(SpeedOutput(measurements: result, bufferbloat: result.bufferbloat, addedLatencyMs: result.addedLatency,
@@ -119,13 +111,16 @@ enum DiagnosticsCLI {
                                voiceCalls: result.voiceReadiness, videoCalls: result.videoReadiness, streaming: result.streamingReadiness, gaming: result.gamingReadiness, agents: result.agentReadiness,
                                callWarnings: result.callCautionReasons, method: SpeedTest.method(streams: result.streams)))
     }
-    static func setDNS(_ name: String) async throws -> (DNSProvider, String) {
-        guard let provider = DNSProvider.allCases.first(where: { $0.rawValue.lowercased() == name.lowercased() }), let service = await DiagnosticProbe().snapshot().networkService else {
-            throw CLIError("Choose automatic, cloudflare, google or quad9 on an active network service.")
+    /// Health's one resolver list: automatic (Network DNS), a preset, or a resolver's IP address, as Fastest DNS names them.
+    static func setDNS(_ name: String) async throws -> (DNSResolverChoice, String) {
+        guard let choice = DNSResolverChoice.named(name), let service = await DiagnosticProbe().snapshot().networkService else {
+            throw CLIError("Choose automatic, cloudflare, google, quad9 or a resolver's IP address on an active network service.")
         }
-        try await DNSService.set(provider, service: service)
-        return (provider, service)
+        try await DNSService.set(choice, service: service)
+        return (choice, service)
     }
+    /// The resolvers Fastest DNS times, from the person's settings: what dns-benchmark compares too.
+    @MainActor static func dnsCandidates() -> [DNSResolverChoice] { TrafficStore(startMonitoring: false).preferences.dnsCandidates() }
     static func encode<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(value)
@@ -141,15 +136,20 @@ enum DiagnosticsCLI {
         let routerLatencyMs: Double?
         let internetLatencyMs: Double?
         let internetJitterMs: Double?
+        /// The IPv6 verdict and the six facts behind it; never an address.
+        let ipv6: IPv6Summary?
     }
     private struct ScanOutput: Encodable {
         let id: String, ssid: String, rssi: Int, noise: Int?, channel: Int?, band: String?, widthMHz: Int, security: String?, securityLevel: String?
-        enum CodingKeys: CodingKey { case id, ssid, rssi, noise, channel, band, widthMHz, security, securityLevel }
+        /// "Wi-Fi 7" and the rest of the beacon; null without Location access (the app provides it when running).
+        let generation: String?, dfs: Bool?, details: AccessPointDetails?
+        enum CodingKeys: CodingKey { case id, ssid, rssi, noise, channel, band, widthMHz, security, securityLevel, generation, dfs, details }
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(id, forKey: .id); try container.encode(ssid, forKey: .ssid); try container.encode(rssi, forKey: .rssi)
             try container.encode(noise, forKey: .noise); try container.encode(channel, forKey: .channel); try container.encode(band, forKey: .band); try container.encode(widthMHz, forKey: .widthMHz)
             try container.encode(security, forKey: .security); try container.encode(securityLevel, forKey: .securityLevel)
+            try container.encode(generation, forKey: .generation); try container.encode(dfs, forKey: .dfs); try container.encode(details, forKey: .details)
         }
     }
     private struct RadioOutput: Encodable {

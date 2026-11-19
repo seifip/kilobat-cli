@@ -1,3 +1,4 @@
+import CFNetwork
 import CryptoKit
 import Darwin
 import Foundation
@@ -107,6 +108,10 @@ public final class RouterSession: RouterTransport, @unchecked Sendable {
         configuration.httpCookieStorage = nil; configuration.httpShouldSetCookies = false; configuration.urlCredentialStorage = nil
         configuration.urlCache = nil; configuration.timeoutIntervalForRequest = 8; configuration.timeoutIntervalForResource = 20
         configuration.waitsForConnectivity = false
+        configuration.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: 0, kCFNetworkProxiesHTTPSEnable as String: 0, kCFNetworkProxiesSOCKSEnable as String: 0,
+            kCFNetworkProxiesProxyAutoConfigEnable as String: 0, kCFNetworkProxiesProxyAutoDiscoveryEnable as String: 0,
+        ]
         session = URLSession(configuration: configuration, delegate: trust, delegateQueue: nil)
     }
     deinit { session.invalidateAndCancel() }
@@ -119,6 +124,28 @@ public final class RouterSession: RouterTransport, @unchecked Sendable {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { throw RouterAPIError.unexpected("not HTTP") }
+            return (data, http)
+        } catch let error as URLError {
+            if request.url?.scheme == "https", let seen = fingerprint, seen != pin, !trustAny,
+               [.cancelled, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .secureConnectionFailed].contains(error.code) {
+                throw RouterAPIError.certificate(fingerprint: seen, changed: pin != nil)
+            }
+            throw RouterAPIError.unreachable(error.localizedDescription)
+        }
+    }
+
+    /// As `send`, reading at most `limit` bytes of the body: more is refused while it arrives, not after.
+    public func send(_ request: URLRequest, limit: Int) async throws -> (Data, HTTPURLResponse) {
+        guard let host = request.url?.host, RouterAddress.isLocal(host, loopback: loopback) else { throw RouterAPIError.notLocal }
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else { throw RouterAPIError.unexpected("not HTTP") }
+            if response.expectedContentLength > Int64(limit) { bytes.task.cancel(); throw RouterAPIError.unexpected("reply too large") }
+            var data = Data()
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count > limit { bytes.task.cancel(); throw RouterAPIError.unexpected("reply too large") }
+            }
             return (data, http)
         } catch let error as URLError {
             if request.url?.scheme == "https", let seen = fingerprint, seen != pin, !trustAny,

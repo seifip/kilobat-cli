@@ -33,8 +33,13 @@ import Observation
     @ObservationIgnored private var reverse: [String: String?] = [:]
     @ObservationIgnored private var resolving: Set<String> = []
     @ObservationIgnored private var network: (key: String, name: String)?
+    @ObservationIgnored private var networkGeneration = UUID()
+    @ObservationIgnored var runTest: (ServiceSpeedTarget, Bool) async throws -> ServiceTransfer = {
+        try await ServiceSpeedTest.run($0, metered: $1)
+    }
     @ObservationIgnored private var lastFinding: String?
     @ObservationIgnored private var refreshed = Date.distantPast
+    @ObservationIgnored private var capacityTestDate: Date?
     @ObservationIgnored private var tracing: Set<String> = []
     @ObservationIgnored private let file: URL?
 
@@ -63,13 +68,16 @@ import Observation
         guard enabled else { return }
         if network?.key != key || vpn || key == "unknown" {
             record(tracker.finish())
-            let changed = network?.key != key
-            network = vpn || key == "unknown" ? nil : (key, name)
-            guard network != nil else { return }
+            let next: (key: String, name: String)? = vpn || key == "unknown" ? nil : (key, name)
+            let changed = network?.key != next?.key
+            if changed { networkGeneration = UUID() }
+            network = next
+            guard network != nil else { refresh(); return }
             if changed { refresh() }
         }
         // "Tonight" and "today" age, and an hour-old finding may no longer hold.
-        if snapshot.timestamp.timeIntervalSince(refreshed) >= 300 { refresh(now: snapshot.timestamp) }
+        let latestTest = speedTests().last { $0.networkKey == key && $0.networkChanged != true }?.result.date
+        if latestTest != capacityTestDate || snapshot.timestamp.timeIntervalSince(refreshed) >= 300 { refresh(now: snapshot.timestamp) }
         let names = hostnames()
         let ended = tracker.ingest(snapshot) { process, address, _, _ in
             guard !self.isCarrier(process.pid) else { return nil }
@@ -84,7 +92,7 @@ import Observation
     public func reverseName(_ address: String) -> String? { reverse[address] ?? nil }
 
     /// The Mac is going to sleep or the monitor stopped: transfers in progress end here.
-    public func pause() { record(tracker.finish()); network = nil }
+    public func pause() { record(tracker.finish()); network = nil; networkGeneration = UUID(); refresh() }
 
     private func record(_ ended: [(key: String, transfer: ServiceTransfer)]) {
         guard !ended.isEmpty, let network else { return }
@@ -109,8 +117,14 @@ import Observation
     /// Rebuilds the current network's report; a new finding asks the service's status page and traces the route once.
     public func refresh(now: Date = Date()) {
         refreshed = now
-        guard let key = network?.key ?? log.current else { report = nil; return }
-        let report = ServiceSpeedReport(log: log, network: key, speedTests: speedTests(), statuses: statuses(), now: now)
+        // A saved "current" key belongs to the last recorded transfer, not necessarily this network.
+        // Keep it for historical CLI queries, but never use it to populate the live interface.
+        guard enabled, let network else { report = nil; lastFinding = nil; capacityTestDate = nil; return }
+        let key = network.key, tests = speedTests()
+        capacityTestDate = tests.last { $0.networkKey == key && $0.networkChanged != true }?.result.date
+        var currentLog = log
+        if currentLog.networks[key] == nil { currentLog.networks[key] = .init(name: network.name) }
+        let report = ServiceSpeedReport(log: currentLog, network: key, speedTests: tests, statuses: statuses(), now: now)
         self.report = report
         guard let finding = report.finding else { lastFinding = nil; return }
         let id = key + "|" + finding.key
@@ -127,16 +141,17 @@ import Observation
     }
 
     /// One route trace per slow service a day, kept with the finding.
-    private func traceRoute(to address: String, key: String, network: String) {
+    @discardableResult func traceRoute(to address: String, key: String, network: String) -> Task<Void, Never>? {
         let id = network + "|" + key
-        guard let trace, !tracing.contains(id) else { return }
+        guard let trace, enabled, self.network?.key == network, !tracing.contains(id) else { return nil }
+        let generation = networkGeneration
         tracing.insert(id)
-        Task { [weak self] in
-            guard let output = await trace(address) else { self?.tracing.remove(id); return }
-            guard let self else { return }
+        return Task { [weak self] in
+            defer { self?.tracing.remove(id) }
+            guard self?.networkGeneration == generation, let output = await trace(address), let self,
+                  self.networkGeneration == generation, self.enabled else { return }
             self.log.setTrace(ServiceRouteTrace(date: Date(), address: address, output: output), key: key, network: network)
             self.save()
-            self.tracing.remove(id)
             self.refresh()
         }
     }
@@ -144,12 +159,16 @@ import Observation
     /// Test this service: at most 25 MB from the target's public file. Refused on a metered network.
     public func test(_ target: ServiceSpeedTarget, metered: Bool) async {
         guard testing == nil else { return }
+        guard let network else { testError = String(localized: "The current network could not be identified."); return }
+        let generation = networkGeneration
         testing = target.id; testError = nil
         defer { testing = nil }
         do {
-            let transfer = try await ServiceSpeedTest.run(target, metered: metered)
-            let saved = log.current.map { (key: $0, name: log.networks[$0]?.name ?? $0) }
-            guard let network = network ?? saved else { return }
+            let transfer = try await runTest(target, metered)
+            guard generation == networkGeneration, enabled else {
+                testError = String(localized: "The network changed during the test.")
+                return
+            }
             log.add(transfer, key: target.key, network: network.key, name: network.name)
             log.current = network.key
             save(); refresh()
@@ -167,6 +186,7 @@ import Observation
     /// Made-up history for screenshots; debug builds only.
     public func preview(_ log: ServiceSpeedLog, network: String, speedTests: [SavedSpeedTest], statuses: [String: ServiceStatus] = [:], now: Date = Date()) {
         self.log = log
+        self.network = (network, log.networks[network]?.name ?? network)
         report = ServiceSpeedReport(log: log, network: network, speedTests: speedTests, statuses: statuses, now: now)
     }
     #endif

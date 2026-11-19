@@ -5,6 +5,11 @@ import Observation
 /// Talks to the signed filter over the same private XPC service as the blocked-flow journal.
 @MainActor @Observable public final class ApprovalCenter {
     public private(set) var pending: [PendingApproval] = []
+    #if DEBUG
+    /// Made-up waiting apps for screenshots; nothing reaches the filter.
+    public func preview(_ items: [PendingApproval]) { previewing = true; pending = items }
+    private var previewing = false
+    #endif
     public private(set) var hostnames: [String: String] = [:]
     public private(set) var error: String?
     /// An app an agent or the command line asked to allow. Only the person at the Mac confirms it.
@@ -14,6 +19,9 @@ import Observation
     public func poll() async {
         guard let data = await call({ service, reply in service.pendingApprovals(reply: reply) }) else { return }
         let next = (try? JSONDecoder().decode([PendingApproval].self, from: data)) ?? []
+        #if DEBUG
+        if previewing { return }
+        #endif
         if next != pending { pending = next }
     }
 
@@ -34,13 +42,56 @@ import Observation
     }
 
     /// Releases the held connections. The caller saves the rule so later connections follow it.
-    public func decide(_ app: String, allowed: Bool) async {
-        pending.removeAll { $0.app == app }
+    /// How the filter took an answer.
+    public enum Outcome: Sendable, Equatable {
+        case accepted
+        /// The prompt changed after it was shown (a destination joined it) or is gone: nothing was released.
+        case refused
+        /// The filter didn't answer.
+        case unreachable
+    }
+    /// The prompt whose answer the filter refused because it had changed; the window says so.
+    public private(set) var changed: String?
+
+    /// Releases what the answer covers, bound to the prompt's approval id and the destinations it showed. The caller
+    /// saves the rule unless the filter refused the answer.
+    @discardableResult public func decide(_ approval: PendingApproval, allowed: Bool, scope: ApprovalAnswer.Scope? = nil) async -> Outcome {
+        let app = approval.app
         if requested == app { requested = nil }
-        _ = await call({ service, reply in service.decide(app, allowed: allowed) { @Sendable decided in reply(Data([decided ? 1 : 0])) } })
+        guard let encoded = try? JSONEncoder().encode(ApprovalAnswer(approval, allowed: allowed, scope: scope)) else { return .unreachable }
+        pending.removeAll { $0.id == approval.id }
+        var reply = await call({ service, reply in service.decideApproval(encoded) { @Sendable decided in reply(Data([decided ? 1 : 0])) } })
+        // A filter from before approval ids only knows answers about the app.
+        if reply == nil, approval.site == nil {
+            reply = await call({ service, reply in service.decide(app, allowed: allowed) { @Sendable decided in reply(Data([decided ? 1 : 0])) } })
+        }
+        guard let reply else { return .unreachable }
+        if reply == Data([1]) { if changed == approval.id { changed = nil }; return .accepted }
+        changed = approval.id
+        await poll()
+        return .refused
     }
 
-    public func clear() { pending = [] }
+    public func clear() {
+        #if DEBUG
+        if previewing { return }
+        #endif
+        pending = []
+    }
+
+    /// Apps alert mode let through, as the filter keeps them; nil when it didn't answer.
+    public func newApps() async -> [NewAppSighting]? {
+        guard let data = await call({ service, reply in service.newApps(reply: reply) }) else { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode([NewAppSighting].self, from: data)
+    }
+
+    /// The connection log and rule-hit counts since the last ask; nil when the filter didn't answer.
+    public func connectionLog(record: Bool, browsers: Bool) async -> ConnectionLogSnapshot? {
+        guard let data = await call({ service, reply in service.connectionLog(record: record, browsers: browsers, reply: reply) }) else { return nil }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(ConnectionLogSnapshot.self, from: data)
+    }
 
     /// The digest of the Protection index the filter has mapped; nil when the filter didn't answer.
     public func protectionDigest() async -> String? {

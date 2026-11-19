@@ -3,6 +3,19 @@ import Testing
 @testable import KilobatCore
 
 struct ServiceStatusTests {
+    @Test func oneIncidentOnASharedPageIsOneRow() {
+        let page = URL(string: "https://status.anthropic.com/incidents/abc")!, now = Date()
+        let claude = ServiceStatus(id: "claude", service: "Claude", state: .partialOutage, incident: "Elevated errors", page: page, checked: now)
+        let code = ServiceStatus(id: "claude-code", service: "Claude Code", state: .majorOutage, incident: "Elevated errors", page: page, checked: now)
+        let other = ServiceStatus(id: "chatgpt", service: "ChatGPT", state: .degraded, incident: "Elevated errors", page: URL(string: "https://status.openai.com")!, checked: now)
+        let rows = ServiceStatus.oneRowPerIncident([claude, code, other])
+        #expect(rows.map(\.id) == ["claude", "chatgpt"])
+        #expect(rows[0].state == .majorOutage)
+        // Different incidents on one page stay apart.
+        var second = code; second.incident = "Login failures"
+        #expect(ServiceStatus.oneRowPerIncident([claude, second]).count == 2)
+    }
+
     private let now = ServiceStatusParser.date("2026-10-31T12:00:00Z")!
     private func service(_ id: String) -> StatusService { ServiceCatalog.services.first { $0.id == id }! }
     private func parse(_ fixture: String, _ id: String) throws -> ServiceStatus {
@@ -17,7 +30,7 @@ struct ServiceStatusTests {
         #expect(status.incident == "Epic Games Store iOS Issue")
         #expect(status.page.absoluteString == "https://stspg.io/rw2pchzb9hd7")
         #expect(status.started == ServiceStatusParser.date("2026-10-30T22:10:47.039Z"))
-        #expect(status.sentence(notYou: true) == "Epic Games reports problems on its side — Epic Games Store iOS Issue")
+        #expect(status.sentence(notYou: true) == "Epic Games is having problems — Epic Games Store iOS Issue")
     }
 
     @Test func aMajorOutageIsDownForEveryone() throws {

@@ -13,7 +13,7 @@ import KilobatCore
         let summary: PlanSummary
     }
     struct Output: Encodable {
-        /// Whether the app runs scheduled plan checks (Settings › Network › Plan check, Pro).
+        /// Whether the app runs scheduled plan checks (Settings › Checks › Plan check, Pro).
         let planCheck: Bool
         let days: Int
         let networks: [Network]
@@ -31,7 +31,7 @@ import KilobatCore
         let output = summaries(days: days)
         if args.contains("--json") { print(String(decoding: try DiagnosticsCLI.encode(output), as: UTF8.self)); return }
         if output.networks.isEmpty {
-            print("No plan to compare with yet. Set your plan's download speed for this network in Kilobat (under a speed test result, or Settings › Network › Plan speed), or with kilobat settings plan-mbps 500, then run a few speed tests.")
+            print("No plan to compare with yet. Set your plan's download speed for this network in Kilobat (under a speed test result, or Settings › Checks › Plan speed), or with kilobat settings plan-mbps 500, then run a few speed tests.")
         }
         for (index, entry) in output.networks.enumerated() {
             let summary = entry.summary
@@ -48,7 +48,7 @@ import KilobatCore
             if !summary.scheduledOnly { print("  Counts the tests you ran: fewer than \(PlanSummary.enoughScheduled) scheduled checks so far.") }
         }
         if !output.planCheck {
-            print("\nScheduled plan checks are off. Turn on Settings › Network › Plan check in Kilobat (Pro), or run kilobat settings plan-check on.")
+            print("\nScheduled plan checks are off. Turn on Settings › Checks › Plan check in Kilobat (Pro), or run kilobat settings plan-check on.")
         }
     }
 
@@ -57,7 +57,7 @@ import KilobatCore
         let defaults = KilobatCLI.appDefaults, tests = NetworkJournal().speedTests
         let plans = PlanSpeeds.all(defaults)
         var candidates: [(key: String, plan: Double, source: String)] = plans.map { ($0.key, $0.value, "network") }
-        if candidates.isEmpty, let plan = PlanSpeeds.plan(for: nil, defaults), let newest = tests.last(where: { $0.networkKey != "unknown" }) {
+        if candidates.isEmpty, let newest = tests.last(where: { $0.networkKey != "unknown" }), let plan = PlanSpeeds.plan(for: newest.networkKey, defaults) {
             candidates = [(newest.networkKey, plan, "default")]
         }
         let networks = candidates.compactMap { candidate -> Network? in

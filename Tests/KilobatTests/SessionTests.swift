@@ -146,6 +146,9 @@ import Testing
         #expect(sessions.agents["Claude Code|a1"]?.state == .waitingForYou && ended == nil)
         sessions.receive(AgentEvent(kind: .working, agent: "claude", session: "a1", time: now))
         sessions.receive(AgentEvent(kind: .done, agent: "claude", session: "a1", time: now + 30))
+        #expect(sessions.agents.count == 1)
+        sessions.tick(apps: [], interval: 2, now: now + 32)
+        sessions.tick(apps: [], interval: 2, now: now + 42)
         #expect(sessions.agents.isEmpty)
         #expect(ended?.ended == "Finished" && ended?.state == .done && ended?.hooks == true && ended?.session == "a1")
         #expect(ended?.end == now + 30 && ended?.received == 720_000 * 40)
@@ -164,6 +167,8 @@ import Testing
         sessions.keepAwakeWhileWaiting = true
         #expect(sessions.holdingAwake)
         sessions.receive(AgentEvent(kind: .done, agent: "codex", cwd: "/tmp/api", time: start + 9))
+        #expect(sessions.holdingAwake)
+        sessions.tick(apps: [], interval: 2, now: start + 20)
         #expect(!sessions.holdingAwake)
     }
 
@@ -179,6 +184,7 @@ import Testing
         #expect(sessions.agents["Claude Code|one"]?.received == 540_000 && sessions.agents["Claude Code|one"]?.sharedTraffic == true)
         #expect(sessions.agents["Claude Code|two"]?.received == 0)
         sessions.receive(AgentEvent(kind: .done, agent: "claude", session: "one", time: start + 120))
+        sessions.tick(apps: [], interval: 2, now: start + 131)
         #expect(sessions.agents.count == 1 && sessions.history.first?.project == "kilobat")
     }
 
@@ -207,9 +213,9 @@ import Testing
         #expect(sessions.agents["Claude Code"] == nil && sessions.agents["Claude Code|x"]?.state == .waitingForYou)
         sessions.receive(AgentEvent(kind: .failed, agent: "claude", session: "x", message: "server_error", time: start + 90))
         #expect(sessions.history.first?.ended == "Failed: server_error" && sessions.history.first?.state == .failed)
-        // Once hooks report an agent, its traffic alone starts no run.
+        // After the hooked run ends, a later unhooked run can start from traffic.
         sessions.tick(apps: [traffic("process:claude", rate: 500_000)], interval: 2, now: start + 100)
-        #expect(sessions.agents.isEmpty)
+        #expect(sessions.agents["Claude Code"]?.hooks != true && sessions.agents.count == 1)
     }
 
     @Test func eventsRejectOversizeFields() throws {
@@ -358,6 +364,42 @@ import Testing
         #expect(history.count == 1 && history.first?.state == nil && history.first?.project == nil)
     }
 
+    private static let savedRun = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","kind":"agent","title":"Codex","start":0,"end":600,"ended":"Went quiet","received":5000000,"sent":10000,"apps":{},"destinations":[],"events":[],"peakThermal":"nominal","lastActive":600}"#
+
+    @Test func oneUnreadableRunDoesNotLoseTheOthers() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let original = Data("[\(Self.savedRun),{\"id\":\"not-a-run\"}]".utf8)
+        try original.write(to: directory.appendingPathComponent("sessions.json"))
+        #expect(store(directory: directory).history.count == 1)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("sessions.json.corrupt")) == original)
+    }
+
+    @Test func aFileThatIsNotAListIsKeptAside() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let original = Data(#"{"oops":true}"#.utf8)
+        try original.write(to: directory.appendingPathComponent("sessions.json"))
+        let sessions = store(directory: directory), start = Date()
+        #expect(sessions.history.isEmpty)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("sessions.json.corrupt")) == original)
+        sessions.start(.indefinite, now: start)
+        sessions.stop(now: start + 30)
+        #expect(sessions.history.count == 1)
+        #expect(try Data(contentsOf: directory.appendingPathComponent("sessions.json.corrupt")) == original)
+    }
+
+    @Test func aGoodFileLeavesNothingAside() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("[\(Self.savedRun)]".utf8).write(to: directory.appendingPathComponent("sessions.json"))
+        #expect(store(directory: directory).history.count == 1)
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("sessions.json.corrupt").path))
+    }
+
     @Test func summaryNamesDataEventsAndBattery() {
         let start = Date()
         let long = WorkSession(kind: .agent, title: "Codex", start: start, end: start + 5_400, received: 1_200_000, sent: 30_000,
@@ -399,7 +441,7 @@ struct ConnectionDoctorTests {
     @Test func appAndConnectionRules() {
         var preferences = SavedPreferences(); preferences.rules = ["Travel": ["com.example.App": false, "process:curl": true]]
         let app = rules(preferences, app: "com.example.App")
-        #expect(app.status == .failed && app.detail.contains("blocked in the Travel profile"))
+        #expect(app.status == .failed && app.detail.contains("blocked in the Essentials profile"))
         #expect(rules(preferences, app: "process:curl").status == .ok)
         #expect(rules(preferences, app: "com.example.App", filter: false).status == .warning)
         // A newer connection rule wins over the app rule.

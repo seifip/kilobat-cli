@@ -8,7 +8,50 @@ public struct SpeedTestUpdate: Sendable {
     public let bytes: Int
 }
 
+/// Why a speed test ended without a result, as far as the person needs to know.
+public enum SpeedTestFailureKind: Equatable, Sendable { case offline, serverUnreachable, interrupted, cancelled }
+
+/// What the test server itself answered wrong, typed so the classifier doesn't read message text.
+enum SpeedTestServerError: LocalizedError, Equatable {
+    case badSize
+    case http(Int)
+    var errorDescription: String? {
+        switch self {
+        case .badSize: String(localized: "The server returned an unexpected transfer size. Test discarded.")
+        case .http(let status): String(localized: "The test server returned HTTP \(status). Try again.")
+        }
+    }
+}
+
 public enum SpeedTest {
+    /// The URL errors that, with the internet working, mean this one server can't be reached (or was blocked on the way).
+    static let unreachableCodes: Set<URLError.Code> = [.cannotFindHost, .cannotConnectToHost, .timedOut, .networkConnectionLost, .secureConnectionFailed, .dnsLookupFailed]
+
+    /// Whether a failed test is the connection, the test server, or a drop partway. Rules, in order:
+    /// 1. Cancelled (`CancellationError`, `URLError.cancelled`): `.cancelled`.
+    /// 2. Any bytes moved: `.interrupted`. A slow link that moved bytes is a number or a drop, never "server unreachable".
+    /// 3. Internet known down: `.offline`.
+    /// 4. Internet known up and a connect/DNS/TLS/timeout `URLError`, a bad transfer size or an HTTP status: `.serverUnreachable`.
+    /// 5. Internet known up, anything else: `.interrupted`.
+    /// 6. Internet unknown: `.offline`; never `.serverUnreachable`, since nothing shows the rest of the internet works.
+    /// `internetReachable` must come from checks that don't use the test host.
+    public static func failureKind(error: any Error, internetReachable: Bool?, bytesTransferred: Int) -> SpeedTestFailureKind {
+        if error is CancellationError || (error as? URLError)?.code == .cancelled { return .cancelled }
+        if bytesTransferred > 0 { return .interrupted }
+        guard internetReachable == true else { return .offline }
+        if let error = error as? URLError { return unreachableCodes.contains(error.code) ? .serverUnreachable : .interrupted }
+        return error is SpeedTestServerError ? .serverUnreachable : .interrupted
+    }
+
+    /// The plain line for a failure the person can act on or stop worrying about; nil to show the error itself.
+    public static func failureMessage(_ kind: SpeedTestFailureKind) -> String? {
+        switch kind {
+        case .serverUnreachable: String(localized: "Kilobat’s speed test server (Cloudflare) can’t be reached from this network. Your connection itself is working.", comment: "Speed test failure: the test server is blocked or down while other sites answer")
+        case .offline: String(localized: "The connection is down, so the speed test couldn’t run.", comment: "Speed test failure: no internet")
+        case .interrupted, .cancelled: nil
+        }
+    }
+
     /// Connections the parallel test opens at once.
     public static let parallelStreams = 4
 
@@ -22,6 +65,7 @@ public enum SpeedTest {
         async let radio = DiagnosticProbe().radio()
         let baseline = await DiagnosticProbe.ping("1.1.1.1", count: 5)
         var context = SpeedTestContext(exit: await exit, radio: await radio)
+        if !IPv6Probe.hasIPv4Route() { context.noIPv4Route = true }
         let before = InterfaceCounters.read()
         try Task.checkCancellation()
         progress(streams == 1 ? String(localized: "Measuring download and loaded latency…") : String(localized: "Measuring download over \(streams) connections and loaded latency…"))
@@ -31,7 +75,7 @@ public enum SpeedTest {
         try Task.checkCancellation()
         progress(streams == 1 ? String(localized: "Measuring upload and loaded latency…") : String(localized: "Measuring upload over \(streams) connections and loaded latency…"))
         async let upPing = DiagnosticProbe.ping("1.1.1.1", count: 20)
-        let up = try await transfer(upload: true, cap: max(1, maximumBytes / 5), streams: streams, updates: updates)
+        let up = try await transfer(upload: true, cap: max(1, maximumBytes / 5), streams: streams, downloadRate: Double(down.bytes) / down.seconds, updates: updates)
         let uploadLoaded = trim(await upPing, duration: up.seconds)
         updates(SpeedTestUpdate(phase: .complete, fraction: 1, megabits: nil, bytes: down.bytes + up.bytes))
         if let before, let after = InterfaceCounters.read() { context.otherBytes = otherBytes(before: before, after: after, test: down.bytes + up.bytes) }
@@ -51,6 +95,28 @@ public enum SpeedTest {
         let up = try await transfer(upload: true, cap: max(1, maximumBytes), streams: min(max(streams, 1), 8), updates: { _ in })
         guard up.bytes > 0 else { throw DiagnosticError(String(localized: "The upload test sent nothing.")) }
         return Double(up.bytes) * 8 / up.seconds / 1_000_000
+    }
+
+    /// Download alone, in Mbps: up to `seconds` and `maximumBytes`, for the Bluetooth and AirDrop comparison.
+    public static func download(maximumBytes: Int, seconds: Double = 8, streams: Int = 1) async throws -> Double {
+        let down = try await transfer(upload: false, cap: max(1, maximumBytes), streams: min(max(streams, 1), 8), seconds: seconds, updates: { _ in })
+        guard down.bytes > 0 else { throw DiagnosticError(String(localized: "The download test received nothing.")) }
+        return Double(down.bytes) * 8 / down.seconds / 1_000_000
+    }
+
+    /// The smallest request an upload starts with on a link known to be slow.
+    static let smallestChunk = 8_000
+    /// The first request's size for each stream. An upload after a slow download starts with about a quarter second
+    /// of the download's rate, so it can finish inside the time limit even where upload is far slower than download.
+    static func firstChunk(upload: Bool, streams: Int, downloadBytesPerSecond: Double?) -> Int {
+        let usual = max(64_000, 128_000 / max(1, streams))
+        guard upload, let rate = downloadBytesPerSecond, rate > 0 else { return usual }
+        return min(usual, max(smallestChunk, Int(rate * 0.25)))
+    }
+    /// What a request that ran out of time counts for. A download's bytes arrived and are measured; an upload's
+    /// progress is what the system buffered, not what reached the server, so it counts nothing.
+    static func timedOutBytes(upload: Bool, moved: Int, wanted: Int) -> Int {
+        upload ? 0 : min(max(0, moved), wanted)
     }
 
     /// What the network ports carried during the test beyond the test itself. Physical ports only, so a VPN's tunnel isn't counted twice.
@@ -106,18 +172,19 @@ public enum SpeedTest {
         func complete(_ stream: Int, _ bytes: Int) { lock.withLock { inFlight[stream] = 0; completed += bytes } }
     }
 
-    private static func transfer(upload: Bool, cap: Int, streams: Int, updates: @escaping @Sendable (SpeedTestUpdate) -> Void) async throws -> (bytes: Int, seconds: Double, dataCenter: String?) {
+    private static func transfer(upload: Bool, cap: Int, streams: Int, seconds limit: Double = 8, downloadRate: Double? = nil, updates: @escaping @Sendable (SpeedTestUpdate) -> Void) async throws -> (bytes: Int, seconds: Double, dataCenter: String?) {
         let sampler = SpeedSampler(), tally = Tally(cap: cap)
         let start = Date()
         let phase: SpeedTestUpdate.Phase = upload ? .upload : .download
         updates(SpeedTestUpdate(phase: phase, fraction: 0, megabits: nil, bytes: 0))
-        let (bytes, dataCenter) = try await withThrowingTaskGroup(of: (Int, String?).self) { group in
+        let (bytes, dataCenter) = try await withThrowingTaskGroup(of: (Int, String?, URLError?).self) { group in
             for stream in 0..<streams {
                 group.addTask {
                     let transport = SpeedTransfer()
                     defer { transport.close() }
-                    var bytes = 0, chunk = max(64_000, 128_000 / streams)
-                    while Date().timeIntervalSince(start) < 8, let count = tally.reserve(chunk) {
+                    let first = firstChunk(upload: upload, streams: streams, downloadBytesPerSecond: downloadRate)
+                    var bytes = 0, chunk = first, timedOut: URLError?
+                    while Date().timeIntervalSince(start) < limit, let count = tally.reserve(chunk) {
                         try Task.checkCancellation()
                         let url = URL(string: "https://speed.cloudflare.com/\(upload ? "__up" : "__down?bytes=\(count)&nonce=\(UUID().uuidString)")")!
                         var request = URLRequest(url: url)
@@ -128,24 +195,35 @@ public enum SpeedTest {
                             request.httpMethod = "POST"
                             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
                         }
-                        let received = try await transport.request(request, body: upload ? Data(repeating: 0xA5, count: count) : nil) { current in
-                            let total = tally.progress(stream, current)
-                            if let rate = sampler.sample(bytes: total) {
-                                let fraction = min(0.99, max(Date().timeIntervalSince(start) / 8, Double(total) / Double(cap)))
-                                updates(SpeedTestUpdate(phase: phase, fraction: fraction, megabits: rate, bytes: total))
+                        let received: Int
+                        do {
+                            received = try await transport.request(request, body: upload ? Data(repeating: 0xA5, count: count) : nil) { current in
+                                let total = tally.progress(stream, current)
+                                if let rate = sampler.sample(bytes: total) {
+                                    let fraction = min(0.99, max(Date().timeIntervalSince(start) / limit, Double(total) / Double(cap)))
+                                    updates(SpeedTestUpdate(phase: phase, fraction: fraction, megabits: rate, bytes: total))
+                                }
                             }
+                        } catch let error as URLError where error.code == .timedOut {
+                            // A link too slow for this request: count what a download did bring, and stop this stream here.
+                            let partial = timedOutBytes(upload: upload, moved: transport.moved, wanted: count)
+                            tally.complete(stream, partial)
+                            bytes += partial
+                            timedOut = error
+                            break
                         }
-                        guard received == count else { throw DiagnosticError(String(localized: "The server returned an unexpected transfer size. Test discarded.")) }
+                        guard received == count else { throw SpeedTestServerError.badSize }
                         tally.complete(stream, received)
                         bytes += received
                         let elapsed = max(0.001, Date().timeIntervalSince(start))
-                        chunk = min(upload ? 1_000_000 : 4_000_000, max(64_000, Int(Double(bytes) / elapsed * 0.5)))
+                        chunk = min(upload ? 1_000_000 : 4_000_000, max(min(first, 64_000), Int(Double(bytes) / elapsed * 0.5)))
                     }
-                    return (bytes, transport.dataCenter)
+                    return (bytes, transport.dataCenter, timedOut)
                 }
             }
-            var total = 0, dataCenter: String?
-            for try await (bytes, center) in group { total += bytes; dataCenter = dataCenter ?? center }
+            var total = 0, dataCenter: String?, failure: URLError?
+            for try await (bytes, center, timedOut) in group { total += bytes; dataCenter = dataCenter ?? center; failure = failure ?? timedOut }
+            if total == 0, let failure { throw failure }
             return (total, dataCenter)
         }
         let seconds = max(0.001, Date().timeIntervalSince(start))

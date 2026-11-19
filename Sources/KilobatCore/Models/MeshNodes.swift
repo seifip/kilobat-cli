@@ -56,11 +56,22 @@ public enum MeshNodes {
 
     /// Whether two radios look like the same box. A node's radios take addresses a few apart from one base address
     /// (`…:30`, `…:31`, `…:34`), and some derive extra ones by setting the locally administered bit, which changes the
-    /// first byte (`78:…` and `7a:…`). Two radios on the same channel and band are always two boxes: a mesh shares its
-    /// channel between nodes, and one radio has one address per network.
+    /// first byte (`78:…` and `7a:…`). Some put the 2.4 GHz radio 0x10 above the 5 GHz one (`…:e0` and `…:f0`). Two radios
+    /// on the same channel and band are two boxes, since a mesh shares its channel between nodes, unless their addresses
+    /// are one apart and they're heard about as strongly: one radio with a second address on this network.
     public static func sameNode(_ a: NodeRadio, _ b: NodeRadio) -> Bool {
-        if a.band == b.band && a.channel == b.channel { return false }
-        return sameBox(a.bssid, b.bssid)
+        if a.band == b.band && a.channel == b.channel { return secondAddress(a, b) }
+        return sameBox(a.bssid, b.bssid) || bandPair(a, b)
+    }
+    static func secondAddress(_ a: NodeRadio, _ b: NodeRadio) -> Bool {
+        guard abs(a.rssi - b.rssi) <= 8, let x = bytes(a.bssid), let y = bytes(b.bssid), x[0...4] == y[0...4] else { return false }
+        return abs(Int(x[5]) - Int(y[5])) == 1
+    }
+    static func bandPair(_ a: NodeRadio, _ b: NodeRadio) -> Bool {
+        let radios = [a, b]
+        guard let five = radios.first(where: { $0.band == "5 GHz" }), let low = radios.first(where: { $0.band == "2.4 GHz" }),
+              let x = bytes(five.bssid), let y = bytes(low.bssid), x[0...4] == y[0...4] else { return false }
+        return Int(y[5]) - Int(x[5]) == 0x10
     }
     static func sameBox(_ a: String, _ b: String) -> Bool {
         guard let x = bytes(a), let y = bytes(b) else { return false }

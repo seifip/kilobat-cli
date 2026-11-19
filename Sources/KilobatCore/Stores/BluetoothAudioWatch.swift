@@ -73,7 +73,7 @@ import Observation
         var conditions = BluetoothAudioConditions()
         conditions.wifiBand = radio?.band; conditions.wifiChannel = radio?.channel; conditions.wifiName = radio?.ssid
         // lsof runs for this and IOBluetooth reads every paired device, so every 30 seconds is enough; right away after a pause.
-        if now.timeIntervalSince(lastAWDL) >= 30 { lastAWDL = now; awdl = await NearbyRadios.awdlStatus(); paired = devices() }
+        if now.timeIntervalSince(lastAWDL) >= 30 { lastAWDL = now; awdl = await AWDLWatch.shared.status(users: true); paired = devices() }
         conditions.airDropActive = awdl.map { $0.up && $0.active }
         conditions.airDropUsers = awdl?.users ?? []
         if let bytes = BluetoothAudioProbe.wifiBytes(interface: radio?.interface) {

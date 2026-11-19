@@ -27,7 +27,7 @@ enum DownCLI {
         // Every service with --all would be dozens of connections; the status pages alone answer that.
         let reach = all ? [:] : await reachability(services, statuses: statuses)
         if json { print(String(decoding: try statusJSON(statuses, reach: reach), as: UTF8.self)); return }
-        for status in statuses { print(line(status, reach: reach[status.id])) }
+        for status in statuses { print(line(status, reach: reach[status.id], expected: expectedNote(status))) }
     }
 
     /// Named services, every one, or those of the apps running now.
@@ -61,7 +61,7 @@ enum DownCLI {
         }
     }
 
-    static func line(_ status: ServiceStatus, reach: Reach? = nil) -> String {
+    static func line(_ status: ServiceStatus, reach: Reach? = nil, expected: ExpectedRestrictions.Note? = nil) -> String {
         if let block = reach?.block {
             var text = "\(Terminal.rose("⊘")) \(Terminal.bold(status.service))  \(block.title): \(block.summary)"
             for line in block.evidence { text += "\n    " + Terminal.dim(line) }
@@ -72,7 +72,14 @@ enum DownCLI {
         if let started = status.started, status.problem { text += Terminal.dim(" (since \(started.formatted(date: .abbreviated, time: .shortened)))") }
         if status.problem || status.state == .unknown { text += "\n    " + Terminal.dim(status.page.absoluteString) }
         if reach?.reachable == false { text += "\n    " + Terminal.dim("It doesn’t connect from here, and nothing Kilobat measured points at this network. Run kilobat why <host> for each layer.") }
+        if let expected { text += "\n    " + Terminal.dim(expected.sentence) }
         return text
+    }
+
+    /// The guide note for this service in the Mac's time zone country. Nil when nothing matches. It does not replace `block`.
+    static func expectedNote(_ status: ServiceStatus, guide: ExpectedRestrictions.File? = try? ExpectedRestrictions.load(), country: String? = NetworkBlockCheck.timeZoneCountry()) -> ExpectedRestrictions.Note? {
+        guard let guide, let country, let service = ServiceCatalog.services.first(where: { $0.id == status.id }) else { return nil }
+        return ExpectedRestrictions.note(in: guide, country: country, countryBasis: "time_zone", target: service.hosts.first, serviceIDs: [service.id], hosts: service.hosts + service.endpoints)
     }
 
     /// Each status with `problem` and the sentence beside the stored fields; dates in ISO 8601. `reachable` says whether the
@@ -85,6 +92,7 @@ enum DownCLI {
             row["reachable"] = reached?.reachable ?? NSNull()
             row["block"] = try reached?.block.map { try JSONSerialization.jsonObject(with: DiagnosticsCLI.encode($0)) } ?? NSNull()
             if let block = reached?.block { row["summary"] = block.summary }
+            row["expected"] = try expectedNote(status).map { try JSONSerialization.jsonObject(with: DiagnosticsCLI.encode($0)) } ?? NSNull()
             return row
         }
         return try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys, .withoutEscapingSlashes])

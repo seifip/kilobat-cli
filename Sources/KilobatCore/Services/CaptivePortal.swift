@@ -24,9 +24,11 @@ public struct PortalCheck: Codable, Sendable, Equatable {
 }
 
 public enum CaptivePortal {
+    public static func fallback(china: Bool) -> Endpoint { china ? .xiaomi : .google }
     public enum Endpoint: String, Sendable, CaseIterable {
         case apple = "http://captive.apple.com/hotspot-detect.html"
         case google = "http://connectivitycheck.gstatic.com/generate_204"
+        case xiaomi = "http://connect.rom.miui.com/generate_204"
         public var url: URL { URL(string: rawValue)! }
     }
     /// What one check page's answer says.
@@ -42,7 +44,7 @@ public enum CaptivePortal {
         guard let status else { return .failed }
         let success = switch endpoint {
         case .apple: status == 200 && body.range(of: "<title>success</title>", options: .caseInsensitive) != nil
-        case .google: status == 204 || (status == 200 && body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        case .google, .xiaomi: status == 204 || (status == 200 && body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         if success { return .success }
         return .intercepted(signInPage(location: location, body: body, base: endpoint.url))
@@ -94,18 +96,28 @@ public enum CaptivePortal {
 
     /// Apple's page first; Google's only when Apple's didn't answer. When Apple's answered with something else,
     /// that's what macOS sees too, so it decides.
-    public static func check(timeout: TimeInterval = 5) async -> PortalCheck {
+    public static func check(timeout: TimeInterval = 5, useAlternative: Bool = false) async -> PortalCheck {
         let apple = await fetch(.apple, timeout: timeout)
         switch apple.answer {
         case .success: return PortalCheck(state: .open)
         case .intercepted(let url): return PortalCheck(state: .portal, url: url, hintMinutes: hint(in: apple.body))
         case .failed:
-            let google = await fetch(.google, timeout: timeout)
-            switch google.answer {
+            let fallback = fallback(china: useAlternative || UserDefaults.standard.bool(forKey: "network.chinaPortalFallback"))
+            let response = await fetch(fallback, timeout: timeout)
+            switch response.answer {
             case .success: return PortalCheck(state: .open)
-            case .intercepted(let url): return PortalCheck(state: .portal, url: url, hintMinutes: hint(in: google.body))
+            case .intercepted(let url): return PortalCheck(state: .portal, url: url, hintMinutes: hint(in: response.body))
             case .failed: return PortalCheck(state: .offline)
             }
+        }
+    }
+
+    public static func alternativeCheck(timeout: TimeInterval = 5) async -> PortalCheck {
+        let response = await fetch(.xiaomi, timeout: timeout)
+        switch response.answer {
+        case .success: return PortalCheck(state: .open)
+        case .intercepted(let url): return PortalCheck(state: .portal, url: url)
+        case .failed: return PortalCheck(state: .offline)
         }
     }
 

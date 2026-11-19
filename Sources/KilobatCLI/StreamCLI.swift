@@ -27,7 +27,7 @@ enum StreamCLI {
         if !query.passwordStdin, query.port == nil, let app = await app() {
             if query.json { try print(json: app.merging(["source": "app"]) { $1 }); return }
             guard app["enabled"] as? Bool == true else {
-                Swift.print("Stream reports are off. Turn on Settings › Streaming › Stream reports from OBS in the Kilobat app, or run kilobat stream check before going live.")
+                Swift.print("Stream reports are off. Turn on Settings › Calls, streaming & Awake › Stream reports from OBS in the Kilobat app, or run kilobat stream check before going live.")
                 return
             }
             switch app["connection"] as? String {
@@ -119,7 +119,7 @@ enum StreamCLI {
         let reports = Array(StreamStore.load().suffix(query.limit).reversed())
         if query.json { Swift.print(String(decoding: (try? DiagnosticsCLI.encode(reports.map(StreamReport.Exported.init))) ?? Data("[]".utf8), as: UTF8.self)); return }
         guard !reports.isEmpty else {
-            Swift.print("No streams yet. Turn on Settings › Streaming › Stream reports from OBS in the Kilobat app; each OBS stream over a minute gets a report when it ends.")
+            Swift.print("No streams yet. Turn on Settings › Calls, streaming & Awake › Stream reports from OBS in the Kilobat app; each OBS stream over a minute gets a report when it ends.")
             return
         }
         for report in reports {

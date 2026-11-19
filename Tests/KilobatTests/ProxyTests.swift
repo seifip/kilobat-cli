@@ -123,4 +123,105 @@ struct ProxyTests {
         #expect(resolver.server == "172.20.10.1")
         #expect(resolver.interface == "en0")
     }
+
+    // MARK: Detection without polling
+
+    /// Counts what a refresh asks for; nothing here launches a command or reads this Mac's settings.
+    final class Calls: @unchecked Sendable {
+        private let lock = NSLock()
+        private var listenerCalls = 0, listenCalls = 0
+        var listeners: Int { lock.withLock { listenerCalls } }
+        var listens: Int { lock.withLock { listenCalls } }
+        func sources(system: ProxyEnvironment.SystemProxy, paths: [String], lsof: String = "") -> ProxyEnvironment.Sources {
+            ProxyEnvironment.Sources(
+                system: { system },
+                processes: { paths.enumerated().map { (Int32($0.offset + 1), $0.element) } },
+                listeners: { self.lock.withLock { self.listenerCalls += 1 }; return lsof },
+                listens: { _ in self.lock.withLock { self.listenCalls += 1 }; return true })
+        }
+    }
+    private let emptyHome = URL(fileURLWithPath: "/nonexistent-kilobat-test-home")
+
+    @Test func theDictionaryReadsLikeScutil() {
+        let text = """
+        <dictionary> {
+          HTTPEnable : 1
+          HTTPPort : 7897
+          HTTPProxy : 127.0.0.1
+          HTTPSEnable : 1
+          HTTPSPort : 7897
+          HTTPSProxy : 127.0.0.1
+          SOCKSEnable : 0
+        }
+        """
+        let values: [String: Any] = ["HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": 7897, "HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": 7897, "SOCKSEnable": 0]
+        #expect(ProxyEnvironment.systemProxy(values: values) == ProxyEnvironment.systemProxy(text))
+        let pac = ProxyEnvironment.systemProxy(values: ["ProxyAutoConfigEnable": 1, "ProxyAutoConfigURLString": "http://x/pac"])
+        #expect(pac.pac == "http://x/pac")
+        #expect(ProxyEnvironment.systemProxy(values: [:]).any == false)
+    }
+
+    @Test func noLocalProxyLaunchesNothing() async {
+        let calls = Calls()
+        let environment = await ProxyEnvironment.current(home: emptyHome, sources: calls.sources(system: .init(), paths: ["/sbin/launchd", "/Applications/X.app/Contents/MacOS/X"]))
+        #expect(calls.listeners == 0)
+        #expect(calls.listens == 0)
+        #expect(environment.clients.isEmpty)
+    }
+
+    @Test func aRemoteProxyLaunchesNothing() async {
+        let calls = Calls()
+        _ = await ProxyEnvironment.current(home: emptyHome, sources: calls.sources(system: .init(http: "10.0.0.5:3128"), paths: []))
+        #expect(calls.listeners == 0)
+        #expect(calls.listens == 0)
+    }
+
+    @Test func aLocalProxyNobodyClaimsAsksOnce() async {
+        let calls = Calls()
+        let lsof = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nmihomo 123 me 7u IPv4 0x1 0t0 TCP 127.0.0.1:17897 (LISTEN)\n"
+        let environment = await ProxyEnvironment.current(home: emptyHome, sources: calls.sources(system: .init(http: "127.0.0.1:17897"), paths: [], lsof: lsof))
+        #expect(calls.listeners == 1)
+        #expect(environment.clients.map(\.name) == ["mihomo"])
+    }
+
+    @Test func aLocalProxyAKnownClientClaimsDoesNotAsk() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-proxy-\(UUID().uuidString)")
+        let config = home.appendingPathComponent(".config/mihomo")
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try "mixed-port: 17897\n".write(to: config.appendingPathComponent("config.yaml"), atomically: true, encoding: .utf8)
+        let calls = Calls()
+        let environment = await ProxyEnvironment.current(home: home, sources: calls.sources(system: .init(http: "127.0.0.1:17897"), paths: ["/opt/homebrew/bin/mihomo"]))
+        #expect(calls.listeners == 0)
+        #expect(environment.running.map(\.name) == ["mihomo"])
+    }
+
+    @Test func carriersComeFromTheTable() async {
+        let table: [(pid: Int32, path: String)] = [(1, "/usr/local/bin/tailscaled"), (2, "/Applications/X.app/Contents/MacOS/X")]
+        let carriers = ProxyEnvironment.carriers(table)
+        #expect(carriers.count == 1)
+        #expect(carriers.first?.kind == "vpn")
+        // The same pids reach the traffic sampler through a refresh that reads the table in-process.
+        let calls = Calls()
+        let environment = await ProxyEnvironment.current(home: emptyHome, sources: calls.sources(system: .init(), paths: ["/usr/local/bin/tailscaled", "/opt/homebrew/bin/mihomo", "/Applications/X.app/Contents/MacOS/X"]))
+        let routing = ProxyRouting()
+        routing.update(environment)
+        #expect(routing.isCarrier(1))
+        #expect(routing.isCarrier(2))
+        #expect(!routing.isCarrier(3))
+    }
+
+    @Test func theProcessTableNamesRootProcesses() {
+        // launchd is pid 1 and runs as root.
+        #expect(ProcessOwnership.executablePath(pid: 1) == "/sbin/launchd")
+        #expect(ProxyEnvironment.processTable().contains { $0.pid == 1 })
+    }
+
+    @Test func theFullCheckRunsOnAChangeOrWhileWatched() {
+        #expect(!ProxyCheckSchedule.due(changed: false, visible: false, clientRunning: false, sinceLast: 100_000))
+        #expect(ProxyCheckSchedule.due(changed: true, visible: false, clientRunning: false, sinceLast: 0))
+        #expect(!ProxyCheckSchedule.due(changed: false, visible: true, clientRunning: false, sinceLast: 59))
+        #expect(ProxyCheckSchedule.due(changed: false, visible: true, clientRunning: false, sinceLast: 60))
+        #expect(ProxyCheckSchedule.due(changed: false, visible: false, clientRunning: true, sinceLast: 60))
+    }
 }

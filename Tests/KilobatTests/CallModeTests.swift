@@ -74,6 +74,31 @@ struct CallModeTests {
         #expect(!FileManager.default.fileExists(atPath: ledger.path))
     }
 
+    @Test func aFailedReleaseWriteDoesNotBringAnOwnerBack() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let ledger = folder.appendingPathComponent("held.json")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep"); child.arguments = ["30"]
+        try child.run()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+            CallMode.resume(ledger: ledger)
+            kill(child.processIdentifier, SIGCONT)
+            if child.isRunning { child.terminate() }
+            child.waitUntilExit()
+            try? FileManager.default.removeItem(at: folder)
+        }
+        _ = CallMode.hold([child.processIdentifier], app: "Fixture", owner: "A", ledger: ledger)
+        _ = CallMode.hold([child.processIdentifier], app: "Fixture", owner: "B", ledger: ledger)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: folder.path)
+        #expect(CallMode.resume(owner: "A", ledger: ledger).isEmpty)
+        #expect(CallMode.held(ledger: ledger).first?.holders == ["B"])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
+        #expect(CallMode.resume(owner: "B", ledger: ledger).count == 1)
+        #expect(status(child.processIdentifier) != UInt32(SSTOP))
+    }
+
     @Test func anyOwnerLetsEverythingGoAtLaunch() throws {
         let ledger = FileManager.default.temporaryDirectory.appendingPathComponent("held-\(UUID().uuidString).json")
         let child = Process()
