@@ -50,8 +50,7 @@ public actor WiFiConnection {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        try interface.associate(to: network, password: credential)
-        guard interface.ssid() == network.ssid else { throw WiFiError.notConnected }
+        try associate(interface, to: network, password: credential, typed: password != nil)
     }
     /// Joins `name` on `band`, the strongest access point there, with the password macOS saved: for moving a Mac
     /// from 2.4 GHz to the same router's 5 GHz, under the same name or another. macOS may roam back if 5 GHz is weak.
@@ -64,8 +63,7 @@ public actor WiFiConnection {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        try interface.associate(to: network, password: credential)
-        guard interface.ssid() == name else { throw WiFiError.notConnected }
+        try associate(interface, to: network, password: credential, typed: false)
     }
     /// Joins `name` on whichever band is strongest, with the password macOS saved: back to the usual Wi-Fi after a
     /// printer's or camera's own network.
@@ -78,8 +76,7 @@ public actor WiFiConnection {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        try interface.associate(to: network, password: credential)
-        guard interface.ssid() == name else { throw WiFiError.notConnected }
+        try associate(interface, to: network, password: credential, typed: false)
     }
     /// Joins `name` on its strongest access point with `password`, or the one macOS saved when nil: a saved device's Wi-Fi.
     public func join(name: String, password: String?) throws {
@@ -91,8 +88,25 @@ public actor WiFiConnection {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        try interface.associate(to: network, password: credential)
-        guard interface.ssid() == name else { throw WiFiError.notConnected }
+        try associate(interface, to: network, password: credential, typed: password != nil)
+    }
+    /// CoreWLAN can fail an association with a transient error (`tmpErr`, a timeout) while macOS is still switching
+    /// networks, then join anyway a moment later. Give it a few seconds before calling it a failure, and say what
+    /// went wrong in plain words rather than CoreWLAN's code.
+    private func associate(_ interface: CWInterface, to network: CWNetwork, password: String?, typed: Bool) throws {
+        let name = network.ssid
+        do { try interface.associate(to: network, password: password) } catch {
+            for _ in 0..<12 {
+                if name != nil, interface.ssid() == name { return }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            throw WiFiJoinError(name: name ?? "", underlying: error as NSError, secured: !network.supportsSecurity(.none), hadPassword: password != nil, typed: typed)
+        }
+        for _ in 0..<6 {
+            if name != nil, interface.ssid() == name { return }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        throw WiFiError.notConnected
     }
     static func band(_ band: CWChannelBand?) -> String {
         switch band { case .band2GHz: "2.4 GHz"; case .band5GHz: "5 GHz"; case .band6GHz: "6 GHz"; default: "Unknown" }
@@ -107,6 +121,30 @@ public actor WiFiConnection {
         try interface.setPower(on)
     }
 }
+/// Why joining a network failed, in words a person can act on. `needsPassword` tells the Wi-Fi menu to ask for one.
+public struct WiFiJoinError: LocalizedError {
+    public let name: String
+    let underlying: NSError
+    let secured: Bool
+    let hadPassword: Bool
+    let typed: Bool
+
+    /// CoreWLAN's timeouts and its `tmpErr`: the network or macOS didn't answer in time, which a retry usually fixes.
+    var transient: Bool {
+        let text = underlying.localizedDescription + " " + underlying.debugDescription
+        return text.contains("tmpErr") || [-3905, -3925, -3931].contains(underlying.code)
+    }
+    /// A secured network with no saved password Kilobat could read, or a saved or typed password that was refused.
+    public var needsPassword: Bool { secured && !transient }
+
+    public var errorDescription: String? {
+        if transient { return String(localized: "\(name) didn’t answer in time. Try again in a moment.", comment: "Wi-Fi join failed with a temporary error; the argument is the network name") }
+        if secured && typed { return String(localized: "Couldn’t join \(name). Check the password and try again.", comment: "Wi-Fi join with a typed password failed; the argument is the network name") }
+        if secured { return String(localized: "Couldn’t join \(name) with the saved password. Enter it to try again.", comment: "Wi-Fi join with the saved password failed; the argument is the network name") }
+        return String(localized: "Couldn’t join \(name). Try again, or open Wi-Fi Settings.", comment: "Wi-Fi join failed; the argument is the network name")
+    }
+}
+
 private enum WiFiError: LocalizedError {
     case unavailable, rescan, notConnected, notDisconnected
     var errorDescription: String? {
