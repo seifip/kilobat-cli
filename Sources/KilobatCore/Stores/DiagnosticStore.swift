@@ -135,6 +135,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let bluetoothAudio = BluetoothAudioWatch()
     /// "Can I cast or print here?" for this network, and the device's own Wi-Fi the Mac may be on.
     public let localReach = LocalReachWatch()
+    /// A device's own Wi-Fi (a robot's, drone's, camera's): the internet priority switch, where the device is, the link to
+    /// it and its notes.
+    public let deviceNetworks = DeviceNetworkWatch()
     /// AirPlay or a cast tab, and what on the Mac's side can make it stutter.
     public let casting = CastingWatch()
     /// This Mac's Ethernet ports: the link each negotiated, what the adapter is, and whether it has a service.
@@ -376,10 +379,12 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         await checkPortal(&sample, internetFailed: fallback == false, reachable: sample.internet.average != nil || other.average != nil || fallback == true)
         if sample.wiredInterface == nil {
             let reachable = sample.internet.average != nil || other.average != nil || fallback == true
-            sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable)
+            sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable, saved: DeviceNotesStore.networks())
         }
         snapshot = sample; onSnapshot?(sample)
         localReach.observe(sample, portal: portal.record != nil)
+        let onPortal = portal.record != nil
+        Task { [weak self] in await self?.deviceNetworks.observe(sample, portal: onPortal) }
         await refreshExit()
         // Each throttles itself; neither waits for the other or holds up the next check.
         Task { [weak self] in await self?.wired.refresh() }
@@ -486,6 +491,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         routeRefresh = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
             await self?.refreshExit(routeChanged: true)
+            if self?.deviceNetworks.enabled == true { await self?.deviceNetworks.priority.refresh() }
         }
     }
     public func scan() async {

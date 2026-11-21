@@ -144,15 +144,16 @@ struct LocalReachTests {
             ("DIRECT-Ab12:ILCE-7M4", "sony-camera", .camera), ("EOSR6_Canon0A", "canon-camera", .camera), ("GP24500702", "gopro", .actionCamera),
             ("X3 7VMF4Q.OSC", "insta360", .camera360), ("ONE X2 ABC123", "insta360", .camera360), ("THETAYN00001017.OSC", "theta", .camera360), ("Pano 1A2B.OSC", "osc", .camera360),
             ("TELLO-5A1B2C", "tello", .drone), ("RMTT-ABCDEF", "tello", .drone), ("Spark-ABC123", "dji-spark", .drone),
-            ("shellyplug-s-7C87CE", "shelly", .smartHome), ("ShellyPlus1-f008d1d8bd68", "shelly", .smartHome), ("tasmota_3D5E26-7718", "tasmota", .smartHome),
-            ("TP-LINK_Smart Plug_1A2B", "kasa", .smartHome), ("Tapo_Cam_1A2B", "tapo", .smartHome), ("WiZConfig_1a2b", "wiz", .smartHome),
+            ("shellyplug-s-7C87CE", "shelly", .smartSwitch), ("ShellyPlus1-f008d1d8bd68", "shelly", .smartSwitch), ("tasmota_3D5E26-7718", "tasmota", .smartSwitch),
+            ("TP-LINK_Smart Plug_1A2B", "kasa", .smartPlug), ("Tapo_Cam_1A2B", "tapo-cam", .smartCamera), ("Tapo_Plug_1A2B", "tapo-plug", .smartPlug), ("WiZConfig_1a2b", "wiz", .smartLight),
+            ("ITEAD-1000A1B2C3", "sonoff", .smartSwitch), ("GO2-8A2C1F", "unitree-go2", .robot), ("Go2-AB12CD", "unitree-go2", .robot),
             ("DIRECT-Q7-EPSON-XP-3150", "wifi-direct", .directLink), ("DIRECT-roku-123", "wifi-direct", .directLink),
         ]
         for (ssid, rule, kind) in cases {
             let match = SetupNetworks.match(ssid: ssid)
             #expect(match?.rule == rule && match?.kind == kind, "\(ssid) → \(String(describing: match))")
         }
-        for ordinary in ["Home", "Hotel Guest", "DIRECT", "Direct-TV Lounge", "GP1234567", "GoPro fans", "Spark", "Sparkle-Home", "shelly", "X3 house", "HP Office"] {
+        for ordinary in ["Home", "Hotel Guest", "DIRECT", "Direct-TV Lounge", "GP1234567", "GoPro fans", "Spark", "Sparkle-Home", "shelly", "X3 house", "HP Office", "ITEAD", "GO2", "Go2 Fans Club", "Robot Lab"] {
             #expect(SetupNetworks.match(ssid: ordinary) == nil, "\(ordinary)")
         }
         #expect(SetupNetworks.match(ssid: nil) == nil && SetupNetworks.match(ssid: "") == nil)
@@ -173,7 +174,7 @@ struct LocalReachTests {
         #expect(printer.headline == "You’re on your HP printer’s own Wi-Fi; there’s no internet here, by design.")
         #expect(printer.detail(previous: "Home") == "Print or set it up from here. Go back to Home when you’re done. Kilobat doesn’t count this as an outage.")
         #expect(SetupNetworks.match(ssid: "TELLO-5A1B2C")!.headline == "You’re on your DJI Tello drone’s own Wi-Fi; there’s no internet here, by design.")
-        #expect(SetupNetworks.match(ssid: "shellyplug-s-7C87CE")!.headline == "You’re on a Shelly smart device’s setup Wi-Fi; there’s no internet here, by design.")
+        #expect(SetupNetworks.match(ssid: "shellyplug-s-7C87CE")!.headline == "You’re on a Shelly smart switch’s setup Wi-Fi; there’s no internet here, by design.")
         #expect(SetupNetworks.match(ssid: "DIRECT-Q7-Lounge")!.headline.hasPrefix("You’re on a device’s own Wi-Fi Direct network"))
     }
 

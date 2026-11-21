@@ -68,6 +68,8 @@ public final class AgentProcessTree: @unchecked Sendable {
         public var agent: AgentIdentity
         public var path: String?
         public var cwd: String?
+        /// The desktop app the agent runs in, such as T3 Code; nil in a terminal.
+        public var hostApp: String? = nil
         public var key: String { AgentProcessTree.key(pid, start) }
     }
     public struct Member: Equatable, Sendable {
@@ -155,7 +157,9 @@ public final class AgentProcessTree: @unchecked Sendable {
                 || AgentIdentifier.commands[entry.name] != nil || path?.contains("/claude/versions/") == true
             let arguments = needsArguments ? source.arguments(pid) : nil
             if let agent = AgentIdentifier.identify(path: path, name: entry.name, arguments: arguments) {
-                found[pid] = Root(pid: pid, start: entry.start, agent: agent, path: path, cwd: source.cwd(pid))
+                let source = source
+                let host = AgentHost.find(pid: pid, agent: agent, parent: { source.entry($0)?.ppid }, path: { $0 == pid ? path : source.path($0) })
+                found[pid] = Root(pid: pid, start: entry.start, agent: agent, path: path, cwd: source.cwd(pid), hostApp: host)
             } else { seen[key] = now }
         }
         notAgents = seen

@@ -382,6 +382,8 @@ public enum SettingsFile {
             "trace.method", "trace.maxHops", "trace.packetSize",
             // Keyed by MAC address or device, or a cache of this Mac's networks.
             "deviceNames", "destinationFavorites", "smartHomeNetworks", "bluetoothKinds", "personalHotspotNames",
+            // Saved devices pair with Wi-Fi passwords in this Mac's Keychain, which a settings file never carries.
+            "deviceNotes",
             // Running with the lid shut needs the power helper approved on this Mac.
             "awake.lidClosed", "awake.lidForAwake",
             // No Settings row.
@@ -389,7 +391,7 @@ public enum SettingsFile {
             // State and identity.
             "onboarding.done", "loginItemDefaulted", "hints.firstSeen", "hints.lastShown", "hints.menuOpens", "hints.seen", "blockAlertsSent", "serviceAlertsSent",
             CreditAlert.notifiedKey, CreditAlert.lastKey, "digest.last", "dns.offerDismissed", "bluetoothAudioLastAlert", "share.week.dismissed",
-            "share.year.invited", "steam.warned", "killSwitch.armedBoot", "fixit.portalDNSHold", "radioCheck.bluetoothOff", "awake.powerOff", "awake.askedAlerts",
+            "share.year.invited", "steam.warned", "killSwitch.armedBoot", "fixit.portalDNSHold", "internetPriority.hold", "radioCheck.bluetoothOff", "awake.powerOff", "awake.askedAlerts",
             // Product analytics: consent is a choice made on the Mac that sends it.
             "measurement.enabled", "measurement.token", "measurement.id", "measurement.primary", "measurement.secondary", "measurement.reason", "measurement.reasonAsked",
             "measurement.source", "measurement.campaign", "measurement.activated", "measurement.activationEventID", "measurement.firstValue", "measurement.invitationSeen",

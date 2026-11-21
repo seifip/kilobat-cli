@@ -28,7 +28,9 @@ public enum AgentIdentifier {
     /// Desktop apps that run agents: their own and the commands, MCP servers and terminals they start.
     static let apps: [String: AgentIdentity] = [
         "Cursor.app": AgentIdentity(id: "cursor", name: "Cursor", app: true), "Windsurf.app": AgentIdentity(id: "windsurf", name: "Windsurf", app: true),
-        "Claude.app": AgentIdentity(id: "claude-desktop", name: "Claude Desktop", app: true), "ChatGPT.app": AgentIdentity(id: "chatgpt", name: "ChatGPT", app: true)]
+        "Claude.app": AgentIdentity(id: "claude-desktop", name: "Claude Desktop", app: true), "ChatGPT.app": AgentIdentity(id: "chatgpt", name: "ChatGPT", app: true),
+        "T3 Code.app": AgentIdentity(id: "t3code", name: "T3 Code", app: true), "T3 Code (Beta).app": AgentIdentity(id: "t3code", name: "T3 Code", app: true),
+        "Conductor.app": AgentIdentity(id: "conductor", name: "Conductor", app: true), "Codex.app": AgentIdentity(id: "codex-app", name: "Codex app", app: true)]
 
     public static func identify(path: String?, name: String, arguments: [String]? = nil) -> AgentIdentity? {
         let arguments = arguments ?? []
@@ -62,6 +64,49 @@ public enum AgentIdentifier {
         let bundle = parts[parts.count - 4]
         guard let agent = apps[bundle], parts.last == String(bundle.dropLast(4)) else { return nil }
         return agent
+    }
+}
+
+/// The desktop app an agent's command runs inside: T3 Code, Conductor, VS Code. It says where a run happened and is
+/// shown beside the agent's name; the agent's identity stays the same, so rules and history don't split by host.
+public enum AgentHost {
+    /// App bundles, without ".app" or a " (Beta)" suffix, and the name Kilobat shows. Terminals are not hosts.
+    static let bundles: [String: String] = [
+        "T3 Code": "T3 Code", "Conductor": "Conductor", "Codex": "Codex", "Cursor": "Cursor", "Windsurf": "Windsurf", "Zed": "Zed",
+        "Zed Preview": "Zed", "Visual Studio Code": "VS Code", "Visual Studio Code - Insiders": "VS Code Insiders", "Code - Insiders": "VS Code Insiders",
+        "Warp": "Warp"]
+
+    /// The outermost app bundle in a path, without ".app" or " (Beta)": T3 Code for …/T3 Code (Beta).app/Contents/Frameworks/….
+    static func bundle(_ path: String) -> String? {
+        guard var name = path.split(separator: "/").first(where: { $0.hasSuffix(".app") }).map({ String($0.dropLast(4)) }) else { return nil }
+        if name.hasSuffix(" (Beta)") { name.removeLast(7) }
+        return name
+    }
+
+    /// The host for an executable inside a known host app, or nil.
+    public static func named(path: String) -> String? { bundle(path).flatMap { bundles[$0] } }
+
+    /// Walks up from an agent's process to the first app bundle: the host when it is a known one, none when it is a
+    /// terminal or another app. A host of the agent's own name (the Codex app running its codex) isn't worth saying.
+    public static func find(pid: Int32, agent: AgentIdentity, parent: (Int32) -> Int32?, path: (Int32) -> String?) -> String? {
+        guard !agent.app else { return nil }
+        var current = pid, depth = 0
+        while depth < 32 {
+            if let path = path(current), let bundle = bundle(path) {
+                guard let host = bundles[bundle], host != agent.name else { return nil }
+                return host
+            }
+            guard let next = parent(current), next > 1, next != current else { return nil }
+            current = next; depth += 1
+        }
+        return nil
+    }
+
+    /// "Claude Code in T3 Code", or the agent alone.
+    public static func label(_ agent: String, host: String?) -> String {
+        guard let host, !host.isEmpty else { return agent }
+        return String(localized: "agent.inHost", defaultValue: "\(agent) in \(host)",
+                      comment: "An AI agent and the desktop app it runs in, such as “Claude Code in T3 Code”; the arguments are the agent and the app")
     }
 }
 
@@ -132,6 +177,8 @@ public final class AgentLineage: @unchecked Sendable {
     private let lock = NSLock()
     /// What each process is, by pid and start: the agent it is, or none. Bounded.
     private var identities: [String: AgentIdentity?] = [:]
+    /// The host app of each agent process found, by pid and start. Bounded.
+    private var hosts: [String: String?] = [:]
     public init(lookup: Lookup = .live) { self.lookup = lookup }
 
     /// The nearest agent among the process and its parents. A desktop agent app's own main process is not its own
@@ -141,7 +188,8 @@ public final class AgentLineage: @unchecked Sendable {
         var current = (pid: pid, entry: first), depth = 0
         while depth < 32 {
             if let agent = identity(current.pid, current.entry), !(agent.app && depth == 0) {
-                return AgentOwner(agent: agent, pid: current.pid, process: depth == 0 ? first.name : Self.command(first.name, arguments: lookup.arguments(pid)))
+                return AgentOwner(agent: agent, pid: current.pid, process: depth == 0 ? first.name : Self.command(first.name, arguments: lookup.arguments(pid)),
+                                  hostApp: hostApp(current.pid, current.entry, agent: agent))
             }
             let parent = current.entry.ppid
             guard parent > 1, parent != current.pid, let entry = lookup.entry(parent) else { return nil }
@@ -160,6 +208,19 @@ public final class AgentLineage: @unchecked Sendable {
         for suffix in [".js", ".cjs", ".mjs", ".py", ".rb"] where base.hasSuffix(suffix) { base.removeLast(suffix.count) }
         if base.hasSuffix("-cli") { base.removeLast(4) }
         return base.isEmpty ? name : base
+    }
+
+    /// The app the agent runs in, once per agent process.
+    private func hostApp(_ pid: Int32, _ entry: Process, agent: AgentIdentity) -> String? {
+        let key = "\(pid)@\(entry.start)"
+        if let known = lock.withLock({ hosts[key] }) { return known }
+        let lookup = lookup
+        let host = AgentHost.find(pid: pid, agent: agent, parent: { lookup.entry($0)?.ppid }, path: { lookup.path($0) })
+        lock.withLock {
+            if hosts.count > 1_024 { hosts = [:] }
+            hosts[key] = .some(host)
+        }
+        return host
     }
 
     private func identity(_ pid: Int32, _ entry: Process) -> AgentIdentity? {

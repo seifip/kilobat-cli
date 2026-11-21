@@ -81,6 +81,19 @@ public actor WiFiConnection {
         try interface.associate(to: network, password: credential)
         guard interface.ssid() == name else { throw WiFiError.notConnected }
     }
+    /// Joins `name` on its strongest access point with `password`, or the one macOS saved when nil: a saved device's Wi-Fi.
+    public func join(name: String, password: String?) throws {
+        guard let interface = CWWiFiClient.shared().interface() else { throw WiFiError.unavailable }
+        let found = try interface.scanForNetworks(withSSID: nil).filter { $0.ssid == name }
+        guard let network = found.max(by: { $0.rssiValue < $1.rssiValue }) else { throw WiFiError.rescan }
+        var credential = password
+        if credential == nil, let ssid = network.ssidData {
+            var saved: NSString?
+            if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
+        }
+        try interface.associate(to: network, password: credential)
+        guard interface.ssid() == name else { throw WiFiError.notConnected }
+    }
     static func band(_ band: CWChannelBand?) -> String {
         switch band { case .band2GHz: "2.4 GHz"; case .band5GHz: "5 GHz"; case .band6GHz: "6 GHz"; default: "Unknown" }
     }

@@ -222,21 +222,23 @@ import Observation
 }
 
 /// `ping` once a second for as long as a call lasts; a reply later than a second counts as lost, as the call feels it.
-actor PingStream {
+public actor PingStream {
     private let target: String, start: Date
     private let resolve: @Sendable (String) async throws -> String
     private var process: Process?
     private var started = false
     private var stopped = false
-    var isRunning: Bool { process?.isRunning == true }
+    public var isRunning: Bool { process?.isRunning == true }
     private var pings: [CallSamples.Ping] = []
+    /// A ping a second to one address as it is, such as a device on the local network.
+    public static func address(_ address: String, start: Date) -> PingStream { PingStream(target: address, start: start, resolve: { $0 }) }
     /// Seconds from the call's start to the first ping; each ping's time comes from its sequence number, since a lost one is only reported later.
     private var offset = 0.0
     init(target: String, start: Date, resolve: @escaping @Sendable (String) async throws -> String = StutterTest.host(for:)) {
         self.target = target; self.start = start; self.resolve = resolve
     }
 
-    func start() async {
+    public func start() async {
         guard !started, !stopped else { return }
         started = true
         guard let host = try? await resolve(target), !stopped else { return }
@@ -255,9 +257,9 @@ actor PingStream {
     }
 
     /// The pings so far, for a live readout; the stream keeps going.
-    func current() -> [CallSamples.Ping] { pings.sorted { $0.at < $1.at } }
+    public func current() -> [CallSamples.Ping] { pings.sorted { $0.at < $1.at } }
 
-    func stop() -> [CallSamples.Ping] {
+    @discardableResult public func stop() -> [CallSamples.Ping] {
         stopped = true
         (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         if isRunning { process?.terminate() }

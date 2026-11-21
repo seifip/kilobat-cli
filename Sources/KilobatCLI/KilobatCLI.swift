@@ -217,7 +217,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.47.0"
+    static let version = "0.48.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {

@@ -96,11 +96,11 @@ import KilobatCore
             for entry in store.report.reversed() where query.matches(entry) {
                 for host in entry.hosts where (!query.flagged || host.flagged) && printed.insert(entry.id.uuidString + host.id).inserted {
                     if query.json {
-                        struct Line: Encodable { let agent: String; let pid: Int32; let project: String?; let host: AgentHostSummary }
-                        print(String(decoding: try DiagnosticsCLI.encode(Line(agent: entry.agent, pid: entry.pid, project: entry.project, host: host)), as: UTF8.self))
+                        struct Line: Encodable { let agent: String; let hostApp: String?; let pid: Int32; let project: String?; let host: AgentHostSummary }
+                        print(String(decoding: try DiagnosticsCLI.encode(Line(agent: entry.agent, hostApp: entry.hostApp, pid: entry.pid, project: entry.project, host: host)), as: UTF8.self))
                     } else {
                         let mark = host.flagged ? Terminal.rose("! ") : "  "
-                        print("\(mark)\(KilobatCLI.pad(entry.agent, 14))\(KilobatCLI.pad(host.process, 18))\(host.host):\(host.port)" + (host.flagged ? "  " + Terminal.rose(host.notes) : ""))
+                        print("\(mark)\(KilobatCLI.pad(entry.label, 14))\(KilobatCLI.pad(host.process, 18))\(host.host):\(host.port)" + (host.flagged ? "  " + Terminal.rose(host.notes) : ""))
                     }
                     fflush(stdout)
                 }

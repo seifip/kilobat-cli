@@ -568,10 +568,10 @@ public enum ProtectionText {
 
     /// "npm (started by Claude Code)", or the app's name.
     public static func who(_ detail: ProtectionDetail, app: String) -> String {
-        if let agent = detail.agent, let process = detail.process, process.lowercased() != agent.lowercased() {
-            return String(localized: "\(process) (started by \(agent))", comment: "Protection notification: a process and the agent that started it, e.g. npm (started by Claude Code)")
+        if let agent = detail.agent, let label = detail.agentLabel, let process = detail.process, process.lowercased() != agent.lowercased() {
+            return String(localized: "\(process) (started by \(label))", comment: "Protection notification: a process and the agent that started it, e.g. npm (started by Claude Code)")
         }
-        return detail.agent ?? app
+        return detail.agentLabel ?? app
     }
 
     /// The notification's title.

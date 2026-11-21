@@ -65,6 +65,11 @@ public struct WorkSession: Codable, Identifiable, Equatable, Sendable {
     public var version: String?
     /// Other installs of the same agent in the usual places.
     public var otherInstalls: [String]?
+    /// Agent runs: the desktop app the agent runs in, such as T3 Code; nil in a terminal. `title` stays the agent's name.
+    public var hostApp: String?
+
+    /// The run as shown: "Claude Code in T3 Code", or the title alone.
+    public var label: String { kind == .agent ? AgentHost.label(title, host: hostApp) : title }
 
     public var duration: TimeInterval { (end ?? Date()).timeIntervalSince(start) }
     /// "codex 0.52.0 from npm (node 22.3.0) · /opt/homebrew/bin/codex is another install".
@@ -391,7 +396,7 @@ public enum AgentCatalog {
         for key in Array(agents.keys) {
             agents[key]?.events.append(event)
             guard let run = agents[key] else { continue }
-            if !outage { alert(String(localized: "Network changed while \(run.title) was working"), String(localized: "\(event). If it stops responding, it may need a nudge or a restart.")) }
+            if !outage { alert(String(localized: "Network changed while \(run.label) was working"), String(localized: "\(event). If it stops responding, it may need a nudge or a restart.")) }
             // An agent waiting for an answer isn't using the network.
             else if run.state != .waitingForYou { change(key, to: .networkFailed, detail: event, now: now) }
         }
@@ -413,6 +418,7 @@ public enum AgentCatalog {
         if let pid = event.pid {
             pids[key] = pid
             if run.executable == nil, let path = probe.path(pid) { run.describe(AgentInstall.describe(path)) }
+            if run.hostApp == nil { run.hostApp = probe.hostApp(pid, agent: agent) }
         }
         run.session = event.session ?? run.session
         run.cwd = event.cwd ?? run.cwd
@@ -458,7 +464,10 @@ public enum AgentCatalog {
                 let alive = entries.contains { $0.processIDs.contains(where: probe.alive) }
                 if alive, entries.reduce(0, { $0 + $1.rate }) >= Self.agentActiveRate {
                     var run = WorkSession(kind: .agent, title: agent, start: now, batteryStart: power.batteryPercent, peakThermal: power.thermal, lastActive: now, state: .working)
-                    if let pid = entries.first(where: { $0.id.hasPrefix("process:") })?.processIDs.first, let path = probe.path(pid) { run.describe(AgentInstall.describe(path)) }
+                    if let pid = entries.first(where: { $0.id.hasPrefix("process:") })?.processIDs.first {
+                        if let path = probe.path(pid) { run.describe(AgentInstall.describe(path)) }
+                        run.hostApp = probe.hostApp(pid, agent: agent)
+                    }
                     agents[agent] = run; started.insert(agent)
                     requestAlertsIfNeeded()
                 }
@@ -582,7 +591,7 @@ public enum AgentCatalog {
     enum Headline { case rateLimited, waiting, lostNetwork, wentQuiet, finished, failed, stopped }
     /// "Claude Code is waiting for you in kilobat".
     static func headline(_ run: WorkSession, _ what: Headline) -> String {
-        let agent = run.title
+        let agent = run.label
         guard let project = run.project else {
             switch what {
             case .rateLimited: return String(localized: "\(agent) is rate-limited")
@@ -708,7 +717,7 @@ public enum AgentCatalog {
                         ends.append(since + LidPolicy.waiting)
                     default: ends.append(.distantFuture)
                     }
-                    if !reasons.contains(run.title + " working") { reasons.append(run.title + " working") }
+                    if !reasons.contains(run.label + " working") { reasons.append(run.label + " working") }
                 }
             }
             for owner in lidOwners.values.sorted(by: { $0.until < $1.until }) { ends.append(owner.until); reasons.append(owner.reason) }

@@ -275,7 +275,7 @@ public struct RuleInspector: @unchecked Sendable {
                 default: String(localized: "threat", comment: "Rule inspector: the kind of list")
                 }
                 var text = String(localized: "\(detail.host) is on the \(list) list (\(detail.list))", comment: "Rule inspector, e.g. phish.example is on the phishing list (HaGeZi Threat Intelligence Feeds)")
-                if let agent = detail.agent { text += " · " + String(localized: "started by \(agent)", comment: "Rule inspector: the AI agent behind a connection") }
+                if let agent = detail.agentLabel { text += " · " + String(localized: "started by \(agent)", comment: "Rule inspector: the AI agent behind a connection") }
                 return (String(localized: "Protection", comment: "Rule inspector source"), text, allow)
             }
         case .siteAllowed(let site):

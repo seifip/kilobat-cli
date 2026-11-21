@@ -47,6 +47,9 @@ public struct LidHoldStatus: Codable, Equatable, Sendable {
     func setDNSIfUnchanged(_ request: Data, reply: @escaping (Data) -> Void)
     /// Fix it: asks the DHCP client on one Wi-Fi interface (en0, en1…) to renew now. Answers a `DNSHelperReply`.
     func renewAddress(_ interface: String, reply: @escaping (Data) -> Void)
+    /// Internet priority: a `ServiceOrderRequest`, the whole network service order, applied only if the order is still
+    /// the one the app read. Answers a `DNSHelperReply`.
+    func setServiceOrder(_ request: Data, reply: @escaping (Data) -> Void)
 }
 
 /// The rules every lid hold follows, in the helper and the app alike.

@@ -363,7 +363,9 @@ public struct AgentOwner: Sendable, Equatable {
     public var pid: Int32
     /// The process that connected.
     public var process: String
-    public init(agent: AgentIdentity, pid: Int32, process: String) { self.agent = agent; self.pid = pid; self.process = process }
+    /// The desktop app the agent runs in, such as T3 Code; nil in a terminal.
+    public var hostApp: String?
+    public init(agent: AgentIdentity, pid: Int32, process: String, hostApp: String? = nil) { self.agent = agent; self.pid = pid; self.process = process; self.hostApp = hostApp }
 }
 
 /// The checks themselves, in the order `FilterPolicy.decide` runs them. Each returns why it blocks, or nil.
@@ -387,7 +389,7 @@ public enum ProtectionCheck {
         // The most telling list first: one that says malware, phishing or scam over a general threat feed.
         let order: [ProtectionCategory] = [.malware, .phishing, .scam, .threat, .tracker]
         let list = match.lists.min { (order.firstIndex(of: $0.category) ?? 9) < (order.firstIndex(of: $1.category) ?? 9) } ?? match.lists[0]
-        return ProtectionDetail(kind: list.category.kind ?? .threat, list: list.name, host: match.entry, agent: agent?.agent.name, agentPID: agent?.pid, process: agent?.process)
+        return ProtectionDetail(kind: list.category.kind ?? .threat, list: list.name, host: match.entry, agent: agent?.agent.name, agentPID: agent?.pid, process: agent?.process, agentHostApp: agent?.hostApp)
     }
 
     /// Known threats, for every app with Threats on and for agents and their children with the agent guard; then the
@@ -402,11 +404,11 @@ public enum ProtectionCheck {
         }
         guard settings.agentGuard else { return nil }
         if let host, !HostName.isAddress(host), let kind = AgentHostRules.share(host), let owner = agent() {
-            return ProtectionDetail(kind: .agentGuard, list: kind, host: host, agent: owner.agent.name, agentPID: owner.pid, process: owner.process)
+            return ProtectionDetail(kind: .agentGuard, list: kind, host: host, agent: owner.agent.name, agentPID: owner.pid, process: owner.process, agentHostApp: owner.hostApp)
         }
         // Only when the destination was asked for by address: a name Kilobat couldn't see is not a raw IP.
         if let host, HostName.isAddress(host), let owner = agent() {
-            return ProtectionDetail(kind: .agentGuard, list: "raw IP address", host: host, agent: owner.agent.name, agentPID: owner.pid, process: owner.process)
+            return ProtectionDetail(kind: .agentGuard, list: "raw IP address", host: host, agent: owner.agent.name, agentPID: owner.pid, process: owner.process, agentHostApp: owner.hostApp)
         }
         return nil
     }

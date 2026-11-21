@@ -47,13 +47,15 @@ public struct AgentNetworkSession: Codable, Equatable, Identifiable, Sendable {
     public var cwd: String?
     public var project: String?
     public var executable: String?
+    /// The desktop app the agent ran in, such as T3 Code; nil in a terminal, and in sessions recorded before Kilobat noted it.
+    public var hostApp: String?
     public var hosts: [AgentHostRecord] = []
     /// Bytes from sockets that opened and closed between two samples: counted for the process, but with no endpoint.
     public var unmatchedSent: UInt64 = 0
     public var unmatchedReceived: UInt64 = 0
 
-    public init(key: String, agent: AgentIdentity, pid: Int32, start: Date, cwd: String? = nil, executable: String? = nil) {
-        self.key = key; self.agent = agent.name; agentID = agent.id; self.pid = pid; self.start = start; self.cwd = cwd; self.executable = executable
+    public init(key: String, agent: AgentIdentity, pid: Int32, start: Date, cwd: String? = nil, executable: String? = nil, hostApp: String? = nil) {
+        self.key = key; self.agent = agent.name; agentID = agent.id; self.pid = pid; self.start = start; self.cwd = cwd; self.executable = executable; self.hostApp = hostApp
         project = cwd.flatMap { path in
             let name = URL(fileURLWithPath: path).lastPathComponent
             return name.isEmpty || name == "/" || path == NSHomeDirectory() ? nil : name
@@ -152,6 +154,8 @@ public struct AgentLogEntry: Codable, Equatable, Identifiable, Sendable {
     public var cwd: String?
     public var project: String?
     public var executable: String?
+    /// The desktop app the agent ran in, such as T3 Code.
+    public var hostApp: String? = nil
     public var sent: UInt64
     public var received: UInt64
     /// Bytes counted for the agent's processes whose endpoints closed between samples.
@@ -165,10 +169,12 @@ public struct AgentLogEntry: Codable, Equatable, Identifiable, Sendable {
 
     public var reviewCount: Int { Set(hosts.filter(\.needsReview).map { $0.host.lowercased() }).count }
 
-    public var title: String { agent + (project.map { " · " + $0 } ?? "") }
+    /// "Claude Code in T3 Code", or the agent alone.
+    public var label: String { AgentHost.label(agent, host: hostApp) }
+    public var title: String { label + (project.map { " · " + $0 } ?? "") }
     /// "Claude Code · 14 hosts · 2.1 MB sent since it started": every byte since the agent started, local ones and other
     /// networks included, so it says so beside the Upload card's Internet bytes on this network.
-    public var line: String { [agent, hostsLine, sentLine].joined(separator: " · ") }
+    public var line: String { [label, hostsLine, sentLine].joined(separator: " · ") }
     public var hostsLine: String { hostCount == 1 ? String(localized: "1 host") : String(localized: "\(hostCount) hosts") }
     /// "2.1 MB since start", beside an upload arrow.
     public var sinceStart: String { String(localized: "\(TrafficFormat.bytes(sent)) since start", comment: "Beside an upload arrow: what an agent has sent since it started, such as 2.1 MB since start") }
@@ -239,7 +245,7 @@ public enum AgentNetworkLog {
             let named = Set(summaries.map { $0.host.lowercased() })
             entries.append(AgentLogEntry(id: session.id, agent: session.agent, agentID: session.agentID, pid: session.pid, start: session.start, end: session.end,
                                          running: session.end == nil && running.contains(session.key), cwd: session.cwd, project: session.project,
-                                         executable: session.executable, sent: session.sent, received: session.received,
+                                         executable: session.executable, hostApp: session.hostApp, sent: session.sent, received: session.received,
                                          unmatchedSent: session.unmatchedSent, unmatchedReceived: session.unmatchedReceived, hostCount: named.count,
                                          flaggedCount: Set(summaries.filter(\.flagged).map { $0.host.lowercased() }).count, hosts: summaries))
         }

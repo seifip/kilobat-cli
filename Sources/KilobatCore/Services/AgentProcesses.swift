@@ -8,10 +8,13 @@ public struct ProcessProbe: Sendable {
     public var cpuTime: @Sendable (Int32) -> UInt64?
     public var alive: @Sendable (Int32) -> Bool
     public var path: @Sendable (Int32) -> String?
+    /// The parent's pid, to find the app an agent runs in.
+    public var parent: @Sendable (Int32) -> Int32?
 
     public init(children: @escaping @Sendable (Int32) -> [Int32], cpuTime: @escaping @Sendable (Int32) -> UInt64?,
-                alive: @escaping @Sendable (Int32) -> Bool, path: @escaping @Sendable (Int32) -> String?) {
-        self.children = children; self.cpuTime = cpuTime; self.alive = alive; self.path = path
+                alive: @escaping @Sendable (Int32) -> Bool, path: @escaping @Sendable (Int32) -> String?,
+                parent: @escaping @Sendable (Int32) -> Int32? = { _ in nil }) {
+        self.children = children; self.cpuTime = cpuTime; self.alive = alive; self.path = path; self.parent = parent
     }
 
     public static let live = ProcessProbe(
@@ -33,7 +36,18 @@ public struct ProcessProbe: Sendable {
             var buffer = [UInt8](repeating: 0, count: 4096)
             guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
             return String(decoding: buffer.prefix { $0 != 0 }, as: UTF8.self)
+        },
+        parent: { pid in
+            var info = proc_bsdinfo()
+            let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+            guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+            return Int32(info.pbi_ppid)
         })
+
+    /// The desktop app an agent's process runs in, such as T3 Code; nil in a terminal.
+    public func hostApp(_ pid: Int32, agent: String) -> String? {
+        AgentHost.find(pid: pid, agent: AgentIdentity(id: agent, name: agent), parent: parent, path: path)
+    }
 
     /// Every process descended from `roots`, roots included.
     public func family(_ roots: [Int32]) -> Set<Int32> {

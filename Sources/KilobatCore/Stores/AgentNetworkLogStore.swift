@@ -180,7 +180,7 @@ public struct HostLookup: Sendable {
         // Without the background timer (tests, the command line), the tree is polled with each sample.
         if timer == nil { tree.poll(now: now) }
         for root in tree.liveRoots where live[root.key] == nil {
-            let session = AgentNetworkSession(key: root.key, agent: root.agent, pid: root.pid, start: root.start ?? now, cwd: root.cwd, executable: root.path)
+            let session = AgentNetworkSession(key: root.key, agent: root.agent, pid: root.pid, start: root.start ?? now, cwd: root.cwd, executable: root.path, hostApp: root.hostApp)
             sessions.append(session); live[root.key] = session.id
         }
         let index = Dictionary(uniqueKeysWithValues: sessions.enumerated().map { ($0.element.id, $0.offset) })

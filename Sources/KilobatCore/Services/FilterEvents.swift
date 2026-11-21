@@ -84,9 +84,13 @@ public struct ProtectionDetail: Codable, Sendable, Equatable {
     public var agentPID: Int32?
     /// The process that connected: npm, curl, node.
     public var process: String?
-    public init(kind: Kind, list: String, host: String, agent: String? = nil, agentPID: Int32? = nil, process: String? = nil) {
-        self.kind = kind; self.list = list; self.host = host; self.agent = agent; self.agentPID = agentPID; self.process = process
+    /// The desktop app the agent runs in, such as T3 Code; nil in a terminal or before Kilobat recorded hosts.
+    public var agentHostApp: String?
+    public init(kind: Kind, list: String, host: String, agent: String? = nil, agentPID: Int32? = nil, process: String? = nil, agentHostApp: String? = nil) {
+        self.kind = kind; self.list = list; self.host = host; self.agent = agent; self.agentPID = agentPID; self.process = process; self.agentHostApp = agentHostApp
     }
+    /// The agent as shown: "Claude Code in T3 Code".
+    public var agentLabel: String? { agent.map { AgentHost.label($0, host: agentHostApp) } }
 
     /// For the blocked-connection journal and the CLI: "Protection: malware · URLhaus · malware.example".
     public var summary: String { "Protection: \(kind == .agentGuard ? "agent guard" : kind.rawValue) · \(list) · \(host)" }
