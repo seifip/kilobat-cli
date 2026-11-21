@@ -69,10 +69,12 @@ struct PortScanTests {
         let listener = try #require(Listener())
         let closed = try #require(Listener.closedPort())
         let services = [PortScan.Service(port: listener.port, name: "Test service", web: "http"), PortScan.Service(port: closed, name: "Nothing")]
-        let report = try await PortScan.check("127.0.0.1", subnets: [], services: services, timeout: 2)
+        // A long timeout, so the check below shows refused and open ports answer without waiting it out, even on a
+        // machine busy building something else.
+        let report = try await PortScan.check("127.0.0.1", subnets: [], services: services, timeout: 10)
         #expect(report.open.map(\.port) == [listener.port])
         #expect(report.closed == 1 && report.checked == 2 && !report.silentDevice && !report.unreachableDevice)
-        #expect(report.seconds < 2)
+        #expect(report.seconds < 5)
         #expect(report.url(for: report.open[0])?.absoluteString == "http://127.0.0.1:\(listener.port)")
         #expect(report.summary == "1 of 2 common ports open.")
     }
