@@ -292,7 +292,7 @@ public struct FixStep: Identifiable, Equatable, Sendable {
 /// What it takes to put a kept change back.
 public enum FixUndo: Equatable, Sendable {
     /// `tracked`: Fastest DNS holds the change, so it also goes back for a VPN, a sign-in page, another network or quitting.
-    case dns(service: String, previous: [String], tracked: Bool)
+    case dns(service: String, previous: [String], applied: [String], tracked: Bool)
     case resumeUpload(key: String)
     case resumeAirDrop
 }

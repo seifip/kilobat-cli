@@ -22,7 +22,7 @@ public extension TrafficStore {
     }
 
     func packStatus(_ pack: DataPack, now: Date = Date()) -> DataPackStatus {
-        DataPacks.status(pack, packs: dataPacks, usage: usage, names: { self.networkName(of: $0) },
+        DataPacks.status(pack, packs: dataPacks, usage: allowanceUsage, names: { self.networkName(of: $0) },
                          pending: networkKey == "unknown" ? nil : (networkKey, pendingBytes), now: now)
     }
 
@@ -73,7 +73,7 @@ public extension TrafficStore {
     /// The carrier's figure for what's left.
     func correctPack(_ id: UUID, leftBytes: UInt64, now: Date = Date()) throws {
         guard var pack = dataPacks.first(where: { $0.id == id }) else { throw DataPackError(String(localized: "That data pack is gone.", comment: "Data pack: it was removed meanwhile")) }
-        let mac = DataPacks.macBytes(pack, packs: dataPacks, usage: usage, names: { self.networkName(of: $0) },
+        let mac = DataPacks.macBytes(pack, packs: dataPacks, usage: allowanceUsage, names: { self.networkName(of: $0) },
                                      pending: networkKey == "unknown" ? nil : (networkKey, pendingBytes), to: now)
         try DataPacks.correct(&pack, leftBytes: leftBytes, macBytes: mac, now: now)
         flush(at: now)

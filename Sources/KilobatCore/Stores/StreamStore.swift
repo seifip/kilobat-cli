@@ -292,14 +292,16 @@ import Observation
     private func hold(traffic: TrafficStore, now: Date) {
         guard holdApps, allowed(), let live else { return }
         if Date().timeIntervalSince(live.start) >= CallMode.limit { release(); return }
-        if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
-            released.insert(name); CallMode.resume(app: name, owner: CallMode.stream); holding.removeAll { $0 == name }
+        let front = NSWorkspace.shared.frontmostApplication
+        if let id = front?.bundleIdentifier, let name = CallMode.name(of: id) { released.insert(name) }
+        let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
+        for name in holding where released.contains(name) || (gaming && CallMode.launchers.contains(name)) {
+            CallMode.resume(app: name, owner: CallMode.stream)
+            holding.removeAll { $0 == name }
             if let rule = blocked.removeValue(forKey: name) { traffic.clearTemporary(rule) }
         }
         guard now.timeIntervalSince(lastHoldScan) >= 10 else { return }
         lastHoldScan = now
-        let front = NSWorkspace.shared.frontmostApplication
-        let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
         let skipped = Set(UserDefaults.standard.stringArray(forKey: "callModeSkipped") ?? [])
         for app in traffic.apps {
             guard let name = CallMode.name(of: app.id), !skipped.contains(name), !released.contains(name) else { continue }

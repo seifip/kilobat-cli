@@ -39,7 +39,7 @@ public final class TrafficStore {
             preferences.settleProfiles()
             // The budget always describes the current network; keeping its copy current means a relaunch,
             // which starts on no network, can't lose a plan set since the last switch.
-            if recordHistory, networkKey != "unknown", preferences.limitGB != oldValue.limitGB || preferences.budgetCycle != oldValue.budgetCycle {
+            if !applyingImport, recordHistory, networkKey != "unknown", preferences.limitGB != oldValue.limitGB || preferences.budgetCycle != oldValue.budgetCycle {
                 preferences.networkLimits = (preferences.networkLimits ?? [:]).merging([networkKey: preferences.limitGB]) { $1 }
                 preferences.networkCycles = Self.cycles(preferences.networkCycles, preferences.budgetCycle, for: networkKey)
             }
@@ -48,6 +48,8 @@ public final class TrafficStore {
         }
     }
     public var usage: [UsageEntry] = []
+    private var allowanceHistory: [UsageEntry] = []
+    var allowanceUsage: [UsageEntry] { allowanceHistory.isEmpty ? usage : allowanceHistory + usage }
     @ObservationIgnored private(set) var networkRevision = 0
     public var networkKey = "unknown" {
         didSet { if networkKey != oldValue { networkRevision &+= 1 } }
@@ -100,6 +102,7 @@ public final class TrafficStore {
     private let recordHistory: Bool
     private var lastPreferencesData: Data?
     private var reloading = false
+    private var applyingImport = false
     private var lastMetered: Bool?
     /// Whether Kilobat may tighten on its own: the switch to Essentials on a metered network. The app says no without
     /// Pro, so a lapsed trial is never moved into a stricter profile. The way back out always runs.
@@ -127,8 +130,10 @@ public final class TrafficStore {
         ProfileCatalog.update(preferences.profileDefinitions)
         lastPreferencesData = try? Data(contentsOf: self.directory.appendingPathComponent("preferences.json"))
         Self.writer.sync {}
-        usage = Self.compact(UsageFile.read(self.directory), packs: preferences.dataPacks ?? [])
         networkSessions = StoredJSON.read(self.directory.appendingPathComponent("network-sessions.json"), quarantine: ownsFiles) ?? [:]
+        let savedUsage = UsageFile.read(self.directory, includesAllowances: true)
+        usage = Self.compact(savedUsage.filter { $0.allowanceOnly != true }, packs: preferences.dataPacks ?? [])
+        allowanceHistory = savedUsage.filter { $0.allowanceOnly == true }
         sleeps = StoredJSON.read(self.directory.appendingPathComponent("sleeps.json"), quarantine: ownsFiles) ?? []
         if startMonitoring {
             readCounters = InterfaceCounters.read
@@ -214,6 +219,15 @@ public final class TrafficStore {
     /// `limitGB` still holds from before.
     public var hasBudget: Bool { budgetMode != .off && limit > 0 }
     public var budgetBlocksNewConnections: Bool { budgetMode == .block && limitFraction >= 1 }
+    public var activeAllowance: WidgetSnapshot.Budget? {
+        if let pack = currentPack {
+            guard pack.budgetMode != .off, pack.bytes > 0 else { return nil }
+            return WidgetSnapshot.Budget(usedBytes: packStatus(pack).used, limitBytes: pack.bytes,
+                                         period: "pack", packEnds: pack.finish)
+        }
+        guard hasBudget else { return nil }
+        return WidgetSnapshot.Budget(usedBytes: budgetUsed(on: networkKey), limitBytes: limit, period: budgetCycle.period.rawValue)
+    }
     public var displayedUsage: UInt64 { budgetMode == .off ? total : budgetUsedBytes }
     public var budgetLeft: UInt64 { limit - min(limit, budgetUsedBytes) }
 
@@ -238,7 +252,7 @@ public final class TrafficStore {
         guard let interval = (cycle ?? (current ? budgetCycle : preferences.networkCycles?[network] ?? BudgetCycle())).interval(containing: now) else {
             return current ? total : networkSessions[network].map { $0.received + $0.sent } ?? 0
         }
-        return BudgetCycle.used(usage, in: interval, network: network) + (current ? pendingReceived + pendingSent : 0)
+        return BudgetCycle.used(allowanceUsage, in: interval, network: network) + (current ? pendingReceived + pendingSent : 0)
     }
     /// The budget cycle of the network an app limit counts on; every-network limits follow the current network's.
     public func budgetCycle(counting limit: AppLimit) -> BudgetCycle {
@@ -247,9 +261,9 @@ public final class TrafficStore {
     }
     /// The cycle an app limit counts in.
     public func limitCycle(_ limit: AppLimit) -> BudgetCycle { limit.resolvedCycle(budget: budgetCycle(counting: limit)) }
-    public func limitUsed(_ limit: AppLimit, now: Date = Date()) -> UInt64 {
+    public func limitUsed(_ limit: AppLimit, now: Date = Date(), budget: BudgetCycle? = nil) -> UInt64 {
         let pending = limit.applies(to: networkKey) ? (limit.uploadOnly ? pendingAppsSent[limit.name] : pendingApps[limit.name]) ?? 0 : 0
-        return limit.used(usage, budget: budgetCycle(counting: limit), now: now) + pending
+        return limit.used(allowanceUsage, budget: budget ?? budgetCycle(counting: limit), now: now) + pending
     }
     /// The app limit that counts for an app here: one for this network before one for every network.
     public func appLimit(named name: String) -> AppLimit? {
@@ -406,6 +420,26 @@ public final class TrafficStore {
         flush(); preferences.trafficScope = scope
         rebaseline(); download = 0; upload = 0
         startCollector(scope: scope)
+    }
+    /// Apply the whole import in one write, restarting the live collector when its scope changes.
+    public func applyImportedPreferences(_ next: SavedPreferences) throws {
+        let previous = preferences
+        let scope = next.trafficScope ?? "external"
+        let scopeChanged = scope != (previous.trafficScope ?? "external")
+        if scopeChanged { flush() }
+        applyingImport = true
+        defer { applyingImport = false }
+        preferences = next
+        if let error = preferencesSaveError {
+            reloading = true
+            preferences = previous
+            reloading = false
+            throw DiagnosticError(error)
+        }
+        if scopeChanged {
+            rebaseline(); download = 0; upload = 0
+            if readCounters != nil { startCollector(scope: scope) }
+        }
     }
     /// The next sample only sets baselines: after a wake, a network change or a new scope.
     func rebaseline() { previous = [:]; lastSample = nil; interfaces.reset(); localCarry = ByteCount() }
@@ -609,10 +643,9 @@ public final class TrafficStore {
                                 localBytes: pendingLocal, appsLocal: pendingAppsLocal.isEmpty ? nil : pendingAppsLocal, unattributed: countsInterfaces ? gap : nil,
                                 metered: metered ? true : nil)
         usage.append(row)
-        let cutoff = Date().addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
-        usage = Self.compact(usage.filter { $0.date >= cutoff }, packs: dataPacks)
+        let prunedUsage = retainUsage(at: date)
         // The new row is all that's new: the whole file only about once an hour, not every 30 seconds.
-        if abs(date.timeIntervalSince(usageRewritten)) >= Self.usageRewriteEvery || usageTailRows >= Self.usageTailLimit {
+        if prunedUsage || abs(date.timeIntervalSince(usageRewritten)) >= Self.usageRewriteEvery || usageTailRows >= Self.usageTailLimit {
             persistUsage(); usageRewritten = date; usageTailRows = 0
         } else { appendUsage(row); usageTailRows += 1 }
         networkSessions[networkKey] = session
@@ -657,6 +690,51 @@ public final class TrafficStore {
         }
     }
     public func shutdown() { flush(); Self.writer.sync {}; monitor.stop() }
+    /// Detail expires on the selected schedule. Only per-network byte totals needed by an active
+    /// allowance survive that cutoff, and they share the usage file's atomic rewrite.
+    @discardableResult func retainUsage(at date: Date) -> Bool {
+        let cutoff = date.addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
+        let packs = dataPacks
+        let active = packs.filter { $0.start <= date && date < $0.finish }
+        let expiredDetail = usage.contains { $0.date < cutoff }
+        let quotas = (preferences.quotas ?? []).filter { $0.effectiveMode != .off }
+        let networkCycles = preferences.networkCycles ?? [:]
+        let workingCycle = budgetCycle
+        func contains(_ interval: DateInterval?, _ sample: Date) -> Bool {
+            interval.map { $0.start <= sample && sample < $0.end } ?? false
+        }
+        let quotaWindows = quotas.map { quota in
+            // An all-network legacy quota follows whichever network is selected. Keep enough for any saved cycle.
+            let cycles = quota.network == nil && quota.cycle == nil ? Array(networkCycles.values) + [workingCycle] : [budgetCycle(counting: quota)]
+            return (quota, cycles.map { quota.resolvedCycle(budget: $0).limitInterval(containing: date) })
+        }
+        var reducedAllowance = false
+        var carried: [UsageEntry] = []
+        for row in allowanceHistory + usage where row.allowanceOnly == true || row.date < cutoff {
+            var keepsNetworkTotals = false
+            if let key = row.networkKey, key != "unknown" {
+                let cycle = key == networkKey ? workingCycle : networkCycles[key]
+                keepsNetworkTotals = contains(cycle?.interval(containing: date), row.date) || active.contains {
+                    $0.counts(at: row.date) && $0.networks.matches(key: key, name: networkName(of: key))
+                }
+            }
+            let names = Set(quotaWindows.compactMap { quota, intervals in
+                (quota.network == nil || quota.network == row.networkKey) && intervals.contains { contains($0, row.date) }
+                    ? quota.name : nil
+            })
+            let apps = row.apps.filter { names.contains($0.key) }
+            if row.allowanceOnly == true, apps != row.apps || (!keepsNetworkTotals && row.total > 0) { reducedAllowance = true }
+            guard keepsNetworkTotals || !apps.isEmpty else { continue }
+            carried.append(UsageEntry(date: row.date, received: keepsNetworkTotals ? row.received : 0,
+                                      sent: keepsNetworkTotals ? row.sent : 0, apps: apps, networkKey: row.networkKey,
+                                      appsSent: row.estimatedSent.filter { apps[$0.key] != nil }, allowanceOnly: true))
+        }
+        let discardedAllowance = carried.count < allowanceHistory.count
+        allowanceHistory = Self.compact(carried, now: date, packs: packs)
+        usage = Self.compact(usage.filter { $0.date >= cutoff }, now: date, packs: packs)
+        return expiredDetail || discardedAllowance || reducedAllowance
+    }
+
     /// Samples older than a day merge into hourly buckets per network, and older than 30 days into daily ones,
     /// so a year of history stays small enough to rewrite on every flush. Entries keep the same shape for existing readers.
     static func compact(_ usage: [UsageEntry], now: Date = Date(), calendar: Calendar = .current, packs: [DataPack] = []) -> [UsageEntry] {
@@ -684,7 +762,8 @@ public final class TrafficStore {
                               apps: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.apps, uniquingKeysWith: +) }, networkKey: entries[0].networkKey,
                               appsSent: entries.reduce(into: [:]) { apps, entry in apps.merge(entry.estimatedSent, uniquingKeysWith: +) },
                               localBytes: sum(entries.map(\.localBytes)), appsLocal: entries.contains { $0.appsLocal != nil } ? entries.reduce(into: [:]) { apps, entry in apps.merge(entry.appsLocal ?? [:], uniquingKeysWith: +) } : nil,
-                              unattributed: sum(entries.map(\.unattributed)), metered: entries.contains { $0.metered == true } ? true : nil)
+                              unattributed: sum(entries.map(\.unattributed)), metered: entries.contains { $0.metered == true } ? true : nil,
+                              allowanceOnly: entries[0].allowanceOnly)
         }
         return (merged + kept).sorted { $0.date < $1.date }
     }
@@ -700,7 +779,7 @@ public final class TrafficStore {
     @ObservationIgnored private var usageRewritten = Date()
     @ObservationIgnored private lazy var usageTailRows = UsageFile.tailRows(directory).count
     private func persistUsage() {
-        let value = usage, file = directory.appendingPathComponent(UsageFile.name), folder = directory
+        let value = allowanceUsage, file = directory.appendingPathComponent(UsageFile.name), folder = directory
         Self.writer.async { [weak self] in
             do { try JSONEncoder().encode(value).write(to: file, options: .atomic); UsageFile.removeTail(directory: folder) }
             catch { let message = error.localizedDescription; Task { @MainActor [weak self] in self?.error = String(localized: "Could not save local data: \(message)") } }
@@ -730,12 +809,12 @@ public final class TrafficStore {
 /// small tail, so history doesn't rewrite megabytes every 30 seconds. Readers go through `read`, which puts the two together.
 enum UsageFile {
     static let name = "usage.json", tail = "usage-tail.jsonl"
-    static func read(_ directory: URL) -> [UsageEntry] {
+    static func read(_ directory: URL, includesAllowances: Bool = false) -> [UsageEntry] {
         var rows: [UsageEntry] = StoredJSON.read(directory.appendingPathComponent(name)) ?? []
         // A crash between saving the whole file and clearing the tail leaves rows in both; the whole file wins.
         let newest = rows.map(\.date).max() ?? .distantPast
         rows += tailRows(directory).filter { $0.date > newest }
-        return rows
+        return includesAllowances ? rows : rows.filter { $0.allowanceOnly != true }
     }
     /// One JSON object per line. A line cut short by a crash is skipped; the rows before it are good.
     static func tailRows(_ directory: URL) -> [UsageEntry] {

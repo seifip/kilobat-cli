@@ -9,9 +9,17 @@ public struct WidgetSnapshot: Codable, Equatable, Sendable {
     public struct Budget: Codable, Equatable, Sendable {
         public var usedBytes: UInt64
         public var limitBytes: UInt64
-        /// session, daily, weekly or monthly, as `BudgetPeriod`.
+        /// A repeating `BudgetPeriod`, or pack when `packEnds` is present.
         public var period: String
-        public init(usedBytes: UInt64, limitBytes: UInt64, period: String) { self.usedBytes = usedBytes; self.limitBytes = limitBytes; self.period = period }
+        public var packEnds: Date?
+        public init(usedBytes: UInt64, limitBytes: UInt64, period: String, packEnds: Date? = nil) {
+            self.usedBytes = usedBytes; self.limitBytes = limitBytes; self.period = period; self.packEnds = packEnds
+        }
+        public var percentUsed: Int { Self.percentUsed(used: usedBytes, limit: limitBytes) }
+        public static func percentUsed(used: UInt64, limit: UInt64) -> Int {
+            guard limit > 0, used < limit else { return limit == 0 ? 0 : 100 }
+            return Int(limit.dividingFullWidth(used.multipliedFullWidth(by: 100)).quotient)
+        }
         public var fraction: Double { min(1, Double(usedBytes) / Double(max(1, limitBytes))) }
     }
     public struct Speed: Codable, Equatable, Sendable {

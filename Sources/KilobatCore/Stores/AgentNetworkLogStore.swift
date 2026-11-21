@@ -385,6 +385,11 @@ public struct HostLookup: Sendable {
         }
         if force { Self.writer.sync(execute: write) } else { Self.writer.async(execute: write) }
     }
+    public func shutdown() {
+        persist(force: true)
+        Self.writer.sync {}
+    }
+
     private nonisolated static let writer = DispatchQueue(label: "co.seifi.kilobat.agent-log-write", qos: .utility)
     /// Returns once every save queued so far has been written (for tests).
     func waitForWrites() { Self.writer.sync {} }

@@ -296,6 +296,71 @@ struct DataPackTests {
         #expect(reread.dataPacks == [pack])
     }
 
+    @MainActor @Test func historyRetentionKeepsActivePackEnforcedAcrossRestart() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let now = Date()
+        let store = TrafficStore(directory: folder, startMonitoring: false)
+        store.networkKey = "phone"; store.networkName = "Sam’s iPhone"
+        store.preferences.historyDays = 30
+        var pack = try Self.pack(1, days: 60, start: now.addingTimeInterval(-40 * 86_400))
+        pack.mode = .block
+        store.addPack(pack)
+        store.usage = [Self.entry(now.addingTimeInterval(-35 * 86_400), Self.gb)]
+        #expect(store.budgetBlocksNewConnections)
+        store.consume(TrafficSnapshot(timestamp: now, processes: [ProcessTraffic(pid: 123456, process: "test", received: 0, sent: 0)]))
+        store.consume(TrafficSnapshot(timestamp: now.addingTimeInterval(1), processes: [ProcessTraffic(pid: 123456, process: "test", received: 100, sent: 0)]))
+        store.shutdown()
+        #expect(store.usage.map(\.total) == [100])
+        #expect(store.budgetBlocksNewConnections)
+        #expect(UsageFile.read(folder).map(\.total) == [100])
+        let restored = TrafficStore(directory: folder, startMonitoring: false)
+        restored.networkKey = "phone"; restored.networkName = "Sam’s iPhone"
+        #expect(restored.budgetBlocksNewConnections)
+        #expect(restored.activeAllowance?.packEnds == pack.finish)
+        #expect(restored.activeAllowance?.limitBytes == Self.gb)
+        try restored.correctPack(pack.id, leftBytes: 500_000_000)
+        #expect(restored.activeAllowance?.usedBytes == 500_000_000)
+        #expect(!restored.budgetBlocksNewConnections)
+    }
+
+    @MainActor @Test func monthlyBudgetKeepsFirstDayUntilTheNextCycle() {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let calendar = Calendar.current
+        let first = calendar.date(from: DateComponents(year: 2026, month: 1, day: 1))!
+        let last = calendar.date(from: DateComponents(year: 2026, month: 1, day: 31, hour: 23))!
+        let reset = calendar.date(from: DateComponents(year: 2026, month: 2, day: 1))!
+        let store = TrafficStore(directory: folder, startMonitoring: false)
+        store.networkKey = "phone"
+        store.preferences.historyDays = 30
+        store.preferences.budgetCycle = BudgetCycle(period: .monthly)
+        let quota = AppLimit(name: "Safari", apps: ["com.apple.Safari"], bytes: Self.gb, cycle: BudgetCycle(period: .monthly))
+        let uploads = AppLimit(name: "Safari", apps: ["com.apple.Safari"], bytes: 250_000_000, uploadOnly: true, cycle: BudgetCycle(period: .monthly))
+        store.preferences.quotas = [quota, uploads]
+        let firstDay = UsageEntry(date: first, received: 750_000_000, sent: 250_000_000,
+                                  apps: ["Safari": Self.gb, "Other app": 50], networkKey: "phone",
+                                  appsSent: ["Safari": 250_000_000, "Other app": 50])
+        store.usage = [firstDay]
+        store.retainUsage(at: last)
+        #expect(store.usage.isEmpty)
+        #expect(store.allowanceUsage.first?.apps == ["Safari": Self.gb])
+        #expect(store.budgetUsed(on: "phone", now: last) == Self.gb)
+        #expect(store.limitUsed(quota, now: last) == Self.gb)
+        #expect(store.limitUsed(uploads, now: last) == 250_000_000)
+        store.retainUsage(at: reset)
+        #expect(store.budgetUsed(on: "phone", now: reset) == 0)
+        #expect(store.limitUsed(quota, now: reset) == 0)
+        #expect(store.allowanceUsage.isEmpty)
+    }
+
+    @Test func allowancePercentUsesExactBytes() {
+        #expect(WidgetSnapshot.Budget.percentUsed(used: 5_800_000_000, limit: 10_000_000_000) == 58)
+        #expect(WidgetSnapshot.Budget.percentUsed(used: UInt64.max - 1, limit: UInt64.max) == 99)
+        #expect(WidgetSnapshot.Budget.percentUsed(used: UInt64.max, limit: UInt64.max) == 100)
+        #expect(WidgetSnapshot.Budget.percentUsed(used: 0, limit: 0) == 0)
+    }
+
     // MARK: The CLI's arguments
 
     @Test func packCommandsParse() throws {

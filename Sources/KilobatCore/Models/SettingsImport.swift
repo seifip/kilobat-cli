@@ -428,3 +428,65 @@ public struct SettingsImportPlan: Equatable {
         }
     }
 }
+
+/// An inverse of a local import. Stores only fields the import changed, including fields which were absent before.
+public struct SettingsImportRecovery: Codable {
+    private struct Field: Codable {
+        let name: String
+        let previous: Data?
+    }
+
+    private let preferences: [Field]
+    private let defaults: [Field]
+    public let needsRelaunch: Bool
+    private let network: String?
+
+    public init(before: SavedPreferences, defaults: [String: Any], plan: SettingsImportPlan, network: String? = nil) throws {
+        let previous = try Self.fields(before), next = try Self.fields(plan.result)
+        preferences = try Set(previous.keys).union(next.keys).sorted().compactMap { name in
+            guard (previous[name] as? NSObject) != (next[name] as? NSObject) else { return nil }
+            return Field(name: name, previous: try previous[name].map {
+                try JSONSerialization.data(withJSONObject: $0, options: [.fragmentsAllowed, .sortedKeys])
+            })
+        }
+        self.defaults = try plan.defaultsChanges.keys.sorted().map { name in
+            Field(name: name, previous: try defaults[name].map {
+                try PropertyListSerialization.data(fromPropertyList: ["value": $0], format: .binary, options: 0)
+            })
+        }
+        needsRelaunch = plan.needsRelaunch
+        self.network = network
+    }
+
+    public func restoring(_ current: SavedPreferences, network: String? = nil) throws -> SavedPreferences {
+        var fields = try Self.fields(current)
+        for field in preferences {
+            fields[field.name] = try field.previous.map { try JSONSerialization.jsonObject(with: $0, options: .fragmentsAllowed) }
+        }
+        var result = try JSONDecoder().decode(SavedPreferences.self, from: JSONSerialization.data(withJSONObject: fields))
+        if network != self.network {
+            result.limitGB = network.flatMap { result.networkLimits?[$0] } ?? current.limitGB
+            result.budgetCycle = network.flatMap { result.networkCycles?[$0] }
+        }
+        return result
+    }
+
+    public func restoreDefaults(in target: UserDefaults) throws {
+        let values = try defaults.map { field in
+            let box = try field.previous.map { try PropertyListSerialization.propertyList(from: $0, options: [], format: nil) }
+            return (field.name, (box as? [String: Any])?["value"])
+        }
+        for (name, value) in values {
+            if let value { target.set(value, forKey: name) }
+            else { target.removeObject(forKey: name) }
+        }
+    }
+
+    private static func fields(_ preferences: SavedPreferences) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(preferences)
+        guard let fields = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        return fields
+    }
+}

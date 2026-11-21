@@ -49,6 +49,17 @@ struct SiriAnswersTests {
         #expect(diagnose(input(snapshot(), speed: speed), pro: false).answer == answer)
     }
 
+    @Test func replyingSecondaryAndActiveEthernetGiveHealthyDiagnosis() {
+        var sample = snapshot(rssi: -85, internet: [], loss: 100)
+        sample.secondary = PingResult(host: "secondary", samples: [22, 24, 26], lossPercent: 0)
+        sample.wiredInterface = "en8"
+        let (answer, cause) = diagnose(input(sample))
+        #expect(cause == .fine)
+        #expect(answer.spoken.contains("24 ms"))
+        #expect(answer.facts.allSatisfy { $0.label != "Wi-Fi signal" })
+        #expect(diagnose(input(sample), pro: false).cause == .fine)
+    }
+
     @Test func weakWiFiIsTheCauseWithPro() {
         let (answer, cause) = diagnose(input(snapshot(rssi: -79)))
         #expect(cause == .wifi)

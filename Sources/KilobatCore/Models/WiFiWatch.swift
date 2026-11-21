@@ -16,11 +16,36 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
     public struct Scan: Codable, Sendable, Equatable {
         public let date: Date
         public let readings: [String: Int]
+        public var accessPoint: AccessPoint?
     }
     /// The joined link's signal between scans.
     public struct LinkSample: Codable, Sendable, Equatable {
         public let date: Date
         public let rssi: Int
+        public var accessPoint: AccessPoint?
+    }
+    public struct AccessPoint: Codable, Sendable, Hashable {
+        public let bssid: String?
+        public let ssid: String?
+        public let band: String?
+        public let channel: Int?
+
+        init(_ radio: RadioSample) {
+            bssid = radio.bssid?.lowercased()
+            ssid = radio.ssid
+            band = radio.band
+            channel = radio.channel
+        }
+
+        fileprivate init(bssid: String?, ssid: String?, band: String?, channel: Int?) {
+            self.bssid = bssid; self.ssid = ssid; self.band = band; self.channel = channel
+        }
+
+        func matches(_ radio: Radio) -> Bool {
+            if let bssid { return radio.id == bssid }
+            guard let ssid else { return false }
+            return radio.ssid == ssid && radio.band == band && radio.channel == channel
+        }
     }
     public let start: Date
     public let duration: TimeInterval
@@ -43,19 +68,20 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
         network.id.hasPrefix("hidden-") ? "\(network.ssid)|\(network.band)|\(network.channel)" : network.id.lowercased()
     }
 
-    public mutating func add(scan networks: [NearbyNetwork], at date: Date) {
+    public mutating func add(scan networks: [NearbyNetwork], at date: Date, radio: RadioSample? = nil) {
         var readings: [String: Int] = [:]
         for network in networks where network.rssi < 0 {
             let key = Self.key(network)
             readings[key] = max(readings[key] ?? -999, network.rssi)
             if radios[key] == nil { radios[key] = Radio(id: key, ssid: network.ssid, band: network.band, channel: network.channel, widthMHz: network.widthMHz) }
         }
-        scans.append(Scan(date: date, readings: readings))
+        scans.append(Scan(date: date, readings: readings, accessPoint: radio.map(AccessPoint.init)))
     }
 
     public mutating func add(link radio: RadioSample, at date: Date) {
         guard let rssi = radio.rssi else { return }
-        link.append(LinkSample(date: date, rssi: rssi))
+        let accessPoint = AccessPoint(radio)
+        link.append(LinkSample(date: date, rssi: rssi, accessPoint: accessPoint))
         if joined == nil, let bssid = radio.bssid { joined = bssid.lowercased() }
         if ssid == nil { ssid = radio.ssid }
         if joinedBand == nil { joinedBand = radio.band; joinedChannel = radio.channel }
@@ -98,10 +124,18 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
         }.prefix(limit).map { $0 }
     }
 
+    private var linkChanged: Bool {
+        Set(link.compactMap(\.accessPoint)).count > 1
+    }
+
+    private var initialAccessPoint: AccessPoint {
+        AccessPoint(bssid: joined, ssid: ssid, band: joinedBand, channel: joinedChannel)
+    }
+
     /// How much the joined link's signal moved, from the 2-second readings.
     public var linkSpread: Int? {
         let values = link.map(\.rssi)
-        guard values.count >= 3, let low = values.min(), let high = values.max() else { return nil }
+        guard !linkChanged, values.count >= 3, let low = values.min(), let high = values.max() else { return nil }
         return high - low
     }
 
@@ -109,16 +143,27 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
     public var summary: String {
         guard !scans.isEmpty || !link.isEmpty else { return String(localized: "No readings yet.", comment: "Wi-Fi watch") }
         var parts: [String] = []
-        if let spread = linkSpread, let low = link.map(\.rssi).min(), let high = link.map(\.rssi).max() {
+        if linkChanged {
+            parts.append(String(localized: "The connected access point or channel changed during this watch. Signal readings span more than one link.", comment: "Wi-Fi watch summary after roaming"))
+        } else if let spread = linkSpread, let low = link.map(\.rssi).min(), let high = link.map(\.rssi).max() {
             parts.append(spread >= 15
-                ? String(localized: "Your signal swung by \(spread) dB (\(low) to \(high) dBm): something between this Mac and the router moved, or the Mac did.", comment: "Wi-Fi watch summary; spread, weakest and strongest dBm")
+                ? String(localized: "Your signal swung by \(spread) dB (\(low) to \(high) dBm).", comment: "Wi-Fi watch summary; spread, weakest and strongest dBm")
                 : String(localized: "Your signal held steady between \(low) and \(high) dBm.", comment: "Wi-Fi watch summary; weakest and strongest dBm"))
         }
         let lines = series(limit: 64)
-        if let own = lines.first(where: \.own), let ownMedian = own.median,
-           let better = lines.filter(\.sameNetwork).max(by: { ($0.median ?? -999) < ($1.median ?? -999) }), let betterMedian = better.median, betterMedian - ownMedian >= 10 {
-            parts.append(String(localized: "Another access point of your network was about \(betterMedian - ownMedian) dB stronger the whole time (\(better.radio.band), channel \(better.radio.channel)).",
-                                comment: "Wi-Fi watch summary; dB difference, band and channel"))
+        if !linkChanged, let own = lines.first(where: \.own) {
+            let comparisons = lines.filter(\.sameNetwork).compactMap { candidate -> (radio: Radio, delta: Int)? in
+                let deltas = zip(candidate.points, own.points).compactMap { candidate, own in
+                    if let candidate, let own { return candidate - own }
+                    return nil
+                }.sorted()
+                guard deltas.count >= 3 else { return nil }
+                return (candidate.radio, deltas[deltas.count / 2])
+            }
+            if let better = comparisons.max(by: { $0.delta < $1.delta }), better.delta >= 10 {
+                parts.append(String(localized: "When both were heard, another access point of your network was typically \(better.delta) dB stronger (\(better.radio.band), channel \(better.radio.channel)).",
+                                    comment: "Wi-Fi watch summary; median paired difference, band and channel"))
+            }
         }
         if skipped > 0 { parts.append(String(localized: "\(skipped) scans were skipped during a call or failed.", comment: "Wi-Fi watch summary; a count")) }
         return parts.joined(separator: " ")
@@ -130,16 +175,17 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
         format.formatOptions = [.withInternetDateTime]
         format.timeZone = .current
         var rows = [["time", "source", "ssid", "bssid", "band", "channel", "rssi_dbm", "joined"]]
-        let joinedRadio = radios.values.first(where: isOwn)
         for scan in scans {
+            let accessPoint = scan.accessPoint ?? link.last { $0.date <= scan.date }?.accessPoint ?? initialAccessPoint
             for (key, rssi) in scan.readings.sorted(by: { $0.key < $1.key }) {
                 guard let radio = radios[key] else { continue }
-                rows.append([format.string(from: scan.date), "scan", WiFiScanExport.text(radio.ssid), key.contains("|") ? "" : key, radio.band, String(radio.channel), String(rssi), isOwn(radio) ? "yes" : "no"])
+                rows.append([format.string(from: scan.date), "scan", WiFiScanExport.text(radio.ssid), key.contains("|") ? "" : key, radio.band, String(radio.channel), String(rssi), accessPoint.matches(radio) ? "yes" : "no"])
             }
         }
         for sample in link {
-            rows.append([format.string(from: sample.date), "link", WiFiScanExport.text(ssid ?? ""), joinedRadio.map { $0.id.contains("|") ? "" : $0.id } ?? (joined ?? ""), joinedBand ?? "",
-                         joinedChannel.map(String.init) ?? "", String(sample.rssi), "yes"])
+            let accessPoint = sample.accessPoint ?? initialAccessPoint
+            rows.append([format.string(from: sample.date), "link", WiFiScanExport.text(accessPoint.ssid ?? ""), accessPoint.bssid ?? "", accessPoint.band ?? "",
+                         accessPoint.channel.map(String.init) ?? "", String(sample.rssi), "yes"])
         }
         return rows.map(WiFiScanExport.line).joined()
     }
@@ -185,7 +231,9 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
         task = Task { [weak self] in
             guard let self else { return }
             _ = await self.record(duration: duration, interval: interval)
+            guard !Task.isCancelled else { return }
             self.running = false
+            self.task = nil
         }
     }
     public func stop() { task?.cancel(); task = nil; running = false }
@@ -199,18 +247,24 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
         let duration = Self.clamp(duration: duration), interval = Self.clamp(interval: interval)
         let start = clock()
         var recording = WiFiWatchRecording(start: start, duration: duration, interval: interval)
+        guard !Task.isCancelled else { return recording }
         self.recording = recording
         var nextScan = start
         let end = start.addingTimeInterval(duration)
         while !Task.isCancelled {
             let now = clock()
+            var completedScan: (networks: [NearbyNetwork], date: Date)?
             if now >= nextScan && now <= end {
                 if pauseScans() { recording.skipped += 1 }
-                else if let networks = try? await scan() { recording.add(scan: networks, at: clock()) }
+                else if let networks = try? await scan() { completedScan = (networks, clock()) }
                 else { recording.skipped += 1 }
                 while nextScan <= clock() { nextScan = nextScan.addingTimeInterval(interval) }
             }
-            recording.add(link: await readLink(), at: clock())
+            guard !Task.isCancelled else { return recording }
+            let radio = await readLink()
+            guard !Task.isCancelled else { return recording }
+            recording.add(link: radio, at: clock())
+            if let completedScan { recording.add(scan: completedScan.networks, at: completedScan.date, radio: radio) }
             self.recording = recording
             progress = min(1, clock().timeIntervalSince(start) / duration)
             onUpdate?(recording)
@@ -218,6 +272,7 @@ public struct WiFiWatchRecording: Codable, Sendable, Equatable {
             if left <= 0 { break }
             await pause(min(Self.linkEvery, left))
         }
+        guard !Task.isCancelled else { return recording }
         progress = 1
         self.recording = recording
         return recording

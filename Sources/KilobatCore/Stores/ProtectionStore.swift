@@ -178,6 +178,7 @@ public struct ProtectionListState: Codable, Equatable, Sendable {
     public var etag: String?
     public var lastModified: String?
     public var checked: Date?
+    public var verified: Date?
     /// When a download last replaced the copy kept.
     public var updated: Date?
     public var entries: Int = 0
@@ -243,14 +244,14 @@ public struct ProtectionUpdater: Sendable {
             do {
                 let (data, response) = try await fetch(request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 304 && present { entry.error = nil }
+                if status == 304 && present { entry.error = nil; entry.verified = now }
                 else if status == 200 {
                     let parsed = try Self.validate(data, list: list, previous: present ? entry.entries : 0)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     try data.write(to: fileURL(list), options: [.atomic])
                     let http = response as? HTTPURLResponse
                     entry.etag = http?.value(forHTTPHeaderField: "ETag"); entry.lastModified = http?.value(forHTTPHeaderField: "Last-Modified")
-                    entry.updated = now; entry.entries = parsed.count; entry.bytes = data.count; entry.error = nil
+                    entry.verified = now; entry.updated = now; entry.entries = parsed.count; entry.bytes = data.count; entry.error = nil
                     entry.skipped = list.group == .subscriptions ? parsed.skipped : nil
                 } else { entry.error = "HTTP \(status)" }
             } catch let failure as Failure { entry.error = failure.message }
@@ -535,7 +536,7 @@ public struct ProtectionStatus: Codable, Equatable, Sendable {
     /// Newest last update among the lists in use, and their entries.
     public func summary(_ lists: [ProtectionList]) -> (entries: Int, updated: Date?, errors: [String]) {
         let rows = lists.compactMap { state.lists[$0.id] }
-        return (rows.reduce(0) { $0 + $1.entries }, rows.compactMap(\.updated).min(), lists.compactMap { list in state.lists[list.id]?.error.map { list.name + ": " + $0 } })
+        return (rows.reduce(0) { $0 + $1.entries }, rows.compactMap { $0.verified ?? $0.updated }.min(), lists.compactMap { list in state.lists[list.id]?.error.map { list.name + ": " + $0 } })
     }
 }
 

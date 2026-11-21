@@ -181,7 +181,7 @@ private actor DelayedBenchmarkDNS: DNSSystem {
         let h = HouseholdStore(directory: folder.appendingPathComponent("household"), keys: MemoryHouseholdKeys())
         h.allowed = { true }; h.network = { HouseholdNetwork(key: "A", name: "A", home: true) }
         let summary = HouseholdSummary.make(id: peerID, name: "Peer", download: 100000, upload: 100000, apps: [], onCall: false, now: now)
-        h.preview(book: householdBook, live: [HouseholdLive(summary: summary, received: now)], unreachable: [peerID])
+        h.preview(book: householdBook, live: [HouseholdLive(summary: summary, received: Date())], unreachable: [peerID])
         let peer = h.report().peers.first
         #expect(peer?.reachable == false && peer?.live != nil, "Audit #55")
 

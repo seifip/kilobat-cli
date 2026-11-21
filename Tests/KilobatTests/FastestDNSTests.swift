@@ -660,14 +660,14 @@ struct FastestDNSTests {
         let applier = FakeApplier(system: system)
         let watch = FastestDNSWatch(directory: folder, system: system)
         watch.applier = applier
-        await #expect(throws: (any Error).self) { try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true) }
+        await #expect(throws: (any Error).self) { try await watch.undoFix(service: "Wi-Fi", previous: [], expecting: applied().servers, tracked: true) }
         #expect(applier.calls == 0)
         #expect(system.servers == applied().servers)
     }
 
     @MainActor @Test func undoingAFixThatIsAlreadyGoneSucceeds() async throws {
         let watch = FastestDNSWatch(directory: nil, system: FakeSystem())
-        try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true)
+        try await watch.undoFix(service: "Wi-Fi", previous: [], expecting: applied().servers, tracked: true)
     }
 
     @MainActor @Test func undoingATrackedFixPutsAutomaticBack() async throws {
@@ -678,9 +678,49 @@ struct FastestDNSTests {
         let applier = FakeApplier(system: system)
         let watch = FastestDNSWatch(directory: folder, system: system)
         watch.applier = applier
-        try await watch.undoFix(service: "Wi-Fi", previous: [], tracked: true)
+        try await watch.undoFix(service: "Wi-Fi", previous: [], expecting: applied().servers, tracked: true)
         #expect(system.servers.isEmpty)
         #expect(applier.history == [[]])
+    }
+
+    @MainActor @Test func undoLeavesNewerManualDNSAlone() async throws {
+        let system = FakeSystem()
+        system.servers = ["203.0.113.53"]
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: nil, system: system)
+        watch.applier = applier
+        let choice = DNSResolverChoice.cloudflare
+        _ = try await watch.useForFix(choice, service: "Wi-Fi")
+        system.servers = ["192.0.2.53"]
+        try await watch.undoFix(service: "Wi-Fi", previous: ["203.0.113.53"], expecting: choice.servers, tracked: false)
+        #expect(applier.history == [choice.servers])
+        #expect(system.servers == ["192.0.2.53"])
+    }
+
+    @MainActor @Test func aFailedDNSReadPreventsARepair() async throws {
+        let system = FakeSystem()
+        system.servers = ["192.0.2.53"]
+        system.readable = false
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: nil, system: system)
+        watch.applier = applier
+        await #expect(throws: (any Error).self) { try await watch.useForFix(.cloudflare, service: "Wi-Fi") }
+        #expect(applier.history.isEmpty)
+        #expect(system.servers == ["192.0.2.53"])
+    }
+
+    @MainActor @Test func uninstallRestoresTrackedDNSBeforeTheHelperIsRemoved() async throws {
+        let folder = try savedFolder(applied: applied(), pending: nil)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let system = FakeSystem()
+        system.servers = applied().servers
+        let applier = FakeApplier(system: system)
+        let watch = FastestDNSWatch(directory: folder, system: system)
+        watch.applier = applier
+        try await watch.prepareForUninstall()
+        #expect(applier.history == [[]])
+        #expect(system.servers.isEmpty)
+        #expect(FastestDNSWatch.load(directory: folder).applied == nil)
     }
 
     @MainActor @Test func savedRecordsWithoutHistoryStillRead() throws {
@@ -875,7 +915,9 @@ private struct FakeProbe: DNSProbing {
 /// The Mac's DNS setting as a variable, shared with the fake applier.
 private final class FakeSystem: DNSSystem, @unchecked Sendable {
     var servers: [String] = []
+    var readable = true
     func serviceServers(_ service: String) async -> [String] { servers }
+    func verifiedServiceServers(_ service: String) async -> [String]? { readable ? servers : nil }
     func dhcpServers(interface: String) async -> [String] { ["192.168.1.1"] }
     func managed() async -> Bool { false }
     func gateway() async -> String? { "192.168.1.1" }

@@ -473,9 +473,12 @@ struct ProtectionUpdateTests {
         #expect(state.lists["sample"]?.error != nil)
         #expect(updater.build([Self.list])?.match(host: "b.example") != nil)
 
+        #expect(state.lists["sample"]?.verified == start)
         // Not modified keeps it and clears the error.
         server.responses = [(304, "", [:])]
         state = await updater.update([Self.list], force: true, now: start.addingTimeInterval(90_200))
+        #expect(state.lists["sample"]?.verified == start.addingTimeInterval(90_200))
+        #expect(state.lists["sample"]?.updated == start)
         #expect(state.lists["sample"]?.error == nil && state.lists["sample"]?.entries == 4)
     }
 

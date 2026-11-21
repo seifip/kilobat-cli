@@ -109,6 +109,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var speed: SpeedTestResult? { speedRunning ? nil : lastSpeed }
     /// The latest completed test. A cancelled or failed run never clears it.
     public private(set) var lastSpeed: SpeedTestResult?
+    public var lastSpeedRecord: SavedSpeedTest? {
+        guard let lastSpeed else { return nil }
+        return journal.speedTests.last { $0.result.date == lastSpeed.date }
+    }
+    public private(set) var speedAttemptMessage: String?
     public var error: String?
     public var notice: String?
     public var reportNotice: String?
@@ -499,6 +504,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                   journal.reservePlanCheck(network: key, maximumBytes: maximumBytes) else { return }
         }
         speedRunning = true
+        speedAttemptMessage = nil
         speedPhase = .latency; speedFraction = 0; speedDown = nil; speedUp = nil
         speedDownHistory = []; speedUpHistory = []; speedStarted = Date(); speedBytes = 0
         let testedNetwork = snapshot
@@ -520,7 +526,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                 self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled, reservedAttempt: planCheck ? true : nil)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = String(localized: "Test complete.")
-            } catch is CancellationError { self.speedProgress = String(localized: "Test cancelled.") }
+            } catch is CancellationError {
+                self.speedProgress = String(localized: "Test cancelled.")
+                self.speedAttemptMessage = self.speedProgress
+            }
             catch {
                 // The internet check doesn't touch the test host, so it can tell "offline" from "this server is blocked".
                 let reach = self.snapshot?.reachability
@@ -534,8 +543,13 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                         self.journal.record(kind: "Speed test server unreachable", detail: SpeedTest.failureMessage(kind) ?? "", network: testedNetwork?.networkName ?? "Unknown network")
                     }
                 }
+                self.speedAttemptMessage = self.speedProgress
             }
         }
+    }
+    public func automaticSpeedTestBytes() async throws -> Int {
+        for _ in 0..<20 where metered == nil { try await Task.sleep(for: .milliseconds(250)) }
+        return ((metered?() ?? true) ? 10 : 80) * 1_000_000
     }
     public func cancelSpeedTest() { speedTask?.cancel() }
     /// Runs a test, or waits for the one already running, and returns its result: for Shortcuts.
@@ -543,7 +557,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let previous = lastSpeed?.date
         runSpeedTest(maximumBytes: maximumBytes)
         await speedTask?.value
-        guard let result = lastSpeed, result.date != previous else { throw SpeedTestFailure(message: speedProgress) }
+        guard let result = lastSpeed, result.date != previous else { throw SpeedTestFailure(message: speedAttemptMessage ?? speedProgress) }
         return result
     }
 

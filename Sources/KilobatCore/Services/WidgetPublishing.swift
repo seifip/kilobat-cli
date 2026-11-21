@@ -23,10 +23,10 @@ extension WidgetSnapshot {
         link = !connected ? nil : kind == String(localized: "Wi-Fi") ? .wifi : kind == String(localized: "Ethernet") ? .ethernet : kind == String(localized: "Cellular") ? .cellular : .other
         self.metered = connected && metered
         if connected, let diagnostic, now.timeIntervalSince(diagnostic.date) < 180 {
-            internetMs = diagnostic.internet.average; routerMs = diagnostic.router?.average
-            jitterMs = diagnostic.internet.jitter; lossPercent = diagnostic.internet.lossPercent
+            internetMs = diagnostic.measured.average; routerMs = diagnostic.router?.average
+            jitterMs = diagnostic.measured.jitter; lossPercent = diagnostic.measured.lossPercent
         }
-        latency = samples.filter { now.timeIntervalSince($0.date) < 3600 }.suffix(30).compactMap(\.internet.average)
+        latency = samples.filter { now.timeIntervalSince($0.date) < 3600 }.suffix(30).compactMap(\.measured.average)
         todayReceived = today.received; todaySent = today.sent; todayHours = today.hours
         self.budget = pro && (budget?.limitBytes ?? 0) > 0 ? budget : nil
         self.speed = speed.map { Speed(date: $0.date, downMbps: $0.downloadMbps, upMbps: $0.uploadMbps) }
@@ -88,8 +88,10 @@ public struct WidgetReloadPlan: Sendable {
         case WidgetSnapshot.Kind.status:
             return before.status != after.status || before.link != after.link || before.metered != after.metered || before.speed?.date != after.speed?.date
         case WidgetSnapshot.Kind.data:
-            let step: (WidgetSnapshot) -> Int? = { $0.budget.map { Int($0.fraction * 20) } }
-            return step(before) != step(after) || before.budget?.limitBytes != after.budget?.limitBytes || !calendar.isDate(before.date, inSameDayAs: after.date)
+            let step: (WidgetSnapshot) -> Int? = { $0.budget.map { $0.percentUsed / 5 } }
+            return step(before) != step(after) || before.budget?.limitBytes != after.budget?.limitBytes ||
+                before.budget?.period != after.budget?.period || before.budget?.packEnds != after.budget?.packEnds ||
+                !calendar.isDate(before.date, inSameDayAs: after.date)
         default:
             return before.speed != after.speed
         }

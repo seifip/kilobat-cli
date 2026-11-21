@@ -97,3 +97,34 @@ public struct DeviceObservation: Codable, Identifiable, Sendable {
         catch { self.error = error.localizedDescription }
     }
 }
+
+public struct WiFiScanComparison {
+    public struct Change: Identifiable {
+        public let id: String
+        public let before: NearbyNetwork?
+        public let after: NearbyNetwork?
+
+        public var name: String {
+            let ssid = after?.ssid ?? before?.ssid ?? ""
+            return ssid.isEmpty ? String(localized: "Hidden network") : ssid
+        }
+    }
+
+    public let changes: [Change]
+    public let unidentified: Bool
+
+    public init(before: SavedScan, after: SavedScan) {
+        func indexed(_ scan: SavedScan) -> [String: NearbyNetwork] {
+            Dictionary(scan.networks.filter { !$0.id.isEmpty && !$0.id.hasPrefix("hidden-") }.map { ($0.id.lowercased(), $0) },
+                       uniquingKeysWith: { $0.rssi >= $1.rssi ? $0 : $1 })
+        }
+        let old = indexed(before), new = indexed(after)
+        unidentified = (before.networks + after.networks).contains { $0.id.isEmpty || $0.id.hasPrefix("hidden-") }
+        changes = Set(old.keys).union(new.keys).compactMap { id in
+            let first = old[id], second = new[id]
+            if let first, let second, first.rssi == second.rssi, first.channel == second.channel,
+               first.band == second.band, first.widthMHz == second.widthMHz { return nil }
+            return Change(id: id, before: first, after: second)
+        }.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+    }
+}

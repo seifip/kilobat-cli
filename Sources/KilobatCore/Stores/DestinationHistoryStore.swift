@@ -36,8 +36,14 @@ import Observation
     /// One nettop sample. A process seen for the first time only sets its baseline, as in usage history.
     public func consume(_ snapshot: TrafficSnapshot) {
         let now = snapshot.timestamp
-        guard !previewing, allowed(), let settings = settings(), settings.isOn else {
+        guard !previewing else { return }
+        if now.timeIntervalSince(lastPrune) >= 3_600 {
+            lastPrune = now
+            if DestinationHistory.prune(&records, now: now, calendar: calendar) { index = [:]; dirty = true }
+        }
+        guard allowed(), let settings = settings(), settings.isOn else {
             previous = [:]
+            persist(now: now)
             return
         }
         let names = names()
@@ -65,10 +71,6 @@ import Observation
         }
         previous = previous.filter { now.timeIntervalSince($0.value.at) < 30 }.merging(seen) { $1 }
         if changed { dirty = true; withMutation(keyPath: \.records) {} }
-        if now.timeIntervalSince(lastPrune) >= 3_600 {
-            lastPrune = now
-            if DestinationHistory.prune(&records, now: now, calendar: calendar) { index = [:]; dirty = true }
-        }
         persist(now: now)
     }
 
@@ -113,6 +115,11 @@ import Observation
         }
         if force { Self.writer.sync(execute: write) } else { Self.writer.async(execute: write) }
     }
+    public func shutdown() {
+        persist(force: true)
+        Self.writer.sync {}
+    }
+
     private nonisolated static let writer = DispatchQueue(label: "co.seifi.kilobat.destination-history-write", qos: .utility)
 
     #if DEBUG

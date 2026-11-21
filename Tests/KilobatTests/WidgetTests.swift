@@ -39,6 +39,18 @@ struct WidgetTests {
         #expect(WidgetSnapshot.decode(try snapshot.encoded()) == snapshot)
     }
 
+    @Test func secondaryProbeSuppliesStatusFiguresAndHistory() {
+        var sample = Self.sample(ping: [])
+        sample.secondary = PingResult(host: "secondary", samples: [22, 24, 26], lossPercent: 0)
+        let snapshot = WidgetSnapshot(now: Self.now, connected: true, kind: "Ethernet", metered: false,
+                                      diagnostic: sample, samples: [sample], today: (0, 0, []),
+                                      budget: nil, speed: nil, pro: true)
+        #expect(snapshot.status == .healthy)
+        #expect(snapshot.internetMs == 24)
+        #expect(snapshot.lossPercent == 0)
+        #expect(snapshot.latency == [24])
+    }
+
     @Test func budgetNeedsPro() {
         let free = Self.snapshot(pro: false)
         #expect(free.budget == nil && !free.pro && free.todayBytes == 1_100_000_000)

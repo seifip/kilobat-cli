@@ -166,6 +166,64 @@ import Testing
         #expect(!recording.csv.contains("hidden"))
     }
 
+    @Test func watchExportsEachLinkUnderItsOwnAccessPoint() {
+        let now = Date()
+        var watch = WiFiWatchRecording(start: now, duration: 60, interval: 15)
+        watch.add(link: Self.radio(bssid: "00:00:5e:00:53:10", rssi: -70, channel: 36, band: "5 GHz"), at: now)
+        watch.add(link: Self.radio(bssid: "00:00:5e:00:53:11", rssi: -43, channel: 149, band: "5 GHz"), at: now.addingTimeInterval(2))
+        watch.add(link: Self.radio(bssid: "00:00:5e:00:53:11", rssi: -45, channel: 149, band: "5 GHz"), at: now.addingTimeInterval(4))
+        #expect(watch.csv.contains("00:00:5e:00:53:10,5 GHz,36,-70,yes"))
+        #expect(watch.csv.contains("00:00:5e:00:53:11,5 GHz,149,-43,yes"))
+        #expect(watch.linkSpread == nil)
+        #expect(watch.summary.contains("changed"))
+    }
+
+    @Test func cancelledWatchCannotPublishOverTheReplacement() async throws {
+        var pending: [CheckedContinuation<[NearbyNetwork], Never>] = []
+        let now = Date()
+        let watch = WiFiWatchSession(scan: { await withCheckedContinuation { pending.append($0) } },
+                                     link: { Self.radio(rssi: -54, channel: 36, band: "5 GHz") },
+                                     pauseScans: { false }, clock: { now }, pause: { _ in await Task.yield() })
+        watch.start(duration: 30)
+        for _ in 0..<100 where pending.count < 1 { await Task.yield() }
+        try #require(pending.count == 1)
+        watch.stop()
+        watch.clear()
+        watch.start(duration: 120)
+        for _ in 0..<100 where pending.count < 2 { await Task.yield() }
+        try #require(pending.count == 2)
+        pending[0].resume(returning: [])
+        for _ in 0..<20 { await Task.yield() }
+        #expect(watch.running)
+        #expect(watch.recording?.duration == 120)
+        watch.stop()
+        watch.clear()
+        pending[1].resume(returning: [])
+        for _ in 0..<20 { await Task.yield() }
+        #expect(watch.recording == nil)
+    }
+
+    @Test func scanComparisonPreservesIdentityAcrossChannelChanges() throws {
+        let now = Date()
+        let old = SavedScan(date: now, networks: [
+            Self.network("Home", "00:00:5e:00:53:10", rssi: -70, channel: 36, band: "5 GHz"),
+            Self.network("Away", "00:00:5e:00:53:11", rssi: -80, channel: 6, band: "2.4 GHz"),
+            Self.network("Hidden", "hidden-0", rssi: -50, channel: 6, band: "2.4 GHz")
+        ])
+        let new = SavedScan(date: now.addingTimeInterval(60), networks: [
+            Self.network("Home", "00:00:5E:00:53:10", rssi: -50, channel: 149, band: "5 GHz"),
+            Self.network("New", "00:00:5e:00:53:12", rssi: -77, channel: 11, band: "2.4 GHz")
+        ])
+        let result = WiFiScanComparison(before: old, after: new)
+        #expect(result.unidentified)
+        #expect(result.changes.count == 3)
+        let home = try #require(result.changes.first { $0.name == "Home" })
+        #expect(home.before?.channel == 36)
+        #expect(home.after?.channel == 149)
+        #expect(result.changes.first { $0.name == "Away" }?.after == nil)
+        #expect(result.changes.first { $0.name == "New" }?.before == nil)
+    }
+
     // MARK: Band steering and sticky clients
 
     @Test func bandSteeringFromTheSameBox() {

@@ -132,13 +132,14 @@ import Observation
             if !holding.isEmpty || airDropHeld { release() }
             return
         }
-        if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier, let name = CallMode.name(of: front), holding.contains(name) {
-            released.insert(name); resume(name)
+        let front = NSWorkspace.shared.frontmostApplication
+        if let id = front?.bundleIdentifier, let name = CallMode.name(of: id) { released.insert(name) }
+        let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
+        for name in holding where released.contains(name) || (gaming && CallMode.launchers.contains(name)) {
+            resume(name)
         }
         guard callMode, now.timeIntervalSince(lastHoldScan) >= 10 else { return }
         lastHoldScan = now
-        let front = NSWorkspace.shared.frontmostApplication
-        let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)
         for app in traffic.apps {
             guard let name = CallMode.name(of: app.id), !callModeSkipped.contains(name), !released.contains(name) else { continue }
             if CallMode.launchers.contains(name), gaming || app.downloadRate < CallAnalysis.downloadLoad / 2 { continue }

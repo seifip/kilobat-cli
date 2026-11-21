@@ -124,7 +124,7 @@ struct PortalUnblockTests {
         var applied: [FixAction] = [], undone: [FixUndo] = []
         var fail = false
         init(_ readings: [FixReading]) { self.readings = readings }
-        let undo = FixUndo.dns(service: "Wi-Fi", previous: ["1.1.1.1"], tracked: false)
+        let undo = FixUndo.dns(service: "Wi-Fi", previous: ["1.1.1.1"], applied: [], tracked: false)
         var actions: FixRunner.Actions {
             FixRunner.Actions(plan: { FixPlanner.steps(for: .signIn(place: nil, blockers: PortalBlockers(ownDNS: ["1.1.1.1"])), helper: true) },
                               measure: { self.readings.count > 1 ? self.readings.removeFirst() : self.readings[0] },

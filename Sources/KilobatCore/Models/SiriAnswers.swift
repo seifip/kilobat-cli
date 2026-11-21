@@ -84,10 +84,10 @@ public enum SiriAnswers {
                                tone: .unknown), .checking)
         }
         let facts = diagnosisFacts(snapshot)
-        let internet = snapshot.internet.average, loss = snapshot.internet.lossPercent ?? 0
+        let internet = snapshot.measured.average, loss = snapshot.measured.lossPercent ?? 0
         let outageService = input.services.filter(\.outage).max { $0.state < $1.state }
         // Free and Pro alike: no network, the Wi-Fi's sign-in page, and a service's own outage.
-        if snapshot.gateway == nil && internet == nil {
+        if snapshot.gateway == nil && snapshot.reachability != .up {
             return (SiriAnswer(title: String(localized: "Not connected"), sentence: String(localized: "Your Mac isn’t connected to a network right now. Join a Wi-Fi network or plug in a cable.", comment: "Siri: no router and no internet"),
                                tone: .problem, facts: facts, cause: String(localized: "Not connected")), .notConnected)
         }
@@ -123,11 +123,11 @@ public enum SiriAnswers {
                           wifi ? String(localized: "Your Wi-Fi and router are fine, but nothing past them answers: the internet has been down since \(start). It’s in your provider report.", comment: "Siri: an outage beyond the router; the argument is a time such as 9:12 PM")
                                : String(localized: "Your router is fine, but nothing past it answers: the internet has been down since \(start). It’s in your provider report.", comment: "Siri: an outage beyond the router; the argument is a time such as 9:12 PM"))
         }
-        if snapshot.radio.health == .poor || snapshot.radio.health == .degraded {
+        if let health = snapshot.activeRadioHealth, health == .poor || health == .degraded {
             let title = String(localized: "Weak or noisy Wi-Fi")
             let sentence = snapshot.radio.rssi.map { String(localized: "Your Wi-Fi signal is weak (\($0) dBm), and that’s the bottleneck. Move closer to the router, or use Radar in Kilobat to find a stronger spot.", comment: "Siri; the argument is a signal level such as -78") }
                 ?? String(localized: "Your Wi-Fi signal is noisy, and that’s the bottleneck. Move closer to the router, or use Radar in Kilobat to find a stronger spot.", comment: "Siri")
-            return answer(.wifi, title, sentence, tone: snapshot.radio.health == .poor ? .problem : .caution)
+            return answer(.wifi, title, sentence, tone: health == .poor ? .problem : .caution)
         }
         let degraded = snapshot.health != .good
         if let app = input.busy.first, app.heavy {
@@ -151,11 +151,11 @@ public enum SiriAnswers {
         if routerFine, loss >= 3 || (internet ?? 0) > 120 {
             let lossy = loss >= 3
             let start = since { checks in
-                lossy ? checks.compactMap(\.internet.lossPercent).reduce(0, +) / Double(max(1, checks.count)) >= 2
-                      : median(checks.compactMap(\.internet.average)) > 100
+                lossy ? checks.compactMap(\.measured.lossPercent).reduce(0, +) / Double(max(1, checks.count)) >= 2
+                      : median(checks.compactMap(\.measured.average)) > 100
             }
             let runLoss = start.map { start in
-                let run = input.history.filter { $0.date >= start && $0.networkKey == snapshot.networkKey }.compactMap { $0.internet.lossPercent }
+                let run = input.history.filter { $0.date >= start && $0.networkKey == snapshot.networkKey }.compactMap { $0.measured.lossPercent }
                 return run.isEmpty ? loss : run.reduce(0, +) / Double(run.count)
             } ?? loss
             let percent = "\(Int(max(1, runLoss.rounded())).formatted())%", latency = ms(internet ?? 0)
@@ -176,7 +176,7 @@ public enum SiriAnswers {
             return answer(.dns, String(localized: "Slow DNS lookups"),
                           String(localized: "Websites are slow to start loading because name lookups take \(ms(dns)). Try Cloudflare or Google DNS in Kilobat’s Health tab.", comment: "Siri; the argument is a duration such as 320 ms"), tone: .caution)
         }
-        if let jitter = snapshot.internet.jitter, jitter > 30 {
+        if let jitter = snapshot.measured.jitter, jitter > 30 {
             return answer(.unsteady, String(localized: "Unsteady latency"),
                           String(localized: "Your connection is unsteady: replies vary by \(ms(jitter)). A speed test in Kilobat shows whether other transfers make it worse.", comment: "Siri; the argument is a jitter such as 45 ms"), tone: .caution)
         }
@@ -194,8 +194,8 @@ public enum SiriAnswers {
             return SiriAnswer(title: String(localized: "The internet isn’t answering"), sentence: String(localized: "The internet isn’t answering right now.", comment: "Siri without Kilobat Pro: an outage"),
                               tone: .problem, facts: facts, upsell: String(localized: "Kilobat Pro tells you where it breaks.", comment: "Siri without Kilobat Pro"))
         }
-        guard snapshot.internet.average != nil else { return fine(snapshot, input: input, facts: facts) }
-        let latency = ms(snapshot.internet.average ?? 0), loss = "\(Int((snapshot.internet.lossPercent ?? 0).rounded()).formatted())%"
+        guard snapshot.measured.average != nil else { return fine(snapshot, input: input, facts: facts) }
+        let latency = ms(snapshot.measured.average ?? 0), loss = "\(Int((snapshot.measured.lossPercent ?? 0).rounded()).formatted())%"
         switch snapshot.health {
         case .good, .unknown: return fine(snapshot, input: input, facts: facts)
         case .degraded:
@@ -208,13 +208,13 @@ public enum SiriAnswers {
     }
 
     private static func fine(_ snapshot: DiagnosticSnapshot, input: NetworkDiagnosisInput, facts: [SiriAnswer.Fact]) -> SiriAnswer {
-        guard let latency = snapshot.internet.average else {
+        guard let latency = snapshot.measured.average else {
             let sentence = snapshot.router?.average == nil
                 ? String(localized: "Neither the router nor the internet answered this check. If pages don’t load, turn Wi-Fi off and on, then ask again.", comment: "Siri")
                 : String(localized: "Your router answers, but the ping target didn’t. Some networks block ping, so this alone doesn’t mean the internet is down.", comment: "Siri")
             return SiriAnswer(title: String(localized: "Taking a closer look."), sentence: sentence, tone: .unknown, facts: facts)
         }
-        let loss = Int((snapshot.internet.lossPercent ?? 0).rounded())
+        let loss = Int((snapshot.measured.lossPercent ?? 0).rounded())
         var sentence = loss == 0 ? String(localized: "Your connection looks fine: \(ms(latency)) to the internet and no packet loss.", comment: "Siri; the argument is a latency such as 18 ms")
                                  : String(localized: "Your connection looks fine: \(ms(latency)) to the internet and \(loss)% packet loss.", comment: "Siri; the arguments are a latency such as 18 ms and a percentage")
         if let speed = input.lastSpeed, input.now.timeIntervalSince(speed.date) < 7 * 86_400 {
@@ -227,8 +227,8 @@ public enum SiriAnswers {
 
     static func diagnosisFacts(_ snapshot: DiagnosticSnapshot) -> [SiriAnswer.Fact] {
         var facts: [SiriAnswer.Fact] = []
-        let loss = snapshot.internet.lossPercent
-        facts.append(.init(String(localized: "Internet"), snapshot.internet.average.map(ms) ?? "—", warning: (snapshot.internet.average ?? 0) > 120))
+        let loss = snapshot.measured.lossPercent
+        facts.append(.init(String(localized: "Internet"), snapshot.measured.average.map(ms) ?? "—", warning: (snapshot.measured.average ?? 0) > 120))
         if let loss { facts.append(.init(String(localized: "Packet loss"), "\(Int(loss.rounded()).formatted())%", warning: loss >= 3)) }
         if let router = snapshot.router?.average { facts.append(.init(String(localized: "Router"), ms(router), warning: router > 20)) }
         if let rssi = snapshot.radio.rssi, snapshot.wiredInterface == nil { facts.append(.init(String(localized: "Wi-Fi signal"), "\(rssi.formatted()) dBm", warning: snapshot.radio.health != .good)) }
@@ -361,7 +361,10 @@ public enum SiriAnswers {
         public let used: UInt64
         public let limitGB: Double
         public let cycle: BudgetCycle
-        public init(used: UInt64, limitGB: Double, cycle: BudgetCycle) { self.used = used; self.limitGB = limitGB; self.cycle = cycle }
+        public let packEnds: Date?
+        public init(used: UInt64, limitGB: Double, cycle: BudgetCycle, packEnds: Date? = nil) {
+            self.used = used; self.limitGB = limitGB; self.cycle = cycle; self.packEnds = packEnds
+        }
     }
 
     /// Today's internet use on every network, and the current network's budget when it has one worth saying.
@@ -375,8 +378,15 @@ public enum SiriAnswers {
         if let budget, budget.limitGB > 0 {
             let used = (Double(budget.used) / 1_000_000_000).formatted(.number.precision(.fractionLength(0...1)))
             let fraction = Double(budget.used) / (budget.limitGB * 1_000_000_000)
-            sentence += " " + String(localized: "This network’s budget: \(used) of \(budget.limitGB.formatted()) GB used \(budget.cycle.period.phrase).", comment: "Siri; the arguments are amounts in GB and a period such as “this month”")
-            facts.append(.init(String(localized: "Budget"), budget.cycle.progress(used: budget.used, limitGB: budget.limitGB, now: now, calendar: calendar), warning: fraction >= 0.8))
+            if let end = budget.packEnds {
+                let date = end.formatted(.dateTime.day().month())
+                let progress = String(localized: "\(used) of \(budget.limitGB.formatted()) GB used · ends \(date)", comment: "Prepaid pack usage and end date")
+                sentence += " " + String(localized: "Prepaid pack: \(progress).")
+                facts.append(.init(String(localized: "Prepaid pack"), progress, warning: fraction >= 0.8))
+            } else {
+                sentence += " " + String(localized: "This network’s budget: \(used) of \(budget.limitGB.formatted()) GB used \(budget.cycle.period.phrase).", comment: "Siri; the arguments are amounts in GB and a period such as “this month”")
+                facts.append(.init(String(localized: "Budget"), budget.cycle.progress(used: budget.used, limitGB: budget.limitGB, now: now, calendar: calendar), warning: fraction >= 0.8))
+            }
             if fraction >= 1 { tone = .problem } else if fraction >= 0.8 { tone = .caution }
         }
         return SiriAnswer(title: String(localized: "\(total) today", comment: "Siri snippet title; the argument is an amount such as 3.2 GB"), sentence: sentence, tone: tone, facts: facts)

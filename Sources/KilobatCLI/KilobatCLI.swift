@@ -217,7 +217,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.46.0"
+    static let version = "0.47.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -808,6 +808,7 @@ struct KilobatCLI {
       restrictions --country XX [--json]  What public reports expect in a country. A guide, not a live probe.
       explain <process|host…> [--json]  What a process or host is, how much is normal, what breaks if you block it
         [--process <name> --host <name>]  Ask about one connection: its process and its host together
+      path [--json]         Show filters, VPNs and DNS on this Mac’s network path
       conditions [--json]   Metered, Low Data Mode, VPN, latency, battery and heat, with advice
 
     Control

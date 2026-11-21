@@ -96,6 +96,8 @@ public struct UsageEntry: Codable, Identifiable {
     public var unattributed: UInt64? = nil
     /// The network was metered while these bytes moved, by macOS or by hand; nil when it wasn't or before 1.22.
     public var metered: Bool? = nil
+    /// Network totals kept solely to finish accounting for an active allowance.
+    var allowanceOnly: Bool? = nil
     public var total: UInt64 { received + sent }
 }
 

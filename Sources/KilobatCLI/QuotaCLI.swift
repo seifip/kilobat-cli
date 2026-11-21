@@ -187,13 +187,14 @@ import KilobatCore
     /// App limits, under the name they had as quotas; `mode` (alert or block) was added with limits.
     static func quotasJSON(_ store: TrafficStore, app: [String: Any]?) -> [[String: Any]] {
         let network = currentNetwork(store, app: app), reached = Set(app?["quotaReached"] as? [String] ?? [])
-        return (store.preferences.quotas ?? []).map { quota in
-            let budget = budget(for: quota, store: store, network: network)
-            let used = quota.used(store.usage, budget: budget)
+        let quotas = store.preferences.quotas ?? []
+        return quotas.map { quota -> [String: Any] in
+            let cycle = budget(for: quota, store: store, network: network)
+            let used = store.limitUsed(quota, budget: cycle)
             return ["id": quota.id.uuidString, "name": quota.name, "apps": quota.apps, "limitBytes": quota.bytes, "uploadOnly": quota.uploadOnly,
                     "network": quota.network ?? NSNull(), "networkName": quota.network.flatMap { store.networkSessions[$0]?.name } ?? NSNull(),
                     "usedBytes": used, "reached": used >= quota.bytes || !reached.isDisjoint(with: quota.apps), "mode": quota.effectiveMode.rawValue,
-                    "resets": ISO8601DateFormatter().string(from: quota.resolvedCycle(budget: budget).limitInterval(containing: Date()).end)]
+                    "resets": ISO8601DateFormatter().string(from: quota.resolvedCycle(budget: cycle).limitInterval(containing: Date()).end)]
         }
     }
 }

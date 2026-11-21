@@ -67,6 +67,7 @@ import Observation
     @ObservationIgnored private var watchdog = FastestDNS.Watchdog()
     @ObservationIgnored private var managed: (value: Bool, read: Date)?
     @ObservationIgnored private var last: Context? { didSet { testBlocked = Self.blocked(last) } }
+    @ObservationIgnored private var uninstalling = false
     @ObservationIgnored private var acting = false
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var pending: DNSApplied?
@@ -137,7 +138,7 @@ import Observation
 
     private func pathChanged() async {
         generation = UUID()
-        guard let applied, !acting else { return }
+        guard !uninstalling, let applied, !acting else { return }
         let gateway = await system.gateway()
         guard gateway != applied.gateway else { return }
         await revert(.leftNetwork, now: Date())
@@ -146,7 +147,7 @@ import Observation
     // MARK: Each check
 
     public func observe(_ context: Context, now: Date = Date()) async {
-        guard !inert else { return }
+        guard !uninstalling, !inert else { return }
         if last?.network != context.network || last?.service != context.service ||
             last?.gateway != context.gateway || last?.moment.vpn != context.moment.vpn ||
             last?.moment.portal != context.moment.portal { generation = UUID() }
@@ -269,6 +270,7 @@ import Observation
     }
 
     private func apply(_ target: DNSApplied, with applier: DNSApplying) async throws {
+        guard !uninstalling else { throw DiagnosticError(String(localized: "Kilobat is being uninstalled.")) }
         acting = true; defer { acting = false }
         let expected = applied?.servers ?? []
         guard let current = await system.verifiedServiceServers(target.service), Set(current) == Set(expected), last?.network == target.network, last?.service == target.service else {
@@ -331,7 +333,7 @@ import Observation
         guard pending == nil, !acting else { return .busy }
         acting = true; defer { acting = false }
         guard let current = await system.verifiedServiceServers(done.service) else { return .unreadable }
-        guard Set(current) == Set(done.servers) else { applied = nil; save(); return .nothingToRevert }
+        guard current == done.servers else { applied = nil; save(); return .nothingToRevert }
         guard let applier, applier.available else {
             let message = String(localized: "Kilobat’s helper isn’t available to switch DNS back. Choose Network DNS in Health › DNS.")
             error = message
@@ -339,6 +341,9 @@ import Observation
         }
         do {
             try await applier.apply(servers: [], service: done.service, expecting: done.servers)
+            guard await system.verifiedServiceServers(done.service) == [] else {
+                throw DiagnosticError(String(localized: "Kilobat couldn’t verify the DNS settings."))
+            }
             applied = nil; error = nil; watchdog = FastestDNS.Watchdog()
             log(DNSSwitch(date: now, network: done.network, networkName: done.networkName, from: done.resolver, to: DNSResolverChoice.network.id, reason: reason))
             save()
@@ -351,36 +356,48 @@ import Observation
 
     /// Fix it asked for this resolver now. Through the helper when it's on, so no password, and from automatic DNS as a
     /// tracked switch, so it also goes back for a VPN, a sign-in page, another network or quitting. Otherwise macOS asks.
-    public func useForFix(_ choice: DNSResolverChoice, service: String) async throws -> FixUndo {
-        guard !inert else { return .dns(service: service, previous: [], tracked: false) }
-        let previous = await system.verifiedServiceServers(service)
-        if let applier, applier.available, let previous {
+    public func useForFix(_ choice: DNSResolverChoice, service: String, expecting expected: [String]? = nil) async throws -> FixUndo {
+        guard !uninstalling, !acting, pending == nil else {
+            throw DiagnosticError(String(localized: "Wait for the current DNS change and try again."))
+        }
+        guard !inert else { return .dns(service: service, previous: [], applied: [], tracked: false) }
+        acting = true; defer { acting = false }
+        guard let previous = await system.verifiedServiceServers(service) else {
+            throw DiagnosticError(String(localized: "Kilobat couldn’t read the current DNS settings. Try again in a moment."))
+        }
+        if let expected, expected != previous { throw DiagnosticError(String(localized: "The network or its DNS settings changed.")) }
+        if let applier, applier.available {
             if previous.isEmpty, applied == nil, let last, last.service == service, let network = last.network {
                 try await apply(DNSApplied(network: network, networkName: last.name, service: service, resolver: choice.id, servers: choice.servers, gateway: last.gateway, date: Date()), with: applier)
-                return .dns(service: service, previous: [], tracked: true)
+                return .dns(service: service, previous: [], applied: choice.servers, tracked: true)
             }
             try await applier.apply(servers: choice.servers, service: service, expecting: previous)
             if applied != nil { applied = nil; save() }
-            return .dns(service: service, previous: previous, tracked: false)
+            return .dns(service: service, previous: previous, applied: choice.servers, tracked: false)
         }
-        try await DNSService.set(choice, service: service)
-        return .dns(service: service, previous: previous ?? [], tracked: false)
+        try await DNSService.set(choice, service: service, expecting: previous)
+        return .dns(service: service, previous: previous, applied: choice.servers, tracked: false)
     }
     /// Puts back what `useForFix` changed, leaving the Fastest DNS setting as it was.
-    public func undoFix(service: String, previous: [String], tracked: Bool) async throws {
+    public func undoFix(service: String, previous: [String], expecting expected: [String], tracked: Bool) async throws {
         if tracked {
-            switch await revert(.undo, now: Date()) {
-            case .done, .nothingToRevert: return
-            case .busy, .unreadable:
-                throw DiagnosticError(String(localized: "Kilobat couldn’t put DNS back just now. Try again in a moment.", comment: "Fix it: undoing a DNS change failed because another change is still being verified"))
-            case .failed(let message): throw DiagnosticError(message)
-            }
-        }
-        if let applier, applier.available, let current = await system.verifiedServiceServers(service) {
-            try await applier.apply(servers: previous, service: service, expecting: current)
+            guard let applied, applied.service == service, applied.servers == expected else { return }
+            try await restoreTrackedDNS(reason: .undo)
             return
         }
-        try await DNSService.set(previous.isEmpty ? .network : DNSResolverChoice(id: "fix", name: previous[0], servers: previous), service: service)
+        guard !acting, pending == nil else {
+            throw DiagnosticError(String(localized: "Wait for the current DNS change and try again."))
+        }
+        acting = true; defer { acting = false }
+        guard let current = await system.verifiedServiceServers(service) else {
+            throw DiagnosticError(String(localized: "Kilobat couldn’t read the current DNS settings. Try again in a moment."))
+        }
+        guard current == expected else { return }
+        if let applier, applier.available {
+            try await applier.apply(servers: previous, service: service, expecting: expected)
+            return
+        }
+        try await DNSService.set(previous.isEmpty ? .network : DNSResolverChoice(id: "fix", name: previous[0], servers: previous), service: service, expecting: expected)
     }
 
     /// Undo: back to the network's own DNS, and the setting off for this network so it stays that way.
@@ -389,6 +406,30 @@ import Observation
         disable?(done.network)
         await revert(.undo, now: Date())
     }
+
+    private func restoreTrackedDNS(reason: DNSSwitch.Reason) async throws {
+        switch await revert(reason, now: Date()) {
+        case .done, .nothingToRevert: return
+        case .busy, .unreadable:
+            throw DiagnosticError(String(localized: "Kilobat couldn’t put DNS back just now. Try again in a moment.", comment: "Fix it: undoing a DNS change failed because another change is still being verified"))
+        case .failed(let message): throw DiagnosticError(message)
+        }
+    }
+
+    public func prepareForUninstall() async throws {
+        uninstalling = true
+        do {
+            guard !acting else { throw DiagnosticError(String(localized: "Wait for the current DNS change and try again.")) }
+            if pending != nil { await recoverPending() }
+            guard pending == nil else { throw DiagnosticError(String(localized: "Wait for the current DNS change and try again.")) }
+            try await restoreTrackedDNS(reason: .quit)
+        } catch {
+            uninstalling = false
+            throw error
+        }
+    }
+
+    public func cancelUninstall() { uninstalling = false }
 
     /// On quit Kilobat puts automatic DNS back, so a network joined while it isn't running never inherits its choice.
     /// `automatic` puts automatic DNS back on a service synchronously and says whether it did: the app is

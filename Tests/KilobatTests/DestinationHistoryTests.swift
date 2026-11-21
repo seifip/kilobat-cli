@@ -153,6 +153,25 @@ struct DestinationHistoryTests {
         #expect(named.records.count == 1, "a browser the person added by name")
     }
 
+    @Test func expiredDestinationsAreRemovedFromDiskAfterRecordingStops() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = DestinationHistoryStore(directory: folder, now: t0)
+        store.allowed = { true }
+        store.settings = { DestinationHistorySettings(allApps: true) }
+        store.resolve = { _ in DestinationApp(name: "Slack", browser: false, system: false) }
+        store.consume(sample(0, [connection("203.0.113.5", received: 1, sent: 1)]))
+        store.consume(sample(1, [connection("203.0.113.5", received: 5_000, sent: 5_000)]))
+        store.shutdown()
+        #expect(DestinationHistoryStore(directory: folder, now: t0 + 1).records.count == 1)
+
+        store.settings = { nil }
+        store.consume(sample(31 * 86_400, []))
+        store.shutdown()
+        #expect(store.records.isEmpty)
+        #expect(DestinationHistoryStore(directory: folder, now: t0 + 1).records.isEmpty)
+    }
+
     @Test func eraseAndForgetAnApp() throws {
         let store = store(settings: DestinationHistorySettings(allApps: true))
         store.consume(sample(0, [connection("203.0.113.5", received: 1, sent: 1)]))

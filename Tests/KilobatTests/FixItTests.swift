@@ -338,7 +338,7 @@ struct FixItTests {
         var failing: Set<Int> = []
         var undoFails = false
         init(_ readings: [FixReading]) { self.readings = readings }
-        func actions(steps: [FixStep], undo: FixUndo? = .dns(service: "Wi-Fi", previous: [], tracked: true)) -> FixRunner.Actions {
+        func actions(steps: [FixStep], undo: FixUndo? = .dns(service: "Wi-Fi", previous: [], applied: [], tracked: true)) -> FixRunner.Actions {
             FixRunner.Actions(plan: { steps }, measure: { self.readings.count > 1 ? self.readings.removeFirst() : self.readings[0] }, apply: { step in
                 self.applied.append(step.action)
                 if self.failing.contains(step.id) { throw DiagnosticError("no") }
