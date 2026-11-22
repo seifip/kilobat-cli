@@ -67,7 +67,33 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public let knownDevices = DeviceRegistry()
     /// Connect your router: every device's usage from the router's own counters (Pro).
     public let homeUsage = HomeUsageStore()
-    public var radio: RadioSample?
+    public var radio: RadioSample? {
+        // The first reading after launch isn't a join.
+        didSet { if oldValue != nil, Self.newlyJoined(radio, after: oldValue) { associatedAt = Date(); requestPromptCheck() } }
+    }
+    /// Kilobat's own Join is running, set by the Wi-Fi menu: the menu bar icon cycles its bars meanwhile.
+    public var joining = false
+    /// When the radio last joined a network, for the icon's joining cycle and a prompt first check.
+    public private(set) var associatedAt: Date?
+    /// What the Wi-Fi icon says beyond the signal: joining, sign-in needed, or joined without internet.
+    public func wifiAttention(now: Date = Date()) -> WiFiAttention? {
+        let portalInTheWay = portal.status == .signInNeeded || portal.loggedOut
+        return WiFiAttention.judge(radio: radio, snapshot: snapshot, portalInTheWay: portalInTheWay, joining: joining, associatedAt: associatedAt, now: now)
+    }
+    nonisolated static func newlyJoined(_ radio: RadioSample?, after old: RadioSample?) -> Bool {
+        let joined = radio?.ssid != nil || radio?.rssi != nil, was = old?.ssid != nil || old?.rssi != nil
+        guard joined else { return false }
+        return !was || (radio?.ssid != nil && old?.ssid != nil && radio?.ssid != old?.ssid)
+    }
+    /// A check as soon as the one running finishes, or now: on joining and when the router's address arrives, so a
+    /// sign-in page or a dead connection shows within seconds rather than at the next minute's check.
+    @ObservationIgnored private var promptCheck = false
+    @ObservationIgnored private var lastPromptCheck = Date.distantPast
+    private func requestPromptCheck() {
+        guard Date().timeIntervalSince(lastPromptCheck) > 3 else { return }
+        lastPromptCheck = Date()
+        promptCheck = true; lastCheck = .distantPast; checkPause?.cancel()
+    }
     public var networks: [NearbyNetwork] = []
     /// When `networks` was last scanned, so a room saved from Radar uses a fresh one.
     public private(set) var scannedAt: Date?
@@ -294,7 +320,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                         }
                     }
                 }
-                let delay: Double = self.sleeping ? 2 : self.radar && self.visible ? 0.25 : self.visible ? 2 : 15
+                // Every two seconds while a join is settling, so the menu bar icon follows it.
+                let settling = self.joining || Date().timeIntervalSince(self.associatedAt ?? .distantPast) < WiFiAttention.joinWindow
+                let delay: Double = self.sleeping ? 2 : self.radar && self.visible ? 0.25 : self.visible || settling ? 2 : 15
                 do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             }
         }
@@ -312,9 +340,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                 guard let self else { return }
                 let wait = self.nextCheckDelay() - Date().timeIntervalSince(self.lastCheck)
                 if wait > 0 { await self.pauseChecks(seconds: wait); continue }
+                self.promptCheck = false
                 if !self.sleeping { await self.diagnose() }
-                // Also when the check was skipped (asleep, or one already running): the wait starts again from now.
-                self.lastCheck = Date()
+                // Also when the check was skipped (asleep, or one already running): the wait starts again from now,
+                // unless something asked for a prompt check while this one ran.
+                self.lastCheck = self.promptCheck ? .distantPast : Date()
             }
         }
     }
@@ -491,6 +521,13 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         routeRefresh = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
             await self?.refreshExit(routeChanged: true)
+            // The route changes the moment the router's address arrives: read the radio, and check again when the last
+            // check was taken before it, so the first real check doesn't wait for the next minute.
+            if let self, !self.sleeping {
+                self.radio = await self.probe.radio()
+                if self.radio?.ssid != nil || self.radio?.rssi != nil,
+                   self.snapshot?.gateway == nil || (self.radio?.ssid != nil && self.snapshot?.radio.ssid != self.radio?.ssid) { self.requestPromptCheck() }
+            }
             if self?.deviceNetworks.enabled == true { await self?.deviceNetworks.priority.refresh() }
         }
     }
