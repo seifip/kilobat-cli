@@ -103,8 +103,13 @@ public enum AgentHost {
     }
 
     /// "Claude Code in T3 Code", or the agent alone.
+    /// Inside a named app the brand is enough: "Claude in T3 Code", not "Claude Code in T3 Code"; in a terminal it stays
+    /// "Claude Code".
+    static let shortNames = ["Claude Code": "Claude", "Gemini CLI": "Gemini"]
+
     public static func label(_ agent: String, host: String?) -> String {
         guard let host, !host.isEmpty else { return agent }
+        let agent = shortNames[agent] ?? agent
         return String(localized: "agent.inHost", defaultValue: "\(agent) in \(host)",
                       comment: "An AI agent and the desktop app it runs in, such as “Claude Code in T3 Code”; the arguments are the agent and the app")
     }

@@ -61,11 +61,13 @@ struct AgentHostTests {
     }
 
     @Test func labelSaysWhereItRan() {
-        #expect(AgentHost.label("Claude Code", host: "T3 Code") == "Claude Code in T3 Code")
+        #expect(AgentHost.label("Claude Code", host: "T3 Code") == "Claude in T3 Code")
+        #expect(AgentHost.label("Claude Code", host: nil) == "Claude Code")
+        #expect(AgentHost.label("Codex", host: "T3 Code") == "Codex in T3 Code")
         #expect(AgentHost.label("Claude Code", host: nil) == "Claude Code")
         let detail = ProtectionDetail(kind: .agentGuard, list: "paste site", host: "paste.example", agent: "Claude Code", process: "curl", agentHostApp: "T3 Code")
-        #expect(detail.agentLabel == "Claude Code in T3 Code")
-        #expect(ProtectionText.who(detail, app: "curl") == "curl (started by Claude Code in T3 Code)")
+        #expect(detail.agentLabel == "Claude in T3 Code")
+        #expect(ProtectionText.who(detail, app: "curl") == "curl (started by Claude in T3 Code)")
     }
 
     @Test func treeRecordsTheHostAndKeepsTheAgent() {
@@ -111,7 +113,7 @@ struct AgentHostTests {
                                         first: hosted.start, last: hosted.start, sent: 10)]
         let entry = try #require(AgentNetworkLog.report([hosted]).first)
         #expect(entry.agentID == "claude")
-        #expect(entry.title == "Claude Code in T3 Code")
+        #expect(entry.title == "Claude in T3 Code")
         #expect(AgentLogQuery(agent: "claude").matches(entry))
     }
 
@@ -119,7 +121,7 @@ struct AgentHostTests {
         var run = WorkSession(kind: .agent, title: "Claude Code", start: Date(), lastActive: Date())
         #expect(run.label == "Claude Code")
         run.hostApp = "Conductor"
-        #expect(run.label == "Claude Code in Conductor")
+        #expect(run.label == "Claude in Conductor")
         #expect(run.title == "Claude Code")
     }
 }
