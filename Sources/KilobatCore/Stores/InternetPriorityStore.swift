@@ -86,7 +86,7 @@ import Observation
             return
         }
         // A hold from before stays the one to go back to: the order the person had, not one Kilobat made.
-        let previous = hold?.previous ?? current
+        let previous = hold.flatMap { $0.applied == current ? $0.previous : nil } ?? current
         do {
             try await applier.apply(order: order, expected: current, prompt: true)
             let saved = PriorityHold(service: route.service, interface: route.interface, previous: previous, applied: order, wifi: wifi)

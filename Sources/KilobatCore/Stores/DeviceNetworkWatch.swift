@@ -33,7 +33,6 @@ import Observation
         await DeviceFinder.run(network: network, gateway: gateway, interface: interface)
     }
     @ObservationIgnored private var lastOrdinary: String?
-    @ObservationIgnored private var found: [String: DeviceFinding] = [:]
     @ObservationIgnored private var generation = UUID()
 
     public init(priority: InternetPriorityStore = InternetPriorityStore(), notes: DeviceNotesStore = DeviceNotesStore()) {
@@ -65,8 +64,15 @@ import Observation
         let wifiRoute = priority.routes.first { $0.kind == .wifi }
         let ssid = sample.radio.ssid
         let wifiPrimary = wifiRoute?.primary ?? (sample.wiredInterface == nil)
-        let changed = ssid != self.ssid
-        self.ssid = ssid; gateway = wifiRoute?.router ?? (wifiPrimary ? sample.gateway : nil); interface = wifiRoute?.interface ?? sample.radio.interface
+        let router = wifiRoute?.router ?? (wifiPrimary ? sample.gateway : nil)
+        let deviceInterface = wifiRoute?.interface ?? sample.radio.interface
+        if ssid != self.ssid || router != gateway || deviceInterface != interface {
+            generation = UUID()
+            finding = nil
+            searching = false
+            link.stop()
+        }
+        self.ssid = ssid; gateway = router; interface = deviceInterface
 
         let saved = DeviceNotesStore.networks()
         var next: Mode?
@@ -89,7 +95,6 @@ import Observation
             await priority.leaveDevice(reason: String(localized: "You left \(wifi), so Kilobat put Wi-Fi first again.", comment: "Internet priority notice; the argument is the device's Wi-Fi name"))
         }
 
-        if changed { generation = UUID(); finding = ssid.flatMap { found[$0] } }
         if case .device = next {
             if finding == nil, !searching { await find() }
             if let address = deviceAddress { link.watch(address, name: deviceName) }
@@ -99,11 +104,10 @@ import Observation
     /// Looks for the device: the router, Bonjour names and the common ports. "Find again".
     public func find() async {
         guard !searching else { return }
-        let generation = self.generation, ssid = self.ssid
+        let generation = self.generation
         searching = true; defer { if self.generation == generation { searching = false } }
         let result = await runFinder(ssid, gateway, interface)
         guard self.generation == generation else { return }
-        if let ssid { found[ssid] = result }
         finding = result
         if case .device = mode, let address = deviceAddress { link.watch(address, name: deviceName) }
     }

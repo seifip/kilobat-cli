@@ -205,6 +205,16 @@ struct DeviceNetworkTests {
         #expect(store.hold == nil && PriorityHold.load(defaults) == nil)
     }
 
+    @MainActor @Test func switchingAgainPreservesManualChanges() async {
+        let (store, applier, _) = store(automatic: true, routes: [wifi, phone])
+        await store.use(phone, wifi: nil)
+        let manual = ["Thunderbolt Bridge", "Wi-Fi", "iPhone USB"]
+        applier.order = manual
+        await store.use(phone, wifi: nil)
+        await store.turnOff()
+        #expect(applier.order == manual)
+    }
+
     @MainActor @Test func leavesAnOrderChangedElsewhere() async {
         let (store, applier, _) = store(automatic: true, routes: [wifi, phone])
         await store.use(phone, wifi: nil)
@@ -315,10 +325,20 @@ struct DeviceNetworkTests {
         #expect(watch.match?.rule == "unitree-go2" && watch.gateway == "192.168.12.1" && looked == 1)
         watch.link.stop()
 
+        // A manual rescan finishes after the Mac leaves Wi-Fi.
+        var pending: CheckedContinuation<DeviceFinding, Never>?
+        watch.runFinder = { _, _, _ in await withCheckedContinuation { pending = $0 } }
+        let scan = Task { await watch.find() }
+        while pending == nil { await Task.yield() }
+
         // Back on an ordinary Wi-Fi: the order goes back through the helper.
         routes = [home, carrying]
         await watch.observe(snapshot(ssid: "Venue Guest", wired: "en8", internet: true), portal: false)
         #expect(watch.mode == nil && priority.hold == nil && applier.order == ["Wi-Fi", "iPhone USB"])
+
+        pending?.resume(returning: DeviceFinding(network: "old", devices: []))
+        await scan.value
+        #expect(!watch.searching && watch.finding == nil)
 
         // A Wi-Fi with no internet that matches nothing: not a device network, but the switch is offered.
         routes = [wifi, phone]
@@ -443,6 +463,18 @@ struct DeviceNetworkTests {
         #expect(DeviceNote(name: " ", kind: .robot).cleaned() == nil)
         #expect(DeviceNote(name: "Cam", kind: .camera, address: "192.168.1.9").openURL?.absoluteString == "http://192.168.1.9")
         #expect(DeviceNote(name: "Cam", kind: .camera, address: "camera.local", webURL: "javascript:alert(1)").openURL == nil)
+    }
+
+    @MainActor @Test func preservesDeviceNotesWhenKeychainIsLocked() {
+        let defaults = UserDefaults(suiteName: "kilobat-locked-" + UUID().uuidString)!
+        let locked = DevicePasswords(get: { _ in nil }, set: { _, _ in -25308 }, remove: { _ in -25308 })
+        let notes = DeviceNotesStore(defaults: defaults, keychain: locked)
+        var note = DeviceNote(name: "Rover", kind: .robot)
+        #expect(notes.save(note, password: nil))
+        note.name = "Updated"
+        #expect(!notes.save(note, password: "password"))
+        #expect(!notes.delete(note.id))
+        #expect(notes.notes.first?.name == "Rover" && notes.keychainError != nil)
     }
 
     @MainActor @Test func keepsPasswordsOutOfDefaults() throws {

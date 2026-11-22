@@ -59,21 +59,29 @@ public struct DeviceNote: Codable, Equatable, Sendable, Identifiable {
         return out
     }
 
+    public private(set) var keychainError: String?
+
+    private func check(_ status: OSStatus) -> Bool {
+        keychainError = status == errSecSuccess ? nil : NSError(domain: NSOSStatusErrorDomain, code: Int(status)).localizedDescription
+        return status == errSecSuccess
+    }
+
     public func note(ssid: String?) -> DeviceNote? { ssid.flatMap { ssid in notes.first { $0.ssid == ssid } } }
 
     /// Saves `note` (new or edited). `password`: nil leaves the saved one as it is, empty removes it.
     @discardableResult public func save(_ note: DeviceNote, password: String?) -> Bool {
         guard let clean = note.cleaned() else { return false }
+        if let password, !check(password.isEmpty ? keychain.remove(clean.id) : keychain.set(password, clean.id)) { return false }
         if let index = notes.firstIndex(where: { $0.id == clean.id }) { notes[index] = clean } else { notes.append(clean) }
         notes.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         persist()
-        if let password { password.isEmpty ? keychain.remove(clean.id) : keychain.set(password, clean.id) }
         return true
     }
 
-    public func delete(_ id: UUID) {
+    @discardableResult public func delete(_ id: UUID) -> Bool {
+        guard check(keychain.remove(id)) else { return false }
         notes.removeAll { $0.id == id }
-        persist(); keychain.remove(id)
+        persist(); return true
     }
 
     public func password(_ id: UUID) -> String? { keychain.get(id) }
@@ -89,9 +97,9 @@ public struct DeviceNote: Codable, Equatable, Sendable, Identifiable {
 /// note's ID), readable only on this Mac and only while it's unlocked.
 public struct DevicePasswords: Sendable {
     public let get: @Sendable (UUID) -> String?
-    public let set: @Sendable (String, UUID) -> Void
-    public let remove: @Sendable (UUID) -> Void
-    public init(get: @escaping @Sendable (UUID) -> String?, set: @escaping @Sendable (String, UUID) -> Void, remove: @escaping @Sendable (UUID) -> Void) {
+    public let set: @Sendable (String, UUID) -> OSStatus
+    public let remove: @Sendable (UUID) -> OSStatus
+    public init(get: @escaping @Sendable (UUID) -> String?, set: @escaping @Sendable (String, UUID) -> OSStatus, remove: @escaping @Sendable (UUID) -> OSStatus) {
         self.get = get; self.set = set; self.remove = remove
     }
 
@@ -115,17 +123,21 @@ public struct DevicePasswords: Sendable {
                 item[kSecValueData as String] = data
                 item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
                 item[kSecAttrLabel as String] = "Kilobat device Wi-Fi"
-                SecItemAdd(item as CFDictionary, nil)
+                return SecItemAdd(item as CFDictionary, nil)
             }
+            return status
         },
-        remove: { id in SecItemDelete(DevicePasswords.query(id) as CFDictionary) })
+        remove: { id in
+            let status = SecItemDelete(DevicePasswords.query(id) as CFDictionary)
+            return status == errSecItemNotFound ? errSecSuccess : status
+        })
 
     /// In memory, for tests and screenshots.
     public static func memory() -> DevicePasswords {
         final class Box: @unchecked Sendable { var values: [UUID: String] = [:]; let lock = NSLock() }
         let box = Box()
         return DevicePasswords(get: { id in box.lock.withLock { box.values[id] } },
-                               set: { password, id in box.lock.withLock { box.values[id] = password } },
-                               remove: { id in _ = box.lock.withLock { box.values.removeValue(forKey: id) } })
+                               set: { password, id in box.lock.withLock { box.values[id] = password; return errSecSuccess } },
+                               remove: { id in box.lock.withLock { box.values.removeValue(forKey: id); return errSecSuccess } })
     }
 }
