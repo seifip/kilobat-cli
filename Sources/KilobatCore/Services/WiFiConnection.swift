@@ -10,6 +10,12 @@ public struct WiFiChoice: Identifiable, Sendable {
     public let enterprise: Bool
     public let weakSecurity: Bool
     public let known: Bool
+    public init(id: String, name: String, signal: Int, band: String, secured: Bool, enterprise: Bool, weakSecurity: Bool, known: Bool) {
+        self.id = id; self.name = name; self.signal = signal; self.band = band
+        self.secured = secured; self.enterprise = enterprise; self.weakSecurity = weakSecurity; self.known = known
+    }
+    /// Saved and open networks join on a click, as macOS does; only a new secured network (or an enterprise one) asks first.
+    public var joinsOnClick: Bool { !enterprise && (known || !secured) }
 }
 public struct WiFiChoices: Sendable {
     public let powered: Bool
