@@ -86,6 +86,15 @@ struct KilobatCLI {
             }
         case "update":
             try allow(args, [])
+            let current = await CommandLineTool.installed()
+            if let app = CommandLineTool.appCopy() {
+                // The app's copy updates with every app update, so linking it is the lasting fix.
+                if current?.source == .app { print("kilobat comes with Kilobat.app and updates with it. This is version \(version)."); return }
+                let folder = try await CommandLineTool.link(to: app, replacing: current)
+                let linked = await CommandLineTool.version(of: app) ?? "unknown"
+                print("kilobat and kb in \(folder) now use Kilobat.app's copy (version \(linked)), which updates with the app.")
+                return
+            }
             let path = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
             guard path.contains("/Cellar/") else {
                 print("This copy was not installed with Homebrew.")
@@ -217,7 +226,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.48.0"
+    static let version = "0.49.0"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -889,7 +898,7 @@ struct KilobatCLI {
       doctor <url|host>     The same connection check as why
       completion [shell]    Print a zsh, bash or fish completion script
       mcp                   MCP server for AI agents over stdio
-      update                Update a Homebrew install
+      update                Use Kilobat.app's copy, which updates with the app (or brew upgrade without the app)
       version|--version     Print version
       help [command]        Show this help, or one command's usage
 
