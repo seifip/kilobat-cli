@@ -71,6 +71,29 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         // The first reading after launch isn't a join.
         didSet { if oldValue != nil, Self.newlyJoined(radio, after: oldValue) { associatedAt = Date(); requestPromptCheck() } }
     }
+    /// Whether the router has given the Wi-Fi an address, read with each radio sample.
+    public private(set) var wifiAddressed = false
+    /// Reads the radio and whether it has an address, the address first so views see the two together.
+    private func readRadio() async {
+        let sample = await probe.radio()
+        let addressed = sample.interface.map { DiagnosticProbe.addressState(of: $0) == .assigned } ?? false
+        if wifiAddressed != addressed { wifiAddressed = addressed }
+        radio = sample
+    }
+    @ObservationIgnored private var wifiEvents: WiFiEventWatch?
+    @ObservationIgnored private var wifiEventRead: Task<Void, Never>?
+    /// Wi-Fi switched on or off, joined or left a network: read the radio now, as macOS's own icon changes now, and
+    /// once more shortly after for the address, which arrives a moment later without an event of its own.
+    private func wifiDidChange() {
+        wifiEventRead?.cancel()
+        wifiEventRead = Task { [weak self] in
+            for delay in [0.15, 1.5] {
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                guard let self, !self.sleeping else { return }
+                await self.readRadio()
+            }
+        }
+    }
     /// Kilobat's own Join is running, set by the Wi-Fi menu: the menu bar icon cycles its bars meanwhile.
     public var joining = false
     /// When the radio last joined a network, for the icon's joining cycle and a prompt first check.
@@ -78,7 +101,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     /// What the Wi-Fi icon says beyond the signal: joining, sign-in needed, or joined without internet.
     public func wifiAttention(now: Date = Date()) -> WiFiAttention? {
         let portalInTheWay = portal.status == .signInNeeded || portal.loggedOut
-        return WiFiAttention.judge(radio: radio, snapshot: snapshot, portalInTheWay: portalInTheWay, joining: joining, associatedAt: associatedAt, now: now)
+        return WiFiAttention.judge(radio: radio, snapshot: snapshot, portalInTheWay: portalInTheWay, joining: joining, associatedAt: associatedAt,
+                                   addressed: wifiAddressed, now: now)
     }
     nonisolated static func newlyJoined(_ radio: RadioSample?, after old: RadioSample?) -> Bool {
         let joined = radio?.ssid != nil || radio?.rssi != nil, was = old?.ssid != nil || old?.rssi != nil
@@ -306,9 +330,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             while !Task.isCancelled {
                 guard let self else { return }
                 if !self.sleeping {
-                    let sample = await self.probe.radio()
-                    self.radio = sample
-                    if self.radar && self.visible, let score = sample.score {
+                    await self.readRadio()
+                    if self.radar && self.visible, let score = self.radio?.score {
                         self.signalHistory = Array((self.signalHistory + [Double(score)]).suffix(120))
                         self.bestScore = max(self.bestScore, score)
                         let direction = self.guidance
@@ -329,6 +352,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     public func start() {
         startRadio()
+        if wifiEvents == nil {
+            wifiEvents = WiFiEventWatch { [weak self] in Task { @MainActor in self?.wifiDidChange() } }
+            wifiEvents?.start()
+        }
         if routeWatch == nil {
             routeWatch = RouteWatch { [weak self] in Task { @MainActor in self?.routeDidChange() } }
             routeWatch?.start()
@@ -524,7 +551,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             // The route changes the moment the router's address arrives: read the radio, and check again when the last
             // check was taken before it, so the first real check doesn't wait for the next minute.
             if let self, !self.sleeping {
-                self.radio = await self.probe.radio()
+                await self.readRadio()
                 if self.radio?.ssid != nil || self.radio?.rssi != nil,
                    self.snapshot?.gateway == nil || (self.radio?.ssid != nil && self.snapshot?.radio.ssid != self.radio?.ssid) { self.requestPromptCheck() }
             }

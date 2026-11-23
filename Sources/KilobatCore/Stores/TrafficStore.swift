@@ -56,6 +56,9 @@ public final class TrafficStore {
     }
     public var networkName = "Current session"
     public var networkSessions: [String: NetworkSession] = [:]
+    /// Wi-Fi names macOS called metered at their last check, newest last: a phone's hotspot is known the moment it's
+    /// joined again, before the first check there says which network this is.
+    public private(set) var hotspotNames: [String] = []
     /// When the Mac slept, so a gap in the history can say so. A sleep that ends in a shutdown has no wake and isn't kept.
     public private(set) var sleeps: [DateInterval] = []
     private var sleptAt: Date?
@@ -131,6 +134,7 @@ public final class TrafficStore {
         lastPreferencesData = try? Data(contentsOf: self.directory.appendingPathComponent("preferences.json"))
         Self.writer.sync {}
         networkSessions = StoredJSON.read(self.directory.appendingPathComponent("network-sessions.json"), quarantine: ownsFiles) ?? [:]
+        hotspotNames = StoredJSON.read(self.directory.appendingPathComponent("hotspot-names.json")) ?? []
         let savedUsage = UsageFile.read(self.directory, includesAllowances: true)
         usage = Self.compact(savedUsage.filter { $0.allowanceOnly != true }, packs: preferences.dataPacks ?? [])
         allowanceHistory = savedUsage.filter { $0.allowanceOnly == true }
@@ -363,7 +367,25 @@ public final class TrafficStore {
         preferences = next
         return true
     }
+    /// Whether the joined Wi-Fi named `ssid` shows as a hotspot. Once a check has said which network this is, its
+    /// data cost decides. Until then, right after joining: a cost set by hand for a network of this name, what macOS
+    /// said of it last time, or what macOS says now that the router has given the Mac an address (`addressed`).
+    public func showsAsHotspot(ssid: String?, addressed: Bool) -> Bool {
+        guard let ssid else { return false }
+        if networkName == ssid { return metered }
+        let costs = networkSessions.filter { $0.value.name == ssid }.map { preferences.cost(of: $0.key) }
+        if costs.contains(.metered) { return true }
+        if !costs.isEmpty, costs.allSatisfy({ $0 == .unmetered }) { return false }
+        return hotspotNames.contains(ssid) || (addressed && osExpensive)
+    }
+    /// Keeps `hotspotNames` in step with what macOS says of the Wi-Fi this check ran on.
+    private func noteHotspot(_ snapshot: DiagnosticSnapshot) {
+        guard connected, snapshot.wiredInterface == nil, let ssid = snapshot.radio.ssid, hotspotNames.contains(ssid) != osExpensive else { return }
+        hotspotNames = Array((hotspotNames.filter { $0 != ssid } + (osExpensive ? [ssid] : [])).suffix(50))
+        if ownsFiles { persist(hotspotNames, as: "hotspot-names.json") }
+    }
     public func switchNetwork(_ snapshot: DiagnosticSnapshot) {
+        noteHotspot(snapshot)
         guard networkKey != snapshot.networkKey else {
             networkName = snapshot.networkName; networkIdentified = snapshot.networkIdentified
             costChanged()

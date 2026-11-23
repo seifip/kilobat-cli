@@ -165,14 +165,21 @@ struct RadioComparisonTests {
     private let slow = RadioReading(medianMs: 5, p95Ms: 9, spikes: 0, downloadMbps: 160)
     private let fast = RadioReading(medianMs: 5, p95Ms: 8, spikes: 0, downloadMbps: 380)
 
-    /// Answers each question as it comes, until the run ends.
+    /// Answers each question as it comes, until the run ends. Each question is answered once: the phase stays on it
+    /// until the run takes its next turn, which on a busy machine can be after this loop's. A run that never ends is
+    /// stopped rather than awaited for ever.
     private func drive(_ runner: RadioCheckRunner, answers: [Bool]) async {
-        var answers = answers
+        var answers = answers, answered: RadioCheckRunner.Phase?
         let task = Task { await runner.run() }
-        for _ in 0..<200 where !runner.finished {
-            if case .confirming = runner.phase { answers.isEmpty ? runner.stop() : (answers.removeFirst() ? runner.proceed() : runner.skip()) }
+        let deadline = ContinuousClock.now + .seconds(20)
+        while !runner.finished, ContinuousClock.now < deadline {
+            if case .confirming = runner.phase, runner.phase != answered {
+                answered = runner.phase
+                answers.isEmpty ? runner.stop() : (answers.removeFirst() ? runner.proceed() : runner.skip())
+            }
             await Task.yield()
         }
+        if !runner.finished { runner.stop() }
         await task.value
     }
 

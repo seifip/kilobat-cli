@@ -26,6 +26,43 @@ struct WiFiAttentionTests {
         #expect(judge(sample(at: 6, replies: [12, 13]), at: 8) == nil)
     }
 
+    @Test func theJoinEndsWhenTheRouterGivesAnAddress() {
+        func addressed(_ snapshot: DiagnosticSnapshot?, at offset: TimeInterval) -> WiFiAttention? {
+            WiFiAttention.judge(radio: radio(), snapshot: snapshot, portalInTheWay: false, joining: false, associatedAt: joinedAt, addressed: true,
+                                now: joinedAt.addingTimeInterval(offset))
+        }
+        // As macOS's icon: the bars stop cycling with the address, before the first check has finished.
+        #expect(addressed(nil, at: 3) == nil)
+        // A check taken before the address arrived doesn't say there's none, in the join window or after it.
+        #expect(addressed(sample(at: 1, gateway: nil), at: 5) == nil)
+        #expect(addressed(sample(at: 1, gateway: nil), at: 45) == nil)
+        // The first real check still decides.
+        #expect(addressed(sample(at: 6), at: 8) == .noInternet)
+        // Kilobat's own Join keeps cycling until it returns.
+        #expect(WiFiAttention.judge(radio: radio(), snapshot: nil, portalInTheWay: false, joining: true, associatedAt: joinedAt, addressed: true, now: joinedAt) == .connecting)
+    }
+
+    @Test @MainActor func aHotspotIsKnownTheMomentItIsJoinedAgain() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("kilobat-hotspot-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: dir) }
+        let store = TrafficStore(directory: dir, startMonitoring: false, ownsFiles: true)
+        // A network never seen: nothing says hotspot until the address is in and macOS calls the connection metered.
+        #expect(!store.showsAsHotspot(ssid: "iPhone", addressed: false))
+        store.pathChanged(connected: true, expensive: true, kind: "Wi-Fi")
+        #expect(!store.showsAsHotspot(ssid: "iPhone", addressed: false))
+        #expect(store.showsAsHotspot(ssid: "iPhone", addressed: true))
+        // Its first check: the store is on it, and remembers it.
+        store.switchNetwork(sample(at: 6, ssid: "iPhone", replies: [20]))
+        #expect(store.showsAsHotspot(ssid: "iPhone", addressed: true))
+        // Home Wi-Fi, then the hotspot again: known before any address or check.
+        store.pathChanged(connected: true, expensive: false, kind: "Wi-Fi")
+        store.switchNetwork(sample(at: 60, ssid: "Home", replies: [8]))
+        #expect(!store.showsAsHotspot(ssid: "Home", addressed: true))
+        #expect(store.showsAsHotspot(ssid: "iPhone", addressed: false))
+        #expect(TrafficStore(directory: dir, startMonitoring: false).hotspotNames == ["iPhone"])
+        #expect(!store.showsAsHotspot(ssid: nil, addressed: true))
+    }
+
     @Test func noAddressOnceTheJoinWindowPasses() {
         #expect(judge(sample(at: 1, gateway: nil), at: 45) == .noAddress)
     }

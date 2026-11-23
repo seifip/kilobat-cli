@@ -17,8 +17,10 @@ public enum WiFiAttention: Equatable, Sendable {
 
     /// `joining`: Kilobat's own Join is running. `associatedAt`: when the radio last joined a network. A check counts
     /// only when it was taken on the network the radio is on now, after it joined, in the last three minutes.
+    /// `addressed`: the router has given the Wi-Fi an address. The join is over then, as it is for macOS's own icon,
+    /// and a check taken before the address arrived no longer says there is none.
     public static func judge(radio: RadioSample?, snapshot: DiagnosticSnapshot?, portalInTheWay: Bool, joining: Bool,
-                             associatedAt: Date?, now: Date = Date()) -> WiFiAttention? {
+                             associatedAt: Date?, addressed: Bool = false, now: Date = Date()) -> WiFiAttention? {
         guard let radio, radio.ssid != nil || radio.rssi != nil else { return nil }
         if joining { return .connecting }
         let fresh = snapshot.flatMap { sample -> DiagnosticSnapshot? in
@@ -27,9 +29,9 @@ public enum WiFiAttention: Equatable, Sendable {
             return sample
         }
         if portalInTheWay, fresh != nil { return .signIn }
-        if let associatedAt, now.timeIntervalSince(associatedAt) < joinWindow, fresh?.gateway == nil { return .connecting }
+        if let associatedAt, now.timeIntervalSince(associatedAt) < joinWindow, fresh?.gateway == nil { return addressed ? nil : .connecting }
         guard let fresh, fresh.setupNetwork == nil else { return nil }
-        if fresh.gateway == nil { return .noAddress }
+        if fresh.gateway == nil { return addressed ? nil : .noAddress }
         return fresh.reachability == .down ? .noInternet : nil
     }
 }
