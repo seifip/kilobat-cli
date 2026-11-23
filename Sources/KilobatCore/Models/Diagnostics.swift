@@ -39,6 +39,8 @@ public struct RadioSample: Codable, Sendable, Equatable {
     public var transmitPowerDBm: Int? = nil
     /// The regulatory country the Wi-Fi reports, when CoreWLAN provides it.
     public var countryCode: String? = nil
+    /// True when Wi-Fi is switched off or the Mac has none; nil while it's on, joined or not.
+    public var radioOff: Bool? = nil
     public var securityInfo: WiFiLink.Security? { security.flatMap(WiFiLink.security(named:)) }
     public var snr: Int? { guard let rssi, let noise else { return nil }; return rssi - noise }
     public var score: Int? { rssi.map { min(100, max(0, ($0 + 90) * 2)) } }

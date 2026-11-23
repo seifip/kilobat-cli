@@ -88,8 +88,10 @@ public enum CommandRunner {
 public actor DiagnosticProbe {
     public init() {}
     public func radio() -> RadioSample {
-        guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn(), wifi.wlanChannel() != nil else {
-            return RadioSample(ssid: nil, interface: nil, rssi: nil, noise: nil, transmitMbps: nil, channel: nil, band: nil)
+        let wifi = CWWiFiClient.shared().interface()
+        guard let wifi, wifi.powerOn(), wifi.wlanChannel() != nil else {
+            return RadioSample(ssid: nil, interface: nil, rssi: nil, noise: nil, transmitMbps: nil, channel: nil, band: nil,
+                               radioOff: wifi?.powerOn() != true ? true : nil)
         }
         let channel = wifi.wlanChannel()
         let noise = wifi.noiseMeasurement()
