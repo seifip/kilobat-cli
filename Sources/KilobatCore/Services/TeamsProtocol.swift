@@ -97,7 +97,8 @@ public struct TeamsSpool: Codable, Sendable {
         if pending.count >= 5 || pending.first.map({ now.timeIntervalSince($0.observedAt) >= 300 }) == true { sealPending() }
     }
     public mutating func acknowledge(_ batchID: String) { batches.removeAll { $0.batchId == batchID } }
-    public func save(to url: URL) throws { try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); try TeamsJSON.encoder().encode(self).write(to: url, options: [.atomic, .completeFileProtection]); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
+    /// Readable from the first unlock on, not only while unlocked: health samples keep being saved while the screen is locked.
+    public func save(to url: URL) throws { try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); try TeamsJSON.encoder().encode(self).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]); try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
 }
 /// Only genuinely forced configuration counts as MDM. Ordinary local defaults cannot enrol a Mac.
 public enum TeamsManagedPreferences {
