@@ -143,11 +143,12 @@ public enum AgentDetector {
         let codexApp = env.app(["Codex.app"])
         let chatGPTCodex = env.app(["ChatGPT.app"]).map { $0 + "/Contents/Resources/codex-cli/bin/codex" }.flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil }
         if codexApp != nil || env.tool("codex") != nil || chatGPTCodex != nil {
-            found.append(DetectedAgent(kind: .codex, name: "Codex", appPath: codexApp))
+            // Codex lives in the ChatGPT app too, so ChatGPT's icon stands for it when there's no Codex app.
+            found.append(DetectedAgent(kind: .codex, name: "Codex", appPath: codexApp ?? env.app(["ChatGPT.app"])))
         }
         let cursor = env.app(["Cursor.app"])
         if cursor != nil || env.tool("cursor-agent") != nil { found.append(DetectedAgent(kind: .cursor, name: "Cursor", appPath: cursor)) }
-        if env.tool("gemini") != nil { found.append(DetectedAgent(kind: .gemini, name: "Gemini CLI", appPath: nil)) }
+        if env.tool("gemini") != nil { found.append(DetectedAgent(kind: .gemini, name: "Gemini", appPath: nil)) }
         let code = env.app(["Visual Studio Code.app", "Visual Studio Code - Insiders.app"])
         if code != nil || env.tool("copilot") != nil {
             found.append(DetectedAgent(kind: .copilot, name: code != nil ? "VS Code" : "Copilot CLI", appPath: code))
