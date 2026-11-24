@@ -12,8 +12,8 @@ import Testing
         #expect(ProLock.shown(false, pro: true) == false)
     }
     @Test func lockedTitleIsMarkedOnce() {
-        #expect(ProLock.title("Export Usage…", pro: false) == "Export Usage… · Pro")
-        #expect(ProLock.title("Export Usage…", pro: true) == "Export Usage…")
+        #expect(ProLock.title("Export usage…", pro: false) == "Export usage… · Pro")
+        #expect(ProLock.title("Export usage…", pro: true) == "Export usage…")
     }
     @Test func settingThatStillActsShowsItsStateAndCanOnlyBeTurnedOff() {
         #expect(ProLock.shown(true, pro: false, stillActs: true) == true)
