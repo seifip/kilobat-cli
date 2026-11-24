@@ -28,7 +28,7 @@ public enum AgentIdentifier {
     /// Desktop apps that run agents: their own and the commands, MCP servers and terminals they start.
     static let apps: [String: AgentIdentity] = [
         "Cursor.app": AgentIdentity(id: "cursor", name: "Cursor", app: true), "Windsurf.app": AgentIdentity(id: "windsurf", name: "Windsurf", app: true),
-        "Claude.app": AgentIdentity(id: "claude-desktop", name: "Claude Desktop", app: true), "ChatGPT.app": AgentIdentity(id: "chatgpt", name: "ChatGPT", app: true),
+        "Claude.app": AgentIdentity(id: "claude-desktop", name: "Claude", app: true), "ChatGPT.app": AgentIdentity(id: "chatgpt", name: "ChatGPT", app: true),
         "T3 Code.app": AgentIdentity(id: "t3code", name: "T3 Code", app: true), "T3 Code (Beta).app": AgentIdentity(id: "t3code", name: "T3 Code", app: true),
         "Conductor.app": AgentIdentity(id: "conductor", name: "Conductor", app: true), "Codex.app": AgentIdentity(id: "codex-app", name: "Codex app", app: true)]
 

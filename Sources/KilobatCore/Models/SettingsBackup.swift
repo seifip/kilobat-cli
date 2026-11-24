@@ -392,6 +392,8 @@ public enum SettingsFile {
             "onboarding.done", "loginItemDefaulted", "hints.firstSeen", "hints.lastShown", "hints.menuOpens", "hints.seen", "blockAlertsSent", "serviceAlertsSent",
             CreditAlert.notifiedKey, CreditAlert.lastKey, "digest.last", "dns.offerDismissed", "bluetoothAudioLastAlert", "share.week.dismissed",
             "share.year.invited", "steam.warned", "killSwitch.armedBoot", "fixit.portalDNSHold", "internetPriority.hold", "radioCheck.bluetoothOff", "awake.powerOff", "awake.askedAlerts", "cli.autoLinked",
+            // Which agents on this Mac Kilobat connected, so its skills there are refreshed after an update.
+            "agents.connected",
             // Product analytics: consent is a choice made on the Mac that sends it.
             "measurement.enabled", "measurement.token", "measurement.id", "measurement.primary", "measurement.secondary", "measurement.reason", "measurement.reasonAsked",
             "measurement.source", "measurement.campaign", "measurement.activated", "measurement.activationEventID", "measurement.firstValue", "measurement.invitationSeen",
