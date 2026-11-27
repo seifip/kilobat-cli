@@ -85,7 +85,7 @@ public actor FritzBox: RouterReader {
             if maxima?.down == nil { maxima = link.map(TR064.linkMax) }
         }
         let wan = RouterWAN(down: received, up: sent, downRate: rates?.down, upRate: rates?.up, bits: 32, downMax: maxima?.down, upMax: maxima?.up)
-        var poll = RouterPoll(clients: clients, wan: wan, uptime: info?["NewUpTime"].flatMap { Double($0) },
+        var poll = RouterPoll(clients: clients, wan: wan, uptime: RouterHTTP.uptime(info?["NewUpTime"].flatMap { Double($0) }),
                               model: info?["NewModelName"], firmware: info?["NewSoftwareVersion"], perDevice: false, missing: limited ? ["rights"] : [])
         poll.update = try await firmware(installed: info?["NewSoftwareVersion"])
         poll.dsl = try await optional(Self.dsl, "X_AVM-DE_GetDSLInfo").flatMap(RouterDSLLine.init(info:))
@@ -144,7 +144,7 @@ public actor FritzBox: RouterReader {
     func readGenericHosts() async throws -> [RouterClient] {
         guard let count = try await call(Self.hosts, "GetHostNumberOfEntries")["NewHostNumberOfEntries"].flatMap({ Int($0) }) else { return [] }
         var clients: [RouterClient] = []
-        for index in 0..<min(count, Self.maxHosts) {
+        for index in 0..<max(0, min(count, Self.maxHosts)) {
             let entry = try await call(Self.hosts, "GetGenericHostEntry", [("NewIndex", String(index))])
             guard let mac = entry["NewMACAddress"].flatMap(MACAddress.normalized) else { continue }
             clients.append(RouterClient(mac: mac, address: entry["NewIPAddress"].flatMap { $0.isEmpty ? nil : $0 }, name: entry["NewHostName"], active: entry["NewActive"] == "1"))

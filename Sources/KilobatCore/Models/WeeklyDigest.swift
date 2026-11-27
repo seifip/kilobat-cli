@@ -64,6 +64,8 @@ public struct DigestSchedule: Codable, Sendable, Equatable {
     /// What to do now. `last` is the slot handled last; `historyStart` when Kilobat's history begins.
     public func decide(now: Date, last: Date?, historyStart: Date?, calendar: Calendar = .current) -> Decision {
         guard enabled else { return .wait }
+        // A handled slot can't be later than now: the clock was ahead when it was stored.
+        let last = last.flatMap { $0 <= now ? $0 : nil }
         let slot = slot(atOrBefore: now, calendar: calendar)
         if let last, last >= slot { return .wait }
         if now.timeIntervalSince(slot) > Self.catchUp { return .skip(slot: slot, .stale) }
@@ -112,6 +114,14 @@ public struct DigestLedger: Codable, Sendable, Equatable {
         let url = Self.file(directory)
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? JSONEncoder().encode(self).write(to: url, options: .atomic)
+    }
+    /// Copies the filter's log into the saved ledger, without reading the rest of the history, and writes only when a
+    /// count changed. The log is read as `DigestInput.saved` reads it: never moved aside.
+    public static func refresh(directory: URL? = nil, now: Date = Date()) {
+        let folder = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Kilobat")
+        let events = (try? Data(contentsOf: folder.appendingPathComponent("filter-events.json"))).flatMap { try? JSONDecoder().decode([FilterEvent].self, from: $0) } ?? []
+        var ledger = load(directory: folder)
+        if ledger.record(events, now: now) { ledger.save(directory: folder) }
     }
 
     public static func key(_ date: Date, calendar: Calendar = .current) -> String {

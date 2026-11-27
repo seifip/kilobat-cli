@@ -281,13 +281,17 @@ public struct SettingsImportPlan: Equatable {
                         } else { notes.append(Self.leftAsIs("\(name) · \(title)", text)) }
                     }
                     if let cycle = budget.cycle {
-                        let wanted: BudgetCycle? = cycle.period == .session ? nil : cycle
+                        let wanted: BudgetCycle? = cycle == BudgetCycle() ? nil : cycle
                         if wanted != now.cycle {
                             if let wanted { next.networkCycles = (next.networkCycles ?? [:]).merging([key: wanted]) { $1 } } else { next.networkCycles?[key] = nil }
                             if next.networkCycles?.isEmpty == true { next.networkCycles = nil }
                             if key == currentNetwork { next.budgetCycle = wanted }
                             networkLine(.changed, title, (now.cycle ?? BudgetCycle()).summary(), cycle.summary())
                         }
+                    }
+                    // A limit or cycle without a stored mode reads as Block, so the file's mode is kept whenever it reads otherwise.
+                    if let mode = budget.mode.flatMap(NetworkBudgetMode.init(rawValue:)), next.budgetMode(for: key) != mode {
+                        next.networkBudgetModes = (next.networkBudgetModes ?? [:]).merging([key: mode]) { $1 }
                     }
                 }
                 if let text = network.dataCost {
@@ -346,7 +350,7 @@ public struct SettingsImportPlan: Equatable {
         }
         next.quotas = limits.isEmpty ? nil : limits
         if newCredit != (credit ?? CreditSettings()), let data = try? JSONEncoder().encode(newCredit) { changes[CreditSettings.key] = .set(.data(data)); relaunch = true }
-        if plansChanged { changes[PlanSpeeds.key] = .set(.numbers(plans)) }
+        if plansChanged { changes[PlanSpeeds.key] = .set(.numbers(plans)); relaunch = true }
         if fastChanged { changes["uploadFastNetworks"] = .set(.strings(fast.sorted())) }
         if placesChanged, let data = try? JSONSerialization.data(withJSONObject: places, options: [.sortedKeys]) { changes["share.places"] = .set(.data(data)) }
 

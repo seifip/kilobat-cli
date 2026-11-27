@@ -359,8 +359,7 @@ public struct LeakTest: Codable, Sendable, Equatable {
             return routes
         }
         let v6Route = await v6
-        seen.ipv6Interface = routeInterface(v6Route)
-        seen.ipv6RouteAbsent = v6Route.status == 1 && v6Route.output.contains("not in table")
+        (seen.ipv6Interface, seen.ipv6RouteAbsent) = ipv6Route(v6Route)
         let hardware = ExitPath.hardwarePorts(await ports.output)
         seen.physicalPort = seen.ipv6Interface.flatMap { hardware[$0] }
         if let ipv6 = seen.ipv6Interface, ipv6 != exit.interface { seen.ipv6Address = await ipv6Address() }
@@ -368,7 +367,10 @@ public struct LeakTest: Codable, Sendable, Equatable {
         let udp = await probeUDP(interfaces: interfaces) { stunAny(interface: $0) }
         seen.udpAsked = true; seen.udpDefault = udp.normal; seen.physical = udp.bypass?.interface
         seen.udpPhysical = udp.bypass?.mapped; seen.udpInterfaces = interfaces
-        seen.exitAddress = await exitAddress?.address
+        var address = await exitAddress?.address
+        // STUN answers over IPv4: an exit seen over IPv6 says nothing about it, so ask Cloudflare once more by its IPv4 address.
+        if address?.contains(":") == true, let v4 = await exitAddress4() { address = v4 }
+        seen.exitAddress = address
         if let answer = await service { seen.exitSeen = answer.0; seen.dnsSeen = answer.1 }
         seen.relay = await path.relay
         return evaluate(seen)
@@ -393,6 +395,11 @@ public struct LeakTest: Codable, Sendable, Equatable {
         guard let host = server.split(separator: "%", maxSplits: 1).first,
               let address = AddressRange.parse(String(host)) else { return nil }
         return ["-n", "get", address.count == 4 ? "-inet" : "-inet6", server]
+    }
+
+    /// `route -n get -inet6`'s answer: the interface, or whether there is no route at all ("not in table" exits 0 or 1).
+    static func ipv6Route(_ result: CommandResult) -> (interface: String?, absent: Bool) {
+        (routeInterface(result), ExitPath.ipv6DefaultMissing(status: result.status, output: result.output))
     }
 
     private static func routeInterface(_ result: CommandResult) -> String? {
@@ -430,6 +437,13 @@ public struct LeakTest: Codable, Sendable, Equatable {
         guard let (data, _) = try? await session.data(from: URL(string: "https://api6.ipify.org")!) else { return nil }
         let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.contains(":") && AddressRange.parse(text) != nil ? text : nil
+    }
+
+    static func exitAddress4() async -> String? {
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        guard let (data, _) = try? await session.data(from: URL(string: "https://1.1.1.1/cdn-cgi/trace")!) else { return nil }
+        return ExitPath.traceAddress(String(decoding: data, as: UTF8.self)).flatMap { $0.contains(":") ? nil : $0 }
     }
 }
 

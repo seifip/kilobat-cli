@@ -65,7 +65,10 @@ public extension TrafficStore {
 
     /// Replaces a pack after it was edited, keeping the others to one pack per network.
     func updatePack(_ pack: DataPack, now: Date = Date()) {
-        var packs = dataPacks.filter { $0.id != pack.id }
+        var packs = dataPacks.filter { $0.id != pack.id }, pack = pack
+        // When it ran, its size or its networks changed: what it used is worked out again.
+        if let old = dataPacks.first(where: { $0.id == pack.id }),
+           old.start != pack.start || old.finish != pack.finish || old.bytes != pack.bytes || old.networks != pack.networks { pack.finalUsed = nil }
         DataPacks.add(pack, to: &packs, known: knownNetworks)
         preferences.dataPacks = packs
     }
@@ -76,6 +79,7 @@ public extension TrafficStore {
         let mac = DataPacks.macBytes(pack, packs: dataPacks, usage: allowanceUsage, names: { self.networkName(of: $0) },
                                      pending: networkKey == "unknown" ? nil : (networkKey, pendingBytes), to: now)
         try DataPacks.correct(&pack, leftBytes: leftBytes, macBytes: mac, now: now)
+        pack.finalUsed = nil
         flush(at: now)
         preferences.dataPacks = dataPacks.map { $0.id == id ? pack : $0 }
     }

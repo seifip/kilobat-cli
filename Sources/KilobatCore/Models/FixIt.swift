@@ -128,10 +128,12 @@ public enum FixCause: Equatable, Sendable {
             return FixMetric(.ms(reading.dnsMs), good: reading.dnsMs.map { $0 <= FixPolicy.goodDNS } ?? false)
         case .wifiStuck:
             return FixMetric(.ms(reading.routerMs), good: reading.hasAddress && reading.routerMs != nil)
-        case .signIn:
+        case .signIn(_, let blockers):
             // Signed in means the page is gone and something past it answers: a page hidden by this Mac's own DNS or
-            // VPN doesn't show as a portal at all, only as nothing working.
-            let through = !reading.portal && (reading.dnsMs != nil || reading.internetMs != nil)
+            // VPN doesn't show as a portal at all, only as nothing working. A hidden page can let ping through while
+            // lookups fail, so then only a lookup counts.
+            let hides = blockers.switchesDNS || blockers.encryptedDNS || blockers.vpn
+            let through = !reading.portal && (reading.dnsMs != nil || (!hides && reading.internetMs != nil))
             return FixMetric(.state(through ? 1 : 0, .signedIn), good: through)
         case .farNode:
             return FixMetric(.dBm(reading.rssi), good: !reading.stuckNode && (reading.rssi ?? -100) > FixPolicy.goodSignal)
@@ -142,7 +144,8 @@ public enum FixCause: Equatable, Sendable {
         case .vpnBroken:
             return FixMetric(.ms(reading.internetMs), good: (reading.internetMs != nil || reading.reachable) && reading.dnsMs != nil)
         case .router:
-            return FixMetric(.ms(reading.routerMs), good: reading.routerMs.map { $0 <= FixPolicy.goodRouter } ?? false)
+            // The check-up judges a slowdown against the router's own usual time, which can be well under the absolute bar.
+            return FixMetric(.ms(reading.routerMs), good: !reading.routerSlowing && (reading.routerMs.map { $0 <= FixPolicy.goodRouter } ?? false))
         case .provider:
             return FixMetric(.ms(reading.internetMs), good: reading.internetClear)
         }
@@ -156,17 +159,21 @@ public struct FixReading: Equatable, Sendable {
     public var rssi: Int?
     /// Something past the router answered, by either ping target or the HTTPS check.
     public var reachable: Bool
+    /// The router check-up sees a slowdown that no restart has answered yet.
+    public var routerSlowing: Bool
     public init(dnsMs: Double? = nil, routerMs: Double? = nil, internetMs: Double? = nil, jitter: Double? = nil, loss: Double? = nil,
-                hasAddress: Bool = true, portal: Bool = false, stuckNode: Bool = false, airDropBusy: Bool = false, rssi: Int? = nil, reachable: Bool = false) {
+                hasAddress: Bool = true, portal: Bool = false, stuckNode: Bool = false, airDropBusy: Bool = false, rssi: Int? = nil, reachable: Bool = false,
+                routerSlowing: Bool = false) {
         self.dnsMs = dnsMs; self.routerMs = routerMs; self.internetMs = internetMs; self.jitter = jitter; self.loss = loss
         self.hasAddress = hasAddress; self.portal = portal; self.stuckNode = stuckNode; self.airDropBusy = airDropBusy; self.rssi = rssi
-        self.reachable = reachable
+        self.reachable = reachable; self.routerSlowing = routerSlowing
     }
-    public init(_ snapshot: DiagnosticSnapshot, stuckNode: Bool = false, airDropBusy: Bool = false) {
+    public init(_ snapshot: DiagnosticSnapshot, stuckNode: Bool = false, airDropBusy: Bool = false, routerSlowing: Bool = false) {
         let ping = snapshot.measured
         self.init(dnsMs: snapshot.dnsMilliseconds, routerMs: snapshot.router?.average, internetMs: ping.average, jitter: ping.jitter,
                   loss: ping.lossPercent, hasAddress: FixPlanner.hasAddress(snapshot), portal: snapshot.captivePortal == true,
-                  stuckNode: stuckNode, airDropBusy: airDropBusy, rssi: snapshot.radio.rssi, reachable: snapshot.reachability == .up)
+                  stuckNode: stuckNode, airDropBusy: airDropBusy, rssi: snapshot.radio.rssi, reachable: snapshot.reachability == .up,
+                  routerSlowing: routerSlowing)
     }
     var internetClear: Bool {
         guard let internetMs else { return false }
@@ -442,10 +449,12 @@ public enum FixJudge {
     }
 }
 
-/// How a run ends. Fixed, Better and This isn't your Mac are the three results; the other two mean nothing was judged.
+/// How a run ends after checking the line or attempting a change.
 public enum FixOutcome: Equatable, Sendable {
     case fixed, better
     case notYourMac(FixWho)
+    /// A direct resolver answered, but switching to it did not restore the Mac's lookups.
+    case dnsUnresolved
     /// The first reading was already fine: nothing tried.
     case noIssue
     /// Nothing could be tried: the person declined, stopped, or a step couldn't run.
@@ -500,6 +509,7 @@ public struct FixEngine: Sendable {
     }
     private var result: FixOutcome {
         if !kept.isEmpty { return .better }
+        if tried, cause == .dnsFailing { return .dnsUnresolved }
         return tried || steps.isEmpty ? .notYourMac(cause.who) : .stopped(reason)
     }
     private mutating func advance() { index += 1; command = commandForCurrentStep() }

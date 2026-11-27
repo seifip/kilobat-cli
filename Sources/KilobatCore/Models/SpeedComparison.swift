@@ -127,7 +127,7 @@ public struct SpeedComparison: Codable, Sendable {
     /// A test by its id, an id prefix, or its place counting back from the newest (1 is the newest).
     public static func find(_ key: String, in tests: [SavedSpeedTest]) -> SavedSpeedTest? {
         let sorted = tests.sorted { $0.result.date > $1.result.date }
-        if let index = Int(key), (1...sorted.count).contains(index) { return sorted[index - 1] }
+        if let index = Int(key), index >= 1, index <= sorted.count { return sorted[index - 1] }
         let lower = key.lowercased()
         let matches = sorted.filter { $0.id.uuidString.lowercased().hasPrefix(lower) }
         return lower.count >= 4 && matches.count == 1 ? matches[0] : nil

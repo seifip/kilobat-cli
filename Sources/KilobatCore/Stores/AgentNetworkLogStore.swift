@@ -64,12 +64,14 @@ public struct HostLookup: Sendable {
     @ObservationIgnored private var names: [String: (host: String, source: String)] = [:]
     @ObservationIgnored private var reverseTried: Set<String> = []
     @ObservationIgnored private var forwardChecked: [String: Date] = [:]
-    /// Hosts the agents' own commands named (curl, git), to resolve and match.
-    @ObservationIgnored private var commandHosts: Set<String> = []
+    /// Hosts the agents' own commands named (curl, git), to resolve and match, with when they were last named.
+    @ObservationIgnored private var commandHosts: [String: Date] = [:]
     @ObservationIgnored private var argumentsRead: Set<String> = []
     @ObservationIgnored private var resolving = false
     @ObservationIgnored private var lastResolve = Date.distantPast
     @ObservationIgnored private var dirty = false
+    /// A session, a host or a name came or went since the last save, not just byte counts.
+    @ObservationIgnored private var structureChanged = false
     @ObservationIgnored private var lastPersist = Date.distantPast
     @ObservationIgnored private var timer: DispatchSourceTimer?
     @ObservationIgnored private let polling = PollingFlag()
@@ -116,9 +118,31 @@ public struct HostLookup: Sendable {
         return Set(live.keys.filter { tree.running($0) })
     }
 
+    /// Entries of sessions that ended over an hour ago, as last reported. Summarising a month of sessions takes tens of
+    /// milliseconds and the views ask with every sample; such an entry changes only when it is erased or when a host
+    /// it called first-time turns out to be known.
+    @ObservationIgnored private var settled: [UUID: (entry: AgentLogEntry, records: Int, hosts: [(name: String, known: Bool)])] = [:]
+
     /// Every session with at least one host, newest first, flagged.
     public var report: [AgentLogEntry] {
-        AgentNetworkLog.report(sessions, pastHosts: pastHosts, running: runningKeys)
+        let running = runningKeys, now = Date()
+        var known = pastHosts, entries: [AgentLogEntry] = [], kept: [UUID: (entry: AgentLogEntry, records: Int, hosts: [(name: String, known: Bool)])] = [:]
+        for session in sessions.sorted(by: { $0.start < $1.start }) where !session.hosts.isEmpty {
+            if let cached = settled[session.id], cached.records == session.hosts.count,
+               cached.hosts.allSatisfy({ known.contains($0.name) == $0.known }) {
+                entries.append(cached.entry); kept[session.id] = cached
+                for host in cached.hosts { known.insert(host.name) }
+                continue
+            }
+            // One session reported against the hosts known before it gives the same entry as the whole loop.
+            guard let entry = AgentNetworkLog.report([session], pastHosts: known, running: running).first else { continue }
+            entries.append(entry)
+            let names = Set(entry.hosts.map { $0.host.lowercased() })
+            if let end = session.end, now.timeIntervalSince(end) >= 3_600 { kept[session.id] = (entry, session.hosts.count, names.map { ($0, known.contains($0)) }) }
+            known.formUnion(names)
+        }
+        settled = kept
+        return entries.reversed()
     }
     /// Agents running now that have contacted something, most recently active first.
     public var running: [AgentLogEntry] {
@@ -130,8 +154,8 @@ public struct HostLookup: Sendable {
         // Running agents keep their sessions; only what they recorded so far goes.
         for index in sessions.indices { sessions[index].hosts = []; sessions[index].unmatchedSent = 0; sessions[index].unmatchedReceived = 0 }
         sessions.removeAll { $0.end != nil }
-        pastHosts = []
-        dirty = true; persist(now: Date(), force: true)
+        pastHosts = []; commandHosts = [:]; settled = [:]
+        dirty = true; structureChanged = true; persist(now: Date(), force: true)
     }
 
     /// Clears a period or forgets a site (see `HistoryEraser`), and saves at once. Returns how many hosts went.
@@ -139,10 +163,13 @@ public struct HostLookup: Sendable {
         let removed = HistoryEraser.apply(action, to: &sessions, pastHosts: &pastHosts, now: now)
         // The name a forgotten host's address had goes too, so a later connection there isn't named from it.
         switch action {
-        case .forget(let match): names = names.filter { !match.matches($0.value.host) && !match.matches($0.key) }
-        case .clear(.all): names = [:]
+        case .forget(let match):
+            names = names.filter { !match.matches($0.value.host) && !match.matches($0.key) }
+            commandHosts = commandHosts.filter { !match.matches($0.key) }
+        case .clear(.all): names = [:]; commandHosts = [:]
         case .clear: break
         }
+        settled = [:]
         dirty = true
         if let file, !previewing {
             let saved = AgentLogFile(recording: allowed(), updated: now, sessions: sessions.filter { !$0.hosts.isEmpty || $0.end == nil }, pastHosts: pastHosts.sorted())
@@ -153,7 +180,7 @@ public struct HostLookup: Sendable {
                 try saved.data().write(to: file, options: .atomic)
             }
         }
-        dirty = false; lastPersist = now
+        dirty = false; structureChanged = false; lastPersist = now
         return removed
     }
 
@@ -181,7 +208,7 @@ public struct HostLookup: Sendable {
         if timer == nil { tree.poll(now: now) }
         for root in tree.liveRoots where live[root.key] == nil {
             let session = AgentNetworkSession(key: root.key, agent: root.agent, pid: root.pid, start: root.start ?? now, cwd: root.cwd, executable: root.path, hostApp: root.hostApp)
-            sessions.append(session); live[root.key] = session.id
+            sessions.append(session); live[root.key] = session.id; structureChanged = true
         }
         let index = Dictionary(uniqueKeysWithValues: sessions.enumerated().map { ($0.element.id, $0.offset) })
         let names = filterNames()
@@ -204,7 +231,7 @@ public struct HostLookup: Sendable {
             guard lastSample != nil, let firstSample, !fresh || (member.start.map { $0 >= firstSample } ?? true) else { continue }
             // What curl or the like was asked to fetch names the addresses it then connects to; only the URLs' hosts are kept.
             if Self.fetchers.contains(member.process), argumentsRead.insert(key).inserted, let arguments = tree.arguments(process.pid) {
-                commandHosts.formUnion(AgentHostRules.hosts(inArguments: arguments))
+                for host in AgentHostRules.hosts(inArguments: arguments) { commandHosts[host] = now }
             }
             let totalReceived = before.map { process.received >= $0.received ? process.received - $0.received : process.received } ?? process.received
             let totalSent = before.map { process.sent >= $0.sent ? process.sent - $0.sent : process.sent } ?? process.sent
@@ -254,12 +281,15 @@ public struct HostLookup: Sendable {
             sampleSessions[position].hosts[at].received += received; sampleSessions[position].hosts[at].sent += sent
             sampleSessions[position].hosts[at].last = now
             if opened { sampleSessions[position].hosts[at].connections += 1 }
-            if let name, sampleSessions[position].hosts[at].nameSource != name.source { sampleSessions[position].hosts[at].host = name.host; sampleSessions[position].hosts[at].nameSource = name.source }
+            if let name, sampleSessions[position].hosts[at].nameSource != name.source {
+                sampleSessions[position].hosts[at].host = name.host; sampleSessions[position].hosts[at].nameSource = name.source; structureChanged = true
+            }
         } else if sampleSessions[position].hosts.count < Self.maxRecords {
             sampleSessions[position].hosts.append(AgentHostRecord(process: process, address: endpoint.address, port: endpoint.port, transport: endpoint.transport,
                                                             host: name?.host, nameSource: name?.source, first: now, last: now,
                                                             sent: sent, received: received, connections: opened ? 1 : 0))
             hostIndex[sessions[position].id]?[key] = sampleSessions[position].hosts.count - 1
+            structureChanged = true
         } else {
             sampleSessions[position].unmatchedReceived += received; sampleSessions[position].unmatchedSent += sent
         }
@@ -284,7 +314,7 @@ public struct HostLookup: Sendable {
                                                             host: address.isEmpty ? detail.host : nil, nameSource: address.isEmpty ? "filter" : nil,
                                                             first: event.date, last: event.date, connections: 1, blocked: detail.kind.rawValue, blockedBy: detail.list))
         }
-        dirty = true
+        dirty = true; structureChanged = true
         persist(now: event.date, force: true)
         return true
     }
@@ -312,6 +342,7 @@ public struct HostLookup: Sendable {
         for (key, id) in live where !tree.running(key) {
             live[key] = nil
             guard let position = sessions.firstIndex(where: { $0.id == id }) else { continue }
+            structureChanged = true
             if sessions[position].hosts.isEmpty && sessions[position].unmatchedSent + sessions[position].unmatchedReceived == 0 { sessions.remove(at: position) }
             else { sessions[position].end = max(sessions[position].lastActive, sessions[position].start); dirty = true }
         }
@@ -324,7 +355,11 @@ public struct HostLookup: Sendable {
         let unnamed = Set(sessions.filter { $0.end == nil || now.timeIntervalSince($0.end ?? now) < 3_600 }.flatMap(\.hosts).filter { $0.host == nil || $0.nameSource == "reverse" }.map(\.address))
         guard !unnamed.isEmpty else { return }
         resolving = true; lastResolve = now
-        let candidates = (AgentHostRules.wellKnown + commandHosts.sorted()).filter { forwardChecked[$0].map { now.timeIntervalSince($0) >= 600 } ?? true }
+        // A command's host names only the addresses that command connects to, so it is let go after an hour.
+        commandHosts = commandHosts.filter { now.timeIntervalSince($0.value) < 3_600 }
+        let hosts = AgentHostRules.wellKnown + commandHosts.keys.sorted()
+        forwardChecked = forwardChecked.filter { commandHosts[$0.key] != nil || AgentHostRules.wellKnown.contains($0.key) }
+        let candidates = hosts.filter { forwardChecked[$0].map { now.timeIntervalSince($0) >= 600 } ?? true }
         let tryReverse = unnamed.subtracting(reverseTried)
         let lookup = lookup
         Task { [weak self] in
@@ -356,7 +391,7 @@ public struct HostLookup: Sendable {
             for at in sessions[position].hosts.indices {
                 let address = sessions[position].hosts[at].address
                 guard let name = names[address], sessions[position].hosts[at].nameSource != name.source, sessions[position].hosts[at].nameSource != "filter" else { continue }
-                sessions[position].hosts[at].host = name.host; sessions[position].hosts[at].nameSource = name.source; dirty = true
+                sessions[position].hosts[at].host = name.host; sessions[position].hosts[at].nameSource = name.source; dirty = true; structureChanged = true
             }
         }
     }
@@ -370,13 +405,14 @@ public struct HostLookup: Sendable {
         let ids = Set(gone.map(\.id))
         for summary in AgentNetworkLog.report(gone).flatMap(\.hosts) where pastHosts.count < 10_000 { pastHosts.insert(summary.host.lowercased()) }
         sessions.removeAll { ids.contains($0.id) && $0.end != nil }
-        dirty = true
+        dirty = true; structureChanged = true
     }
 
-    /// Every ten seconds while something changed, so `kilobat agent-log` sees a running session.
+    /// Within ten seconds of a new session, host or name, so `kilobat agent-log` sees a running session; byte counts
+    /// alone once a minute, since each save encodes the whole month.
     public func persist(now: Date = Date(), force: Bool = false) {
-        guard let file, dirty, !previewing, force || now.timeIntervalSince(lastPersist) >= 10 else { return }
-        dirty = false; lastPersist = now
+        guard let file, dirty, !previewing, force || now.timeIntervalSince(lastPersist) >= (structureChanged ? 10 : 60) else { return }
+        dirty = false; structureChanged = false; lastPersist = now
         let saved = AgentLogFile(recording: allowed(), updated: now, sessions: sessions.filter { !$0.hosts.isEmpty || $0.end == nil }, pastHosts: pastHosts.sorted())
         // Encoding a long log takes real time, so it's done off the main thread, in order. A forced save finishes first.
         let write: @Sendable () -> Void = {
@@ -399,7 +435,7 @@ public struct HostLookup: Sendable {
     /// Sample sessions for screenshots and the debug snapshot; nothing from this Mac.
     public func preview(_ sessions: [AgentNetworkSession], running: [String] = []) {
         previewing = true
-        self.sessions = sessions
+        self.sessions = sessions; settled = [:]
         for key in running { if let session = sessions.first(where: { $0.key == key }) { live[key] = session.id } }
         previewRunning = Set(running)
     }

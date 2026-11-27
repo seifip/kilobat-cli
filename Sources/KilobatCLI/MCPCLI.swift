@@ -743,8 +743,9 @@ import KilobatCore
             let cycle = arguments["cycle"] as? String, alerts = arguments["alerts"] as? String, day = try integer(arguments, "reset_day", in: 1...31)
             let mode = (arguments["mode"] as? String).flatMap(NetworkBudgetMode.init(rawValue:))
             guard gb != nil || cycle != nil || day != nil || alerts != nil || mode != nil else { throw MCPToolError("Pass gb, cycle, reset_day, alerts or mode.") }
-            let store = TrafficStore(startMonitoring: false)
-            do { return .json(try object(try QuotaCLI.applyBudget(store, gb: gb, cycle: cycle, resetDay: day, alerts: alerts, network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection()), mode: mode))) }
+            // Loaded after the await, so a setter running meanwhile isn't overwritten with an older copy.
+            let app = await WiFiCLI.connection(), store = TrafficStore(startMonitoring: false)
+            do { return .json(try object(try QuotaCLI.applyBudget(store, gb: gb, cycle: cycle, resetDay: day, alerts: alerts, network: QuotaCLI.currentNetwork(store, app: app), mode: mode))) }
             catch let error as CLIError { throw MCPToolError(error.message) }
         },
         MCPTool(name: "get_data_pack", title: "Data packs and when they run out",
@@ -792,8 +793,8 @@ import KilobatCore
             }
             let command: PackCommand
             do { command = try PackCommand.parse(args).command } catch let error as DataPackError { throw MCPToolError(error.message) }
-            let store = TrafficStore(startMonitoring: false)
-            do { return .json(try object(try PackCLI.perform(command, store: store, app: await WiFiCLI.connection()))) }
+            let app = await WiFiCLI.connection(), store = TrafficStore(startMonitoring: false)
+            do { return .json(try object(try PackCLI.perform(command, store: store, app: app))) }
             catch let error as CLIError { throw MCPToolError(error.message) }
         },
         MCPTool(name: "set_network_cost", title: "Set a network's data cost",
@@ -852,12 +853,13 @@ import KilobatCore
                                      "network": ["type": "string", "enum": ["this", "all"], "default": "this"],
                                      "action": ["type": "string", "enum": ["set", "remove"], "default": "set"]], required: ["app"]),
                 annotations: change) { arguments, _ in
-            let app = try string(arguments, "app"), store = TrafficStore(startMonitoring: false)
-            if arguments["action"] as? String == "remove" { return .json(try object(["app": app, "removed": QuotaCLI.removeQuota(app, store: store)])) }
+            let app = try string(arguments, "app")
+            if arguments["action"] as? String == "remove" { return .json(try object(["app": app, "removed": QuotaCLI.removeQuota(app, store: TrafficStore(startMonitoring: false))])) }
             guard let raw = arguments["gb"] as? NSNumber, !isBoolean(raw) else { throw MCPToolError("Pass gb, the quota in GB.") }
+            let relay = await WiFiCLI.connection(), store = TrafficStore(startMonitoring: false)
             do {
                 let quota = try QuotaCLI.setQuota(app, gb: raw.doubleValue, uploadOnly: arguments["direction"] as? String == "upload", everyNetwork: arguments["network"] as? String == "all",
-                                                  network: QuotaCLI.currentNetwork(store, app: await WiFiCLI.connection()), store: store)
+                                                  network: QuotaCLI.currentNetwork(store, app: relay), store: store)
                 return .json(try object(["app": app, "name": quota.name, "limitBytes": quota.bytes, "uploadOnly": quota.uploadOnly, "network": quota.network ?? NSNull(), "saved": true]))
             } catch let error as CLIError { throw MCPToolError(error.message) }
         },

@@ -174,12 +174,13 @@ public struct DiagnosticSnapshot: Codable, Sendable {
                                             : "This network may require a login. Open the login page before testing again."]
         }
         var tips: [String] = []
+        let ping = measured
         if activeRadioHealth == .poor || activeRadioHealth == .degraded { tips.append("Wi-Fi signal is weak or noisy. Use Radar to find a stronger spot, or try a different channel.") }
         if (router?.average ?? 0) > 20 { tips.append("The local link to your router is slow. Move closer, reduce competing traffic, then retest before restarting the router.") }
-        if (internet.average ?? 0) > 120 && (router?.average ?? 100) < 20 { tips.append("Your router responds quickly, but the internet path is slow. Compare another network or test again later; the upstream connection may be congested.") }
+        if (ping.average ?? 0) > 120 && (router?.average ?? 100) < 20 { tips.append("Your router responds quickly, but the internet path is slow. Compare another network or test again later; the upstream connection may be congested.") }
         if (dnsMilliseconds ?? 0) > 150 { tips.append("DNS lookups are slow. Compare Cloudflare or Google DNS, then switch back to Network DNS if it does not help.") }
-        if (internet.jitter ?? 0) > 30 { tips.append("Internet latency varies between replies. Run a loaded speed test to see whether competing transfers make it worse.") }
-        if (internet.lossPercent ?? 0) >= 5 { tips.append("Some internet ping replies were lost. Compare router loss and repeat the test; filtering and congestion can both cause this.") }
+        if (ping.jitter ?? 0) > 30 { tips.append("Internet latency varies between replies. Run a loaded speed test to see whether competing transfers make it worse.") }
+        if (ping.lossPercent ?? 0) >= 5 { tips.append("Some internet ping replies were lost. Compare router loss and repeat the test; filtering and congestion can both cause this.") }
         if internet.average == nil { tips.append("The internet ping target did not reply. Some networks block ICMP; this alone does not prove an outage.") }
         if tips.isEmpty { tips.append("No clear issue in this sample. Run a speed test to check capacity and delay under load.") }
         return tips

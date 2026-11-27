@@ -490,8 +490,8 @@ public struct HouseholdPairingStatus: Equatable, Sendable {
     }
 
     /// `kilobat household --json` and MCP `get_household`, as the running app sees it.
-    public func report() -> HouseholdReport {
-        let net = network(), pro = allowed(), now = Date()
+    public func report(now: Date = Date()) -> HouseholdReport {
+        let net = network(), pro = allowed()
         let peers = book.peers.map { peer -> HouseholdReport.Peer in
             let here = peer.network == net?.key
             let fresh = live[peer.id].flatMap { $0.fresh(now: now) ? $0 : nil }

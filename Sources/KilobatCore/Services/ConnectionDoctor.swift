@@ -627,7 +627,12 @@ public enum ConnectionDoctor {
 
     /// The URL to request, exactly as given, path and query included; a bare host becomes https://host.
     static func requestURL(_ target: String) -> URL? {
-        URL(string: target.contains("://") ? target : "https://" + target)
+        guard let url = URL(string: target.contains("://") ? target : "https://" + target) else { return nil }
+        // Every check compares the scheme with "http" and "https"; `Https://` is what a phone's keyboard writes.
+        guard let scheme = url.scheme, scheme != scheme.lowercased() else { return url }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.scheme = scheme.lowercased()
+        return components?.url ?? url
     }
 
     /// "host:port" of a proxy URL, without its password.
@@ -1186,22 +1191,46 @@ public enum ConnectionDoctor {
                             client: client, method: hops.first?.method, path: taken, failedAt: failedAt)
     }
 
-    static func resolve(_ host: String) async -> [String] {
-        await Task.detached(priority: .userInitiated) { () -> [String] in
-            var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
-            var info: UnsafeMutablePointer<addrinfo>?
-            guard getaddrinfo(host, nil, &hints, &info) == 0 else { return [] }
-            defer { freeaddrinfo(info) }
-            var addresses: [String] = [], cursor = info
-            while let entry = cursor {
-                var name = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                if getnameinfo(entry.pointee.ai_addr, entry.pointee.ai_addrlen, &name, socklen_t(name.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    let address = String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self); if !addresses.contains(address) { addresses.append(address) }
-                }
-                cursor = entry.pointee.ai_next
+    /// The system resolver's answer, or nothing after `timeout`: a silent DNS server would otherwise hold the check for
+    /// the resolver's own limit (about 30 s).
+    static func resolve(_ host: String, timeout: Double = 8) async -> [String] {
+        await first(of: { lookup(host) }, or: [], after: timeout)
+    }
+
+    /// What `work` gives, or `fallback` once `seconds` pass; work still running then finishes on its own.
+    static func first<T: Sendable>(of work: @escaping @Sendable () async -> T, or fallback: T, after seconds: Double) async -> T {
+        let once = ResumeOnce()
+        return await withCheckedContinuation { continuation in
+            let timer = Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                if once.claim() { continuation.resume(returning: fallback) }
             }
-            return addresses
-        }.value
+            Task.detached(priority: .userInitiated) {
+                let value = await work()
+                if once.claim() { timer.cancel(); continuation.resume(returning: value) }
+            }
+        }
+    }
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool { lock.withLock { defer { done = true }; return !done } }
+    }
+
+    private static func lookup(_ host: String) -> [String] {
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+        var info: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &info) == 0 else { return [] }
+        defer { freeaddrinfo(info) }
+        var addresses: [String] = [], cursor = info
+        while let entry = cursor {
+            var name = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(entry.pointee.ai_addr, entry.pointee.ai_addrlen, &name, socklen_t(name.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let address = String(decoding: name.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self); if !addresses.contains(address) { addresses.append(address) }
+            }
+            cursor = entry.pointee.ai_next
+        }
+        return addresses
     }
 }
 

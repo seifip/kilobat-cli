@@ -124,7 +124,8 @@ public enum ExpertTools {
         }
     }
     public static func validHost(_ host: String) -> Bool {
-        !host.isEmpty && host.count <= 253 && host.first != "-" && host.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:").contains($0) }
+        // ASCII letters, digits, ":" (48...58), "-" and ".".
+        !host.isEmpty && host.count <= 253 && host.first != "-" && host.utf8.allSatisfy { (97...122).contains($0) || (65...90).contains($0) || (48...58).contains($0) || $0 == 45 || $0 == 46 }
     }
     /// The system resolver against the resolvers Fastest DNS times: `candidates`, from the person's settings.
     public static func benchmarkDNS(candidates: [DNSResolverChoice] = DNSResolverChoice.candidates(excluded: [], extra: [])) async -> [ResolverTiming] {

@@ -239,8 +239,10 @@ enum ConnectionProbe {
         urls.reduce(text) { text, url in
             guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return text }
             let shown = redacted(url), query = shown.firstIndex(of: "?").map { String(shown[shown.index(after: $0)...]) } ?? ""
-            return [(components.percentEncodedQuery, query), (components.query, query), (components.password, "[redacted]")].reduce(text) { text, pair in
-                guard let secret = pair.0, !secret.isEmpty else { return text }
+            let hidden = components.password.map { text.replacingOccurrences(of: ":" + $0 + "@", with: ":[redacted]@") } ?? text
+            return [(components.percentEncodedQuery, query), (components.query, query), (components.password, "[redacted]")].reduce(hidden) { text, pair in
+                // A short one also occurs inside unrelated words and numbers; it carries no token worth hiding.
+                guard let secret = pair.0, secret.count >= 6 else { return text }
                 return text.replacingOccurrences(of: secret, with: pair.1)
             }
         }
@@ -293,7 +295,7 @@ enum ConnectionProbe {
     static func download(_ url: URL) async -> String? {
         if url.isFileURL { return try? String(contentsOf: url, encoding: .utf8) }
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 4; configuration.connectionProxyDictionary = [:]
+        configuration.timeoutIntervalForRequest = 4; configuration.timeoutIntervalForResource = 6; configuration.connectionProxyDictionary = [:]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         guard let (data, response) = try? await session.data(from: url), (response as? HTTPURLResponse)?.statusCode ?? 200 == 200 else { return nil }

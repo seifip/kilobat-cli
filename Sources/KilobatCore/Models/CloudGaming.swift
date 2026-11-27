@@ -173,7 +173,8 @@ public struct CloudGamingFlows: Sendable {
             }
             return [:]
         }
-        let elapsed = now.timeIntervalSince(previous)
+        // nettop samples a second apart however late they're read: two parsed in one go are still a second's bytes.
+        let elapsed = max(1, now.timeIntervalSince(previous))
         var totals: [Client: (down: UInt64, up: UInt64, server: String?, best: UInt64)] = [:]
         for process in snapshot.processes {
             guard let owner = client(process) else { continue }

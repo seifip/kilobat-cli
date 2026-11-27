@@ -248,6 +248,18 @@ struct FixItTests {
         #expect(engine.command == .finish(.notYourMac(.provider)))
         #expect(engine.kept.isEmpty)
     }
+    @Test func directDNSAnsweredButSystemLookupsStillFail() {
+        let failedLookup = FixReading()
+        var engine = FixEngine(cause: .dnsFailing, steps: dnsSteps, baseline: failedLookup)
+        for step in dnsSteps {
+            #expect(engine.command == .apply(step))
+            engine.applied()
+            engine.measured(failedLookup)
+            #expect(engine.command == .undo(step))
+            engine.undone()
+        }
+        #expect(engine.command == .finish(.dnsUnresolved))
+    }
     @Test func keptStepThenNextStepClears() {
         var engine = FixEngine(cause: .dnsSlow, steps: dnsSteps, baseline: bad)
         engine.applied(); engine.measured(half)

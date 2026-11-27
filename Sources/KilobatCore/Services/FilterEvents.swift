@@ -366,17 +366,20 @@ final class ConnectionLogRecorder: @unchecked Sendable {
         }
         guard ask.browsers || !BrowserApps.contains(app), let destination = host ?? address else { return }
         let key = Key(app: app, destination: destination, port: port, transport: transport, direction: direction, verdict: verdict)
-        var table = rows[uid] ?? [:]
+        // Taken out of `rows` while it changes, so the update is in place and not a copy of every row.
+        var table = rows.removeValue(forKey: uid) ?? [:]
+        defer { rows[uid] = table }
         if var row = table[key] {
             row.count += 1; row.last = now
             table[key] = row
         } else {
-            if table.count >= Self.capacity { table = table.filter { now.timeIntervalSince($0.value.last) < ConnectionLogSnapshot.window } }
-            if table.count >= Self.capacity, let oldest = table.min(by: { $0.value.last < $1.value.last })?.key { table[oldest] = nil }
+            if table.count >= Self.capacity, let oldest = table.min(by: { $0.value.last < $1.value.last }) {
+                if now.timeIntervalSince(oldest.value.last) >= ConnectionLogSnapshot.window { table = table.filter { now.timeIntervalSince($0.value.last) < ConnectionLogSnapshot.window } }
+                else { table[oldest.key] = nil }
+            }
             table[key] = ConnectionLogEntry(app: app, process: process, destination: destination, port: port, transport: transport, direction: direction,
                                             verdict: verdict, reason: reason(), first: now, last: now)
         }
-        rows[uid] = table
     }
 
     /// The log and the counts since the last ask. With `record` the log goes on recording for another minute.
@@ -440,9 +443,18 @@ final class ApprovalQueue<Flow>: @unchecked Sendable {
         }
     }
 
-    func hold(_ flow: Flow, approval: PendingApproval) {
+    /// False, holding nothing, when `unlessAnswered` and the prompt was answered after the caller looked: the flow is
+    /// decided, not held.
+    @discardableResult
+    func hold(_ flow: Flow, approval: PendingApproval, unlessAnswered: Bool = true) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let key = Key(uid: approval.uid, app: approval.app, site: approval.site)
+        if unlessAnswered, entries[key] == nil {
+            let now = Date()
+            if approval.site == nil, let recent = decided[key], now.timeIntervalSince(recent.1) < 30 { return false }
+            if approval.site != nil, let destination = approval.destinations.first,
+               answers.contains(where: { $0.uid == approval.uid && $0.answer.app == approval.app && now.timeIntervalSince($0.at) < 30 && $0.answer.covers(destination) }) { return false }
+        }
         var entry = entries[key] ?? Entry(approval: approval, flows: [])
         if entries[key] != nil {
             entry.approval.requests += 1; entry.approval.last = Date()
@@ -456,6 +468,7 @@ final class ApprovalQueue<Flow>: @unchecked Sendable {
         entry.approval.waiting = entry.flows.count
         entries[key] = entry
         startTimer()
+        return true
     }
 
     func encoded(for uid: UInt32) -> Data {
@@ -487,7 +500,10 @@ final class ApprovalQueue<Flow>: @unchecked Sendable {
             released = covered.map(\.flow)
             if kept.isEmpty { entries[key] = nil } else {
                 entry.flows = kept
-                entry.approval.destinations = entry.approval.destinations.filter { !answer.covers($0) }
+                // Connections past the destinations shown are listed now, so the prompt that stays names what it holds.
+                var shown = entry.approval.destinations.filter { !answer.covers($0) }
+                for held in kept where !shown.contains(held.destination) && shown.count < Self.destinationsShown { shown.append(held.destination) }
+                entry.approval.destinations = shown
                 entry.approval.waiting = kept.count
                 entry.approval.approvalID = UUID()
                 entries[key] = entry

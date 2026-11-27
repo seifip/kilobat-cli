@@ -126,6 +126,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
     @ObservationIgnored private var seeding = false
     @ObservationIgnored private var killSwitchDelivered = false
     @ObservationIgnored private var protectionDelivered = false
+    @ObservationIgnored private var configurationObserver: NSObjectProtocol?
 
     /// The kill switch and Protection as the filter last got them, from its saved configuration: what stays in force
     /// at launch until the app's monitors have looked for themselves.
@@ -139,6 +140,14 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         if !canManage { stateKnown = true }
         if canManage {
             refresh()
+            // Switched off or removed in System Settings: read it again, so a later sync doesn't switch it back on. The
+            // app's own saves post this too and end in a refresh of their own.
+            configurationObserver = NotificationCenter.default.addObserver(forName: .NEFilterConfigurationDidChange, object: manager, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, !self.busy else { return }
+                    self.refresh(allowUpgrade: false)
+                }
+            }
             // Should macOS never answer, the monitors still start; with `active` false nothing is saved meanwhile.
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(15))
@@ -154,7 +163,10 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
         }
     }
 
-    isolated deinit { eventPolling?.cancel(); policyPolling?.cancel() }
+    isolated deinit {
+        eventPolling?.cancel(); policyPolling?.cancel()
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+    }
 
     /// Policy enforcement must keep working with every app window closed.
     public func observe(_ store: TrafficStore) {
@@ -476,7 +488,7 @@ public final class FilterController: NSObject, @preconcurrency OSSystemExtension
             if shouldEnable { save(enabled: true) }
             else { busy = false; pendingPolicy = nil }
         }
-        else { busy = false; message = String(localized: "Restart your Mac to finish installing the network extension.") }
+        else { busy = false; pendingPolicy = nil; message = String(localized: "Restart your Mac to finish installing the network extension.") }
     }
     public func request(_ request: OSSystemExtensionRequest, foundProperties properties: [OSSystemExtensionProperties]) {
         let ours = properties.filter { $0.bundleIdentifier == Self.identifier && $0.isEnabled }

@@ -220,6 +220,8 @@ public struct RouterEpisode: Codable, Sendable, Equatable, Identifiable {
     /// The worst recent day's median reply when it was raised.
     public var rtt: Double
     public var notified = false
+    /// Raised inside the cooldown and kept quiet: `notified` without an alert, so it doesn't restart the cooldown.
+    public var silenced: Bool? = nil
 }
 
 public enum RouterCheckup {
@@ -309,9 +311,14 @@ public enum RouterCheckup {
         var result = RouterAssessment(state: .learning, days: all.count, baseline: nil, recent: recent, symptoms: [], signalChange: nil)
         let windowEnd = recent.first?.day ?? today
         let windowStart = calendar.date(byAdding: .day, value: -baselineWindow, to: windowEnd) ?? windowEnd
-        let base = frozen ?? baseline(all.filter { day in day.day >= windowStart && day.day < windowEnd && !excluded.contains { $0.contains(day.day) } })
+        let candidates = all.filter { day in day.day >= windowStart && day.day < windowEnd && !excluded.contains { $0.contains(day.day) } }
+        let base = frozen ?? baseline(candidates)
         result.baseline = base
-        guard let base else { return result }
+        guard let base else {
+            // While learning, only the days that count toward a verdict: at most 6.
+            result.days = min(baselineDays - 1, candidates.count) + min(recentDays, recent.count)
+            return result
+        }
         guard recent.count == recentDays, let first = recent.first, first.day >= earliest else { result.state = .waiting; return result }
         if recent.allSatisfy({ slower($0.rtt, base) }) { result.symptoms.append(.slower) }
         if recent.allSatisfy({ losing($0.lossPercent, base) }) { result.symptoms.append(.loss) }
@@ -463,8 +470,8 @@ public struct RouterRecord: Codable, Sendable, Equatable, Identifiable {
             if recovered || settled { episodes[open].end = now; events.append(.ended(episodes[open])) }
         } else if assessment.degraded, let baseline = assessment.baseline, let since = assessment.recent.first?.day {
             var episode = RouterEpisode(start: now, since: since, baseline: baseline, symptoms: assessment.symptoms, rtt: assessment.recent.map(\.rtt).max() ?? baseline.rtt)
-            let lastAlert = episodes.filter(\.notified).map(\.start).max()
-            episode.notified = lastAlert.map { now.timeIntervalSince($0) < RouterCheckup.alertCooldown } ?? false
+            let lastAlert = episodes.filter { $0.notified && $0.silenced != true }.map(\.start).max()
+            if lastAlert.map({ now.timeIntervalSince($0) < RouterCheckup.alertCooldown }) ?? false { episode.notified = true; episode.silenced = true }
             episodes.append(episode); episodes = Array(episodes.suffix(20))
             events.append(.started(episode))
         }

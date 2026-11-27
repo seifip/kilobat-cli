@@ -287,10 +287,12 @@ enum RouterHTTP {
     /// A number the router may send as a number or a string, such as RouterOS's "12345".
     static func number(_ value: Any?) -> Double? {
         switch value {
-        case let number as NSNumber: return number.doubleValue
-        case let text as String: return Double(text.trimmingCharacters(in: .whitespaces))
+        case let number as NSNumber: return number.doubleValue.isFinite ? number.doubleValue : nil
+        case let text as String: return Double(text.trimmingCharacters(in: .whitespaces)).flatMap { $0.isFinite ? $0 : nil }
         default: return nil
         }
     }
+    /// An uptime a router reports, if it is one: at most a century.
+    static func uptime(_ seconds: Double?) -> TimeInterval? { seconds.flatMap { $0.isFinite && $0 >= 0 && $0 < 3.2e9 ? $0 : nil } }
     static func bytes(_ value: Any?) -> UInt64? { number(value).flatMap { $0 >= 0 && $0 < 1.8e19 ? UInt64($0) : nil } }
 }

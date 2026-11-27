@@ -26,21 +26,27 @@ public struct MacLoad: Codable, Sendable, Equatable {
     public var gpuMaxed: Bool { (gpu ?? 0) >= 90 }
 
     /// CPU ticks since boot, to measure the share busy between two samples.
-    public struct Ticks: Sendable { let busy: UInt64, total: UInt64 }
+    public struct Ticks: Sendable { let user: UInt32, system: UInt32, idle: UInt32, nice: UInt32 }
 
     public static func ticks() -> Ticks? {
         var info = host_cpu_load_info()
         var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
         let status = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count) } }
         guard status == KERN_SUCCESS else { return nil }
-        let user = UInt64(info.cpu_ticks.0), system = UInt64(info.cpu_ticks.1), idle = UInt64(info.cpu_ticks.2), nice = UInt64(info.cpu_ticks.3)
-        return Ticks(busy: user + system + nice, total: user + system + idle + nice)
+        return Ticks(user: info.cpu_ticks.0, system: info.cpu_ticks.1, idle: info.cpu_ticks.2, nice: info.cpu_ticks.3)
+    }
+
+    /// The busy share between two readings, 0–100. The counters are 32-bit and wrap, so they are subtracted with wrap-around.
+    static func share(from previous: Ticks, to now: Ticks) -> Double? {
+        let busy = UInt64(now.user &- previous.user) + UInt64(now.system &- previous.system) + UInt64(now.nice &- previous.nice)
+        let total = busy + UInt64(now.idle &- previous.idle)
+        guard total > 0 else { return nil }
+        return Double(busy) / Double(total) * 100
     }
 
     /// A sample since `previous`; the hungriest process is looked up only when the CPU is busy.
     public static func sample(since previous: Ticks) async -> (load: MacLoad, ticks: Ticks)? {
-        guard let now = ticks(), now.total > previous.total else { return nil }
-        let cpu = Double(now.busy - previous.busy) / Double(now.total - previous.total) * 100
+        guard let now = ticks(), let cpu = share(from: previous, to: now) else { return nil }
         var level: Int32 = 1, size = MemoryLayout<Int32>.size
         _ = sysctlbyname("kern.memorystatus_vm_pressure_level", &level, &size, nil, 0)
         var load = MacLoad(cpu: cpu, memory: Int(level), thermal: ProcessInfo.processInfo.thermalState.rawValue, gpu: gpuUtilization())

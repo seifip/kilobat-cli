@@ -40,8 +40,11 @@ public struct FrontmostCondition: Codable, Equatable, Sendable {
 
     /// Apps with a window that could come to the front, by name; Kilobat itself left out.
     public static func apps() -> [(id: String, name: String, path: String?)] {
-        NSWorkspace.shared.runningApplications
+        // One per bundle ID: two running copies (an app and its beta, or `open -n`) are one app to choose.
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications
             .filter { $0.activationPolicy == .regular && $0.processIdentifier != getpid() && $0.bundleIdentifier != nil && $0.localizedName != nil }
+            .filter { seen.insert($0.bundleIdentifier!).inserted }
             .map { ($0.bundleIdentifier!, $0.localizedName!, $0.bundleURL?.path) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }

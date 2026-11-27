@@ -165,6 +165,7 @@ import os
             }
             return true
         }
+        if let index = args.firstIndex(of: "--watch"), index + 1 >= args.count { throw CLIError("Use route-history --watch <id> [--json|--csv]; kilobat route-history --watches lists the ids.") }
         guard let id = try value(args, "--watch") else { return false }
         try KilobatCLI.allow(args, ["--watch", "--json", "--csv"], valued: ["--watch"])
         let matches = journal.watches.filter { $0.id.uuidString.lowercased().hasPrefix(id.lowercased()) }

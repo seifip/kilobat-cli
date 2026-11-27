@@ -4,6 +4,15 @@ import Observation
 /// When to ask a status page, and when an answer is worth a word. Pure, so the decisions can be tested.
 public enum ServiceTriggers {
     /// This Mac's own line checked out: no login page, and Health isn't poor or still unknown. Only then may Kilobat say "not you".
+    /// The processes whose connections the failing-connection watch reads, at most `limit` of them: the apps with a
+    /// status page first, then the newest processes, since the oldest are the daemons started at boot.
+    public static func sampled(_ apps: [AppTraffic], limit: Int = 64) -> [Int32] {
+        let known = apps.filter { !ServiceCatalog.services(for: $0).isEmpty }.flatMap(\.processIDs)
+        let chosen = Set(known)
+        let rest = apps.flatMap(\.processIDs).filter { !chosen.contains($0) }.sorted(by: >)
+        return Array((known + rest).prefix(limit))
+    }
+
     public static func lineFine(_ snapshot: DiagnosticSnapshot?) -> Bool {
         guard let snapshot, snapshot.captivePortal != true else { return false }
         return snapshot.health == .good || snapshot.health == .degraded
@@ -112,17 +121,18 @@ public struct ServiceAlertPolicy: Codable, Sendable, Equatable {
 /// Connection states from one nettop sample: the only way to see an app's connections fail without capturing packets.
 public enum ConnectionStates {
     /// The remote addresses of TCP connections each process is still opening, for these processes.
-    public static func connecting(pids: Set<Int32>) async -> [Int32: [String]] {
+    public static func connecting(pids: [Int32]) async -> [Int32: [String]] {
+        let pids = Array(pids.prefix(64))
         guard !pids.isEmpty else { return [:] }
         return await Task.detached(priority: .utility) {
             let process = Process(), output = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
-            process.arguments = ["-L", "1", "-n", "-x", "-m", "tcp", "-J", "state"] + pids.sorted().prefix(64).flatMap { ["-p", String($0)] }
+            process.arguments = ["-L", "1", "-n", "-x", "-m", "tcp", "-J", "state"] + pids.flatMap { ["-p", String($0)] }
             process.standardOutput = output; process.standardError = Pipe(); process.standardInput = Pipe()
             guard (try? process.run()) != nil else { return [:] }
             let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            return parse(String(decoding: data, as: UTF8.self), pids: pids)
+            return parse(String(decoding: data, as: UTF8.self), pids: Set(pids))
         }.value
     }
 
@@ -262,7 +272,7 @@ public enum ConnectionStates {
         guard traffic.connected, ServiceTriggers.lineFine(snapshot) else { failing = FailingApps(); return }
         let apps = traffic.apps.filter { !$0.carrier && !$0.processIDs.isEmpty }
         guard !apps.isEmpty else { failing = FailingApps(); return }
-        let remotes = await ConnectionStates.connecting(pids: Set(apps.flatMap(\.processIDs)))
+        let remotes = await ConnectionStates.connecting(pids: ServiceTriggers.sampled(apps))
         let opening = Dictionary(apps.map { app in (app.id, app.processIDs.flatMap { remotes[$0] ?? [] }) }, uniquingKeysWith: +)
         // Look the providers' API hosts up only when some connection is stuck, and keep the answer for ten minutes.
         let endpoints = opening.values.contains { !$0.isEmpty } ? await endpointAddresses() : [:]

@@ -54,6 +54,8 @@ import KilobatCore
     /// Turns switching on or off for `network` (a key or name), or for every network.
     static func setAuto(_ on: Bool, network: String?, store: TrafficStore) async throws -> [String: Any] {
         let pro = await WiFiCLI.connection()?["pro"] as? Bool
+        // Another change may have been saved while the app answered.
+        store.reloadPreferences()
         guard let network else {
             store.preferences.setFastestDNS(on, network: nil)
             return ["enabled": on, "network": NSNull(), "pro": pro ?? NSNull(),

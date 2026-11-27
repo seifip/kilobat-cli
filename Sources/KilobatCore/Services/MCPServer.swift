@@ -172,7 +172,8 @@ public struct MCPToolError: LocalizedError {
 
     private func send(_ value: Any) {
         // Compact JSON never contains a raw newline, which is the stdio message delimiter.
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
         write(data)
     }
     private static func key(_ id: Any) -> String { (id as? String).map { "s:" + $0 } ?? "n:\(id)" }

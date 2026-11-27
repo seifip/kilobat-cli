@@ -61,7 +61,7 @@ public actor UniFiConsole: RouterReader {
         var uptime: TimeInterval?, model: String?, firmware: String?, wan: RouterWAN?, update: RouterFirmware?
         if let value = try? await get("/proxy/network/api/s/\(reference)/stat/device") {
             for row in Self.rows(value) where ["udm", "ugw", "uxg", "ucg"].contains((row["type"] as? String) ?? "") {
-                uptime = RouterHTTP.number(row["uptime"]); model = row["model"] as? String; firmware = row["version"] as? String
+                uptime = RouterHTTP.uptime(RouterHTTP.number(row["uptime"])); model = row["model"] as? String; firmware = row["version"] as? String
                 // The controller's own flag for the gateway; the update itself stays in UniFi Network.
                 let upgradable = row["upgradable"] as? Bool ?? false
                 update = RouterFirmware(product: String(localized: "UniFi firmware", comment: "Router firmware name"), installed: firmware,
@@ -214,7 +214,7 @@ public struct RouterOSREST: RouterReader {
                 wan = RouterWAN(down: lines.compactMap { RouterHTTP.bytes($0["rx-byte"]) }.reduce(0, +), up: lines.compactMap { RouterHTTP.bytes($0["tx-byte"]) }.reduce(0, +))
             }
         }
-        var poll = RouterPoll(clients: clients.values.sorted { $0.mac < $1.mac }, wan: wan, uptime: (resource?["uptime"] as? String).flatMap(Self.uptime),
+        var poll = RouterPoll(clients: clients.values.sorted { $0.mac < $1.mac }, wan: wan, uptime: RouterHTTP.uptime((resource?["uptime"] as? String).flatMap(Self.uptime)),
                               model: resource?["board-name"] as? String, firmware: resource?["version"] as? String, perDevice: perDevice, missing: missing)
         // What RouterOS found the last time someone (or a script) ran Check For Updates; Kilobat never runs the check or an install.
         if let package = try? await get("/system/package/update") as? [String: Any] { poll.update = Self.update(package, base: base) }
@@ -307,7 +307,7 @@ public actor OpenWrtUbus: RouterReader {
             perDevice = true
         } else { missing.append("nlbwmon") }
         let release = board?["release"] as? [String: Any]
-        var poll = RouterPoll(clients: clients.values.sorted { $0.mac < $1.mac }, wan: wan, uptime: RouterHTTP.number(info?["uptime"]),
+        var poll = RouterPoll(clients: clients.values.sorted { $0.mac < $1.mac }, wan: wan, uptime: RouterHTTP.uptime(RouterHTTP.number(info?["uptime"])),
                               model: board?["model"] as? String, firmware: release?["description"] as? String, perDevice: perDevice, missing: missing)
         if let distribution = release?["distribution"] as? String, let version = release?["version"] as? String { poll.release = (distribution, version) }
         return poll

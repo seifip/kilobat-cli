@@ -295,6 +295,8 @@ public struct CallSamples: Sendable {
     public var dish: [Dish] = []
     /// Seconds into the call from which the Wi-Fi's sign-in page had logged the Mac out (the last check that still went through).
     public var loggedOut: Double? = nil
+    /// Seconds into the call when the sign-in page was gone again; nil while still logged out.
+    public var signedInAgain: Double? = nil
     /// Each five-second check while the call's sound went to Bluetooth headphones, with what was in the way then.
     public struct BluetoothAudio: Sendable {
         public let at: Double; public let device: String; public let microphone: Bool; public let risks: [BluetoothAudioRisk]; public let reported: Bool
@@ -335,6 +337,8 @@ public enum CallAnalysis {
 
     /// Bad seconds two or more in a row, with lone good replies inside a freeze bridged over.
     static func runs(_ pings: [CallSamples.Ping], median: Double?, spike: Double = spike) -> [[CallSamples.Ping]] {
+        // A line that never answered measured nothing: a target that drops ping isn't a call frozen throughout.
+        guard pings.contains(where: { $0.ms != nil }) else { return [] }
         func bad(_ ping: CallSamples.Ping) -> Bool { ping.ms.map { $0 > (median ?? 0) + spike } ?? true }
         var runs: [[CallSamples.Ping]] = [], current: [CallSamples.Ping] = [], gap = 0
         func close() { if current.filter(bad).count >= 2 { runs.append(current) }; current = []; gap = 0 }
@@ -349,9 +353,11 @@ public enum CallAnalysis {
     static func cause(from start: Double, to end: Double, samples: CallSamples) -> CallReport.Cause {
         let routerReplies = samples.router.compactMap(\.ms).sorted()
         let routerMedian = StutterTest.percentile(routerReplies, 50) ?? 0
+        // A router that never answered while the internet did ignores ping: its silence says nothing about a freeze.
+        let routerIgnoresPing = routerReplies.isEmpty && samples.internet.contains { $0.ms != nil }
         // Logged out by the sign-in page, nothing past the router answers until you sign in again.
-        if let out = samples.loggedOut, end + 1 >= out { return .init(kind: .portal) }
-        let local = samples.router.contains { $0.at >= start - 1 && $0.at <= end + 1 && ($0.ms.map { $0 > routerMedian + 100 } ?? true) }
+        if let out = samples.loggedOut, end + 1 >= out, samples.signedInAgain.map({ start <= $0 + 1 }) ?? true { return .init(kind: .portal) }
+        let local = !routerIgnoresPing && samples.router.contains { $0.at >= start - 1 && $0.at <= end + 1 && ($0.ms.map { $0 > routerMedian + 100 } ?? true) }
         if local {
             let weak = samples.weakSignal.contains { abs($0 - start) < 60 }
             // On the far node at the time: the far node is what made the Wi-Fi weak, and what to fix.

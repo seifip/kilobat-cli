@@ -125,7 +125,9 @@ public struct RuleBackup: Codable, Equatable, Sendable {
         profiles = preferences.definedProfiles.map { profile in
             let definition = definitions.first { $0.id == profile.rawValue }
             let apps = (preferences.rules[profile.rawValue] ?? [:]).sorted { $0.key < $1.key }.map { AppRule(app: $0.key, allow: $0.value) }
-            let destinations = (preferences.connectionRules ?? []).filter { $0.profile == profile.rawValue && $0.expires == nil }.map {
+            let destinations = (preferences.connectionRules ?? []).filter {
+                $0.profile == profile.rawValue && $0.expires == nil && Self.validApp($0.app) && Self.destinationHost($0.host) != nil
+            }.map {
                 DestinationRule(app: $0.app, host: $0.host, port: $0.port.isEmpty ? nil : $0.port, direction: $0.direction == "any" ? nil : $0.direction, allow: $0.allowed,
                                 networkProtocol: $0.transport, exact: $0.exact == true ? true : nil)
             }
@@ -241,7 +243,10 @@ public struct RuleBackup: Codable, Equatable, Sendable {
     /// An app rule's key may also name a developer (`team:<Team ID>`).
     public static func validAppRule(_ id: String) -> Bool { validApp(id) || DeveloperRule.team(id) != nil }
     public static func validApp(_ id: String) -> Bool {
-        !id.isEmpty && id.count <= 300 && (id.contains(".") || id.hasPrefix("process:")) && !id.contains(where: { $0.isWhitespace || $0 == "|" })
+        guard !id.isEmpty, id.count <= 300, !id.contains(where: { $0.isNewline || $0 == "|" }) else { return false }
+        // Executable names hold spaces: "process:Google Chrome Helper".
+        if id.hasPrefix("process:") { return true }
+        return id.contains(".") && !id.contains(where: \.isWhitespace)
     }
     /// A destination rule's host as it's stored: a lower-case domain, an IP address or a CIDR range.
     static func destinationHost(_ raw: String) -> String? {
@@ -249,7 +254,9 @@ public struct RuleBackup: Codable, Equatable, Sendable {
         if host.contains("/") { return ConnectionRule.validDestination(host) }
         guard ExpertTools.validHost(host) else { return nil }
         if HostName.isAddress(host) { return host }
-        return DomainPolicy.entry(host) == host ? host : nil
+        if DomainPolicy.entry(host) == host { return host }
+        // A name on the local network, such as "nas", as a destination prompt saves it.
+        return host.contains(".") || host.contains(":") ? nil : host
     }
     /// The file's protocol as a rule keeps it: nil for either.
     static func transport(_ raw: String?) -> String? {
@@ -424,10 +431,14 @@ public struct RuleImportPlan: Equatable {
 
         // Sites for every app.
         func sites(_ local: [String]?, _ file: [String]?, normalize: (String) -> String?, added: (String) -> String, removed: (String) -> String) -> [String]? {
-            var set = local ?? []
+            var set = local ?? [], have = Set(set)
             let wanted = (file ?? []).compactMap(normalize)
-            for host in wanted where !set.contains(host) { set.append(host); line(.added, added(host)) }
-            if mode == .replace { for host in set where !wanted.contains(host) { line(.removed, removed(host)) }; set.removeAll { !wanted.contains($0) } }
+            for host in wanted where have.insert(host).inserted { set.append(host); line(.added, added(host)) }
+            if mode == .replace {
+                let keep = Set(wanted)
+                for host in set where !keep.contains(host) { line(.removed, removed(host)) }
+                set.removeAll { !keep.contains($0) }
+            }
             return set.isEmpty ? nil : set.sorted()
         }
         next.blockedHosts = sites(next.blockedHosts, backup.everyApp?.blocked, normalize: DomainPolicy.entry,

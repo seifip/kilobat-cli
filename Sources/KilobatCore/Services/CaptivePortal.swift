@@ -66,7 +66,13 @@ public enum CaptivePortal {
             #"(?i)(?:window|document|top|self)?\.?location(?:\.href)?\s*=\s*["']([^"']+)["']"#,
             #"(?i)location\.(?:replace|assign)\(\s*["']([^"']+)["']\s*\)"#,
         ]
-        for pattern in patterns {
+        // One tag at a time: on a page that never closes its tags, the patterns would backtrack over the whole page for minutes.
+        for tag in DiagnosticProbe.matches(#"(?i)(<meta\b[^<>]{0,4096}>)"#, in: body) {
+            for pattern in patterns.prefix(2) {
+                if let match = DiagnosticProbe.matches(pattern, in: tag).first, let url = web(match) { return url }
+            }
+        }
+        for pattern in patterns.dropFirst(2) {
             if let match = DiagnosticProbe.matches(pattern, in: body).first, let url = web(match) { return url }
         }
         return nil
@@ -76,7 +82,7 @@ public enum CaptivePortal {
     /// English only, and only when the page names exactly one length near a word about access; a price list of
     /// plans names several and gives nil.
     public static func hint(in body: String) -> Int? {
-        let text = body.replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        let text = body.replacingOccurrences(of: #"<[^<>]+>"#, with: " ", options: .regularExpression)
         guard let regex = try? NSRegularExpression(pattern: #"(?i)\b(\d{1,4})[\s-]*(hours?|hrs?|minutes?|mins?)\b"#) else { return nil }
         let context = ["session", "access", "free", "internet", "wifi", "wi-fi", "valid", "expire", "limit", "connect", "online", "browsing"]
         var found = Set<Int>()
@@ -132,9 +138,14 @@ public enum CaptivePortal {
         // The ordinary user agent, not macOS's own: some sign-in pages answer its sheet differently from a browser.
         let request = URLRequest(url: endpoint.url)
         do {
-            let (data, response) = try await session.data(for: request, delegate: NoRedirects())
+            let (bytes, response) = try await session.bytes(for: request, delegate: NoRedirects())
             guard let http = response as? HTTPURLResponse else { return (.failed, "") }
-            let body = String(decoding: data.prefix(65_536), as: UTF8.self)
+            // Only the start is read: an endless answer would otherwise collect in memory until the resource timeout.
+            // A body cut short still says "portal" with its status and what came.
+            var data = Data()
+            do { for try await byte in bytes { data.append(byte); if data.count >= 65_536 { break } } } catch {}
+            bytes.task.cancel()
+            let body = String(decoding: data, as: UTF8.self)
             return (classify(endpoint, status: http.statusCode, body: body, location: http.value(forHTTPHeaderField: "Location")), body)
         } catch { return (.failed, "") }
     }

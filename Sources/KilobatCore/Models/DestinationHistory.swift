@@ -107,8 +107,9 @@ public enum DestinationHistory {
         if index.count != records.count { index = Dictionary(records.enumerated().map { (key($0.element), $0.offset) }, uniquingKeysWith: { first, _ in first }) }
         var host = host
         if index[day + "|" + app + "|" + host] == nil {
-            let today = records.reduce(0) { $0 + ($1.day == day && $1.app == app ? 1 : 0) }
-            if today >= maxHostsPerDay || records.count >= maxRecords { host = "" }
+            // The day's "other sites" row means the app reached its cap today: counting again for every sample would scan every row.
+            if records.count >= maxRecords || index[day + "|" + app + "|"] != nil { host = "" }
+            else if records.reduce(0, { $0 + ($1.day == day && $1.app == app ? 1 : 0) }) >= maxHostsPerDay { host = "" }
         }
         let key = day + "|" + app + "|" + host
         if let at = index[key] {

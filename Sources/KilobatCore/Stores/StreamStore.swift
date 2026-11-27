@@ -85,12 +85,16 @@ import Observation
     public var heldBlocks: [String] { blocked.values.map(\.id).sorted() }
     @ObservationIgnored private var released: Set<String> = []
     @ObservationIgnored private var holdDeadline: Task<Void, Never>?
+    /// When Call mode's time limit started counting for this stream, kept when a long stream is split.
+    @ObservationIgnored private var holdsFrom: Date?
     @ObservationIgnored private var lastHoldScan = Date.distantPast
     @ObservationIgnored private weak var traffic: TrafficStore?
     @ObservationIgnored private weak var diagnostics: DiagnosticStore?
 
     /// A stream this short isn't worth a report: a test start, or a stream stopped at once.
     static let shortest: TimeInterval = 60
+    /// A stream that never ends is reported in parts this long, as remote sessions are.
+    static let longest: TimeInterval = 8 * 3600
     /// While OBS isn't there, Kilobat looks for it this often; connecting to a closed local port costs nothing.
     static let retry: TimeInterval = 15
     /// OBS's own process, never blamed for its own upload.
@@ -158,7 +162,7 @@ import Observation
     private func reconnect() async {
         connectionGeneration = UUID()
         let previous = client, pending = pendingClient
-        client = nil; pendingClient = nil
+        client = nil; pendingClient = nil; holdsFrom = nil
         connection = enabled ? .connecting : .off
         lastAttempt = .distantPast
         async let disconnectPending: Void? = pending?.disconnect()
@@ -182,7 +186,7 @@ import Observation
             let version = await client.version
             let connected = await client.connected
             guard enabled, generation == connectionGeneration, pendingClient === client else { await client.disconnect(); return }
-            guard connected else { connection = .failed(OBSError(.closed)); return }
+            guard connected else { await client.disconnect(); connection = .failed(OBSError(.closed)); return }
             self.client = client
             connection = .connected(version: version)
             stateChanged = true
@@ -195,7 +199,9 @@ import Observation
     /// OBS quit or closed the connection: a stream in progress ends there.
     private func dropped(_ closed: OBSClient) {
         guard client === closed else { return }
-        client = nil
+        // Its handlers hold the client; disconnecting lets both go.
+        Task { await closed.disconnect() }
+        client = nil; holdsFrom = nil
         connection = .failed(OBSError(.notRunning))
         lastAttempt = Date()
         if live != nil { Task { await finish(report: true) } }
@@ -224,9 +230,11 @@ import Observation
         // OBS counts from the stream's start; Kilobat measures from now, when it may have joined late.
         let start = now.addingTimeInterval(-min(status.duration / 1000, 5))
         live = Live(start: start, status: status, first: status)
+        if holdsFrom == nil { holdsFrom = start }
+        let from = holdsFrom ?? start
         holdDeadline?.cancel()
         holdDeadline = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(max(0, start.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
+            do { try await Task.sleep(for: .seconds(max(0, from.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
             catch { return }
             guard let self, self.live?.start == start else { return }
             self.release()
@@ -245,7 +253,8 @@ import Observation
         guard enabled, self.client === client, let live, let traffic, let diagnostics else { return }
         let generation = connectionGeneration
         guard let status = try? await client.streamStatus(), connectionGeneration == generation, self.live?.start == live.start else { return }
-        guard status.active else { await finish(report: true); return }
+        guard status.active else { holdsFrom = nil; await finish(report: true); return }
+        if now.timeIntervalSince(live.start) >= Self.longest { await finish(report: true); return }
         let stats = try? await client.stats()
         guard connectionGeneration == generation, self.live?.start == live.start else { return }
         self.live?.status = status; self.live?.stats = stats
@@ -291,7 +300,7 @@ import Observation
     /// the person brings to the front. A launcher is left alone while a game is in front: it runs the game being streamed.
     private func hold(traffic: TrafficStore, now: Date) {
         guard holdApps, allowed(), let live else { return }
-        if Date().timeIntervalSince(live.start) >= CallMode.limit { release(); return }
+        if Date().timeIntervalSince(holdsFrom ?? live.start) >= CallMode.limit { release(); return }
         let front = NSWorkspace.shared.frontmostApplication
         if let id = front?.bundleIdentifier, let name = CallMode.name(of: id) { released.insert(name) }
         let gaming = CallMode.gameInFront(bundleURL: front?.bundleURL, executable: front?.executableURL?.lastPathComponent)

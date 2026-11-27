@@ -20,6 +20,7 @@ public enum SmartHomeBrowser {
     final class Session: @unchecked Sendable {
         let queue = DispatchQueue(label: "co.seifi.kilobat.smarthome")
         private var refs: [DNSServiceRef] = []
+        private var resolves: [String: DNSServiceRef] = [:]
         private var contexts: [Context] = []
         private var records: [String: BonjourInstance] = [:]
         private var order: [String] = []
@@ -87,12 +88,15 @@ public enum SmartHomeBrowser {
                 box.session?.resolved(box.key, interface: interface, error: error, host: host.map { String(cString: $0) }, port: UInt16(bigEndian: port), txt: data)
             }, context(key))
             keep(ref, status)
+            if status == DNSServiceErrorType(kDNSServiceErr_NoError), let ref { resolves[key] = ref }
         }
 
         fileprivate func resolved(_ key: String, interface: UInt32, error: DNSServiceErrorType, host: String?, port: UInt16, txt: Data) {
             guard error == DNSServiceErrorType(kDNSServiceErr_NoError), var record = records[key], record.host == nil else { return }
             record.host = host; record.port = port; record.txt = TXTRecord.parse(txt)
             records[key] = record
+            // Answered: its socket to mDNSResponder is let go now, not held until the browse ends.
+            if let ref = resolves.removeValue(forKey: key) { refs.removeAll { $0 == ref }; DNSServiceRefDeallocate(ref) }
             guard let host else { return }
             var ref: DNSServiceRef?
             let status = DNSServiceGetAddrInfo(&ref, 0, interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6), host, { _, _, _, error, _, address, _, context in
@@ -110,7 +114,7 @@ public enum SmartHomeBrowser {
 
         private func end() {
             for ref in refs { DNSServiceRefDeallocate(ref) }
-            refs = []; contexts = []
+            refs = []; resolves = [:]; contexts = []
             let result = order.compactMap { records[$0] }
             let done = finish; finish = { _ in }
             done((result, denied))

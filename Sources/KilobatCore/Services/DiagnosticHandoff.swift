@@ -24,13 +24,19 @@ public enum DiagnosticHandoff {
         let verification = result.status == 0 ? String(localized: "Verification: passed") : String(localized: "Verification: failed or unsigned")
         return [path, verification, result.output, details.output, String(localized: "A valid signature identifies signed code; it does not establish that its network activity is safe.")].joined(separator: "\n")
     }
-    public static func discoverHosts(target: String) async throws -> String {
-        // Deliberately restrict discovery to private IPv4 ranges, with at most 256 addresses.
+    /// Deliberately restrict discovery to private IPv4 ranges, with at most 256 addresses.
+    static func discoveryTarget(_ target: String) -> Bool {
         let pieces = target.split(separator: "/", omittingEmptySubsequences: false)
-        let octets = pieces.first?.split(separator: ".").compactMap { Int($0) } ?? []
-        guard pieces.count <= 2, octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }),
-              octets[0] == 10 || (octets[0] == 192 && octets[1] == 168) || (octets[0] == 172 && (16...31).contains(octets[1])),
-              pieces.count == 1 || Int(pieces[1]).map({ (24...32).contains($0) }) == true else { throw DiagnosticError(String(localized: "Enter a private IPv4 address or a /24…/32 private subnet.")) }
+        func digits(_ part: Substring) -> Bool { (1...3).contains(part.count) && part.utf8.allSatisfy { (48...57).contains($0) } }
+        let parts = pieces.first?.split(separator: ".", omittingEmptySubsequences: false) ?? []
+        guard parts.count == 4, parts.allSatisfy(digits), pieces.count == 1 || digits(pieces[1]) else { return false }
+        let octets = parts.compactMap { Int($0) }
+        return pieces.count <= 2 && octets.count == 4 && octets.allSatisfy({ (0...255).contains($0) })
+            && (octets[0] == 10 || (octets[0] == 192 && octets[1] == 168) || (octets[0] == 172 && (16...31).contains(octets[1])))
+            && (pieces.count == 1 || Int(pieces[1]).map({ (24...32).contains($0) }) == true)
+    }
+    public static func discoverHosts(target: String) async throws -> String {
+        guard discoveryTarget(target) else { throw DiagnosticError(String(localized: "Enter a private IPv4 address or a /24…/32 private subnet.")) }
         guard let binary = ["/opt/homebrew/bin/nmap", "/usr/local/bin/nmap"].first(where: FileManager.default.isExecutableFile) else { throw DiagnosticError(String(localized: "Install nmap separately to use host discovery. No scanner is bundled.")) }
         let result = await CommandRunner.run(binary, ["-sn", "-n", "--max-retries", "1", "--host-timeout", "3s", target], timeout: 30)
         return result.output.isEmpty ? String(localized: "No discovery output. Check local network access.") : result.output

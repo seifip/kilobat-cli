@@ -9,6 +9,12 @@ public enum Starlink {
     static let getStatus = 1004, getHistory = 1007, getObstructionMap = 2008
     static let dishStatus = 2004, dishHistory = 2006, dishObstructionMap = 2008
 
+    /// A rate or a length as the dish gives it: never negative, and 1e12 is far above any real one while keeping a
+    /// window's sum of samples inside `UInt64`. Anything else is no reading.
+    static func reading(_ value: Float?, upTo limit: Double = 1e12) -> Double? {
+        value.flatMap { $0.isFinite && $0 >= 0 && Double($0) <= limit ? Double($0) : nil }
+    }
+
     /// The dish's status; nil when no dish answers.
     public static func status(timeout: TimeInterval = 3) async -> StarlinkStatus? {
         guard let response = try? await request(getStatus, timeout: timeout) else { return nil }
@@ -118,16 +124,16 @@ public struct StarlinkStatus: Codable, Sendable, Equatable {
             state = cause.state
             self.outage = StarlinkOutage(message: outage, now: now)
         } else { state = .online }
-        popLatencyMs = status.float(1009).map(Double.init)
-        popDropRate = status.float(1003).map(Double.init) ?? 0
-        downlinkBps = status.float(1007).map(Double.init) ?? 0
-        uplinkBps = status.float(1008).map(Double.init) ?? 0
+        popLatencyMs = Starlink.reading(status.float(1009))
+        popDropRate = Starlink.reading(status.float(1003), upTo: 1) ?? 0
+        downlinkBps = Starlink.reading(status.float(1007)) ?? 0
+        uplinkBps = Starlink.reading(status.float(1008)) ?? 0
         if let stats = status.message(1004) {
-            fractionObstructed = Double(stats.float(1) ?? 0)
+            fractionObstructed = Starlink.reading(stats.float(1), upTo: 1) ?? 0
             currentlyObstructed = stats.bool(5) ?? false
-            obstructionValidSeconds = stats.float(4).map(Double.init)
-            if let duration = stats.float(6), duration > 0, let interval = stats.float(7), interval.isFinite, interval > 0 {
-                obstructionDurationSeconds = Double(duration); obstructionIntervalSeconds = Double(interval)
+            obstructionValidSeconds = Starlink.reading(stats.float(4))
+            if let duration = Starlink.reading(stats.float(6)), duration > 0, let interval = Starlink.reading(stats.float(7)), interval > 0 {
+                obstructionDurationSeconds = duration; obstructionIntervalSeconds = interval
             }
         }
         if let flags = status.message(1005) { alerts = StarlinkStatus.Alert.fields.compactMap { flags.bool($0.0) == true ? $0.1 : nil } }
@@ -136,7 +142,7 @@ public struct StarlinkStatus: Codable, Sendable, Equatable {
         }
         rebootReady = status.bool(1030)
         secondsUntilUpdateReboot = status.int(1031).map { Double($0) }
-        azimuth = status.float(1011).map(Double.init); elevation = status.float(1012).map(Double.init)
+        azimuth = status.float(1011).flatMap { $0.isFinite ? Double($0) : nil }; elevation = status.float(1012).flatMap { $0.isFinite ? Double($0) : nil }
         // proto3 leaves out a zero, so a missing class is STATIONARY.
         mobility = status.int(1017).map { switch $0 { case 1: "nomadic"; case 2: "mobile"; default: "stationary" } } ?? "stationary"
         ethernetMbps = status.int(1016).map(Int.init)
@@ -337,11 +343,11 @@ public struct StarlinkHistory: Codable, Sendable, Equatable {
             let next = current % size
             return Array(ring[next...] + ring[..<next])
         }
-        dropRate = unwrap(drop).map(Double.init)
+        dropRate = unwrap(drop).map { Starlink.reading($0, upTo: 1) ?? 0 }
         // A sample whose pings were all lost carries no latency.
         let lost = unwrap(drop)
-        latencyMs = unwrap(latency).enumerated().map { index, value in (index < lost.count && lost[index] >= 1) || value <= 0 ? nil : Double(value) }
-        downlinkBps = unwrap(down).map(Double.init); uplinkBps = unwrap(up).map(Double.init)
+        latencyMs = unwrap(latency).enumerated().map { index, value in (index < lost.count && lost[index] >= 1) || value <= 0 || !value.isFinite ? nil : Double(value) }
+        downlinkBps = unwrap(down).map { Starlink.reading($0) ?? 0 }; uplinkBps = unwrap(up).map { Starlink.reading($0) ?? 0 }
         outages = history.messages(1009).compactMap { StarlinkOutage(message: $0, now: now) }.sorted { $0.start < $1.start }
     }
 
@@ -369,8 +375,10 @@ public struct StarlinkSkyMap: Codable, Sendable, Equatable {
 
     init?(response: ProtoMessage) {
         guard let map = response.message(Starlink.dishObstructionMap) else { return nil }
-        rows = Int(map.uint(1) ?? 0); columns = Int(map.uint(2) ?? 0); snr = map.floats(3)
-        guard rows > 0, columns > 0, snr.count == rows * columns else { return nil }
+        // A real map is 123 by 123; anything far beyond that isn't one, and must not reach the multiplication below.
+        guard let rowCount = map.uint(1), let columnCount = map.uint(2), (1...1_024).contains(rowCount), (1...1_024).contains(columnCount) else { return nil }
+        rows = Int(rowCount); columns = Int(columnCount); snr = map.floats(3)
+        guard snr.count == rows * columns else { return nil }
         minElevation = map.float(4).map(Double.init); maxTheta = map.float(5).map(Double.init)
         // FRAME_UT (2) turns the map with the dish; anything else, including no answer, reads as the compass frame.
         earthFrame = map.int(6) != 2

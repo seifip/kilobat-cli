@@ -186,13 +186,19 @@ public struct UsageComparison: Codable, Equatable, Sendable {
         let historyStart = usage.map(\.date).min()
         var recorded = 0.0, gaps: [(start: Date, end: Date, reason: GapReason, networks: Set<String>)] = []
         var cursor = calendar.dateInterval(of: .hour, for: start)?.start ?? start
+        // Sleeps in order, walked once alongside the hours.
+        let naps = sleeps.filter { $0.end > cursor && $0.start < until }.sorted { $0.start < $1.start }
+        var firstNap = 0
         while cursor < until {
             let next = calendar.dateInterval(of: .hour, for: cursor)?.end ?? cursor.addingTimeInterval(3_600)
             let slot = DateInterval(start: max(cursor, start), end: min(next, until)), day = calendar.startOfDay(for: cursor)
             defer { cursor = next }
             if hours.contains(cursor) || days.contains(day) { recorded += slot.duration; continue }
             let others = (otherHours[cursor] ?? []).union(otherDays[day] ?? [])
-            let asleep = sleeps.reduce(0.0) { $0 + ($1.intersection(with: slot)?.duration ?? 0) } * 2 >= slot.duration
+            while firstNap < naps.count, naps[firstNap].end <= slot.start { firstNap += 1 }
+            var slept = 0.0, nap = firstNap
+            while nap < naps.count, naps[nap].start < slot.end { slept += naps[nap].intersection(with: slot)?.duration ?? 0; nap += 1 }
+            let asleep = slept * 2 >= slot.duration
             let reason: GapReason = !others.isEmpty ? .otherNetwork : (historyStart.map { slot.end <= $0 } ?? true) ? .beforeHistory : asleep ? .asleep : .notRecorded
             if let last = gaps.last, last.reason == reason, last.end == slot.start { gaps[gaps.count - 1] = (last.start, slot.end, reason, last.networks.union(others)) }
             else { gaps.append((slot.start, slot.end, reason, others)) }

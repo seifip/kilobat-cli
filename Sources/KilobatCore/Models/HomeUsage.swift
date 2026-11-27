@@ -310,7 +310,8 @@ public struct RouterMeter: Sendable, Equatable {
         let seconds = date.timeIntervalSince(last.date)
         guard seconds <= longest else { return nil }
         // Half as much again as the line's own maximum, plus a megabyte: counters include what a sync rate doesn't.
-        func limit(_ max: Double?) -> UInt64? { max.flatMap { $0 > 0 ? UInt64($0 * seconds * 1.5) + 1_000_000 : nil } }
+        // A maximum that can't be a byte count (infinite, or from a faulty router) counts as none.
+        func limit(_ max: Double?) -> UInt64? { max.flatMap { let bytes = $0 * seconds * 1.5; return $0 > 0 && bytes < 1e18 ? UInt64(bytes) + 1_000_000 : nil } }
         let d = Self.delta(from: last.down, to: down, bits: bits, limit: limit(downMax)), u = Self.delta(from: last.up, to: up, bits: bits, limit: limit(upMax))
         guard Double(d) / seconds <= Self.ceiling, Double(u) / seconds <= Self.ceiling else { return nil }
         return (d, u, Double(d) / seconds, Double(u) / seconds)

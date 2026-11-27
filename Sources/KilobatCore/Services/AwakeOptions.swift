@@ -55,8 +55,8 @@ public struct AwakeOptions: Equatable, Sendable {
         if (parsed.app != nil || quiet != nil) && !parsed.untilQuiet { throw fail("--app and --quiet go with --until-quiet.") }
         if let app = parsed.app, !(app.contains(".") || app.hasPrefix("process:")) { throw fail("--app takes a bundle ID such as com.example.App, or process:<name>.") }
         if let quiet {
-            guard let seconds = seconds(quiet), case let minutes = Int((seconds / 60).rounded(.up)), (1...60).contains(minutes) else { throw fail("--quiet takes 1 to 60 minutes, e.g. 3m.") }
-            parsed.quietMinutes = minutes
+            guard let seconds = seconds(quiet), case let minutes = (seconds / 60).rounded(.up), (1...60).contains(minutes) else { throw fail("--quiet takes 1 to 60 minutes, e.g. 3m.") }
+            parsed.quietMinutes = Int(minutes)
         }
         // The helper caps any stretch at 8 hours; a longer timer would quietly lose the lid partway.
         if parsed.lidClosed, let duration = parsed.duration, duration > LidPolicy.longest { throw fail("--lid-closed holds 8 hours at most; use --for 8h or less.") }

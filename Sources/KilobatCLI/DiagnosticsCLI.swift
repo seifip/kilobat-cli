@@ -21,8 +21,6 @@ enum DiagnosticsCLI {
             let watch = args.contains("--watch")
             var best = 0
             let appSSID = await WiFiCLI.appSSID()
-            if watch { Terminal.nonblockingInput() }
-            defer { Terminal.restoreInput() }
             repeat {
                 let radio = await probe.radio()
                 best = max(best, radio.score ?? 0)
@@ -36,9 +34,13 @@ enum DiagnosticsCLI {
                 }
                 fflush(stdout)
                 if watch {
-                    var input = [UInt8](repeating: 0, count: 32)
-                    let count = read(STDIN_FILENO, &input, input.count)
-                    if count == 0 || (count > 0 && input.prefix(count).contains(113)) { break }
+                    // Asks whether input is waiting instead of making the terminal, shared with whatever runs next, non-blocking.
+                    var waiting = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+                    if poll(&waiting, 1, 0) > 0 {
+                        var input = [UInt8](repeating: 0, count: 32)
+                        let count = read(STDIN_FILENO, &input, input.count)
+                        if count == 0 || (count > 0 && input.prefix(count).contains(113)) { break }
+                    }
                     try await Task.sleep(for: .milliseconds(250))
                 }
             } while watch

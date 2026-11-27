@@ -24,6 +24,8 @@ public struct DataPack: Codable, Equatable, Identifiable, Sendable {
     public var holdUploads: Bool?
     /// Alert only or Block, as for any budget. Nil is Alert only: packs saved before they were budgets only notified.
     public var mode: NetworkBudgetMode?
+    /// What it used, kept once it finished: its usage history expires before it leaves the list.
+    public var finalUsed: UInt64?
 
     public static let defaultAlerts = [50, 80, 95]
     public static let maximumBytes: UInt64 = 10_000_000_000_000
@@ -237,7 +239,7 @@ public enum DataPacks {
     public static func status(_ pack: DataPack, packs: [DataPack], usage: [UsageEntry], names: (String) -> String?, pending: (key: String, bytes: UInt64)? = nil,
                               now: Date = Date(), calendar: Calendar = .current) -> DataPackStatus {
         let mac = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending, to: now, calendar: calendar)
-        let used: UInt64
+        var used: UInt64
         if let correction = pack.correction {
             let since = macBytes(pack, packs: packs, usage: usage, names: names, pending: pending,
                                  from: correction.after, to: now, calendar: calendar)
@@ -245,6 +247,7 @@ public enum DataPacks {
         } else {
             used = min(pack.bytes, mac)
         }
+        if now >= pack.finish, let frozen = pack.finalUsed { used = min(pack.bytes, frozen) }
         let left = pack.bytes - used
         let state: DataPackStatus.State
         if now < pack.start { state = .upcoming }
@@ -340,9 +343,9 @@ public struct DataPackAlert: Equatable, Sendable {
             let crossed = ledger.crossed(pack.thresholds, fraction: status.fraction, key: key, now: now)
             // A correction is the carrier's own figure, which the person just read: thresholds it passes don't notify.
             let synced = "packsync|\(id)"
-            if let correction = pack.correction, correction.at > (ledger.seen[synced] ?? .distantPast) {
+            if let correction = pack.correction, correction.at > now.addingTimeInterval(-120), correction.at > (ledger.seen[synced] ?? .distantPast) {
                 ledger.seen[synced] = correction.at
-                if correction.at > now.addingTimeInterval(-120) { continue }
+                continue
             }
             let offer = pack.holdUploads != true
             let forecast = status.forecast(calendar: calendar)
@@ -429,7 +432,9 @@ public enum PackCommand: Equatable, Sendable {
         case "correct":
             try only(["--pack"])
             guard rest.count == 2 else { throw DataPackError("Use pack correct <GB-left>, with what your carrier’s app says is left.") }
-            return (.correct(leftGB: try gigabytes(rest[1]), pack: options["--pack"]?.first), json)
+            let left = try gigabytes(rest[1])
+            guard left <= Double(DataPack.maximumBytes) / 1_000_000_000 else { throw DataPackError("A data pack holds at most 10000 GB.") }
+            return (.correct(leftGB: left, pack: options["--pack"]?.first), json)
         case "end":
             try only(["--pack"])
             guard rest.count == 1 else { throw DataPackError("Use pack end [--pack <name>].") }

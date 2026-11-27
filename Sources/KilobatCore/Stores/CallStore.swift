@@ -43,8 +43,12 @@ import Observation
     @ObservationIgnored private var candidate: (call: CallDetector.Call, since: Date)?
     @ObservationIgnored private var silentSince: Date?
     @ObservationIgnored private var sampler: LineSampler?
+    /// When call mode's time limit started counting for the call on the microphone, kept when a long call is split.
+    @ObservationIgnored private var holdsFrom: (call: CallDetector.Call, since: Date)?
     /// A call this short isn't worth a card; mic tests and voice messages are.
     static let shortest: TimeInterval = 60
+    /// A call that never ends is reported in parts this long, as remote sessions are.
+    static let longest: TimeInterval = 8 * 3600
 
     public init(directory: URL? = nil, ledger: URL = CallMode.ledgerURL) {
         self.ledger = ledger
@@ -92,19 +96,22 @@ import Observation
         let call = CallDetector.microphoneUsers().flatMap { CallDetector.call(microphone: $0) }
         let now = Date()
         if let live {
-            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); hold(traffic: traffic, now: now, start: live.start) }
+            if now.timeIntervalSince(live.start) >= Self.longest { await stop(report: true, end: now, diagnostics: diagnostics); return }
+            if call?.app == live.call.app { silentSince = nil; record(traffic: traffic, diagnostics: diagnostics, call: live.call, now: now); hold(traffic: traffic, now: now, start: holdsFrom?.since ?? live.start) }
             else if let since = silentSince, now.timeIntervalSince(since) >= 10 { await stop(report: true, end: since, diagnostics: diagnostics) }
             else if silentSince == nil { silentSince = now }
             return
         }
         // Ten seconds on the microphone before it counts, so a quick dictation or mic check doesn't start one.
-        guard let call else { candidate = nil; return }
+        guard let call else { candidate = nil; holdsFrom = nil; return }
         if candidate?.call != call { candidate = (call, now); return }
         guard let since = candidate?.since, now.timeIntervalSince(since) >= 10 else { return }
         live = (call, since); candidate = nil; silentSince = nil; released = []
+        if holdsFrom?.call != call { holdsFrom = (call, since) }
+        let from = holdsFrom?.since ?? since
         holdDeadline?.cancel()
         holdDeadline = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(max(0, since.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
+            do { try await Task.sleep(for: .seconds(max(0, from.addingTimeInterval(CallMode.limit).timeIntervalSinceNow))) }
             catch { return }
             guard let self, self.live?.start == since else { return }
             self.release()
@@ -113,12 +120,12 @@ import Observation
         self.sampler = sampler
         await sampler.begin(diagnostics: diagnostics)
         guard live?.start == since else { return }
-        hold(traffic: traffic, now: Date(), start: since)
+        hold(traffic: traffic, now: Date(), start: from)
         if callModeAirDrop, callMode, allowed(), !diagnostics.lowLatency.active, !diagnostics.lowLatency.busy {
-            let remaining = CallMode.limit - Date().timeIntervalSince(since)
+            let remaining = CallMode.limit - Date().timeIntervalSince(from)
             guard remaining > 0 else { return }
             await diagnostics.lowLatency.enable(seconds: remaining)
-            guard live?.start == since, callMode, allowed(), Date().timeIntervalSince(since) < CallMode.limit else {
+            guard live?.start == since, callMode, allowed(), Date().timeIntervalSince(from) < CallMode.limit else {
                 if diagnostics.lowLatency.active { diagnostics.lowLatency.release() }
                 return
             }
@@ -199,7 +206,7 @@ import Observation
         release()
         let worth = report && end.timeIntervalSince(live.start) >= Self.shortest
         var samples = await sampler.finish(report: worth, end: end, diagnostics: diagnostics)
-        guard worth, !samples.internet.isEmpty else { return }
+        guard worth, samples.internet.contains(where: { $0.ms != nil }) else { return }
         let network = sampler.reportNetwork
         var card = CallAnalysis.report(app: live.call.app, browser: live.call.browser, start: live.start, end: end, network: network, samples: samples)
         card.held = held.isEmpty ? nil : held
@@ -230,12 +237,15 @@ public actor PingStream {
     private var stopped = false
     public var isRunning: Bool { process?.isRunning == true }
     private var pings: [CallSamples.Ping] = []
+    /// How many pings a live readout keeps; nil keeps every one, as reports need.
+    private let keep: Int?
+    private var cycle = 0, newest = 0
     /// A ping a second to one address as it is, such as a device on the local network.
-    public static func address(_ address: String, start: Date) -> PingStream { PingStream(target: address, start: start, resolve: { $0 }) }
+    public static func address(_ address: String, start: Date) -> PingStream { PingStream(target: address, start: start, resolve: { $0 }, keep: 900) }
     /// Seconds from the call's start to the first ping; each ping's time comes from its sequence number, since a lost one is only reported later.
     private var offset = 0.0
-    init(target: String, start: Date, resolve: @escaping @Sendable (String) async throws -> String = StutterTest.host(for:)) {
-        self.target = target; self.start = start; self.resolve = resolve
+    init(target: String, start: Date, resolve: @escaping @Sendable (String) async throws -> String = StutterTest.host(for:), keep: Int? = nil) {
+        self.target = target; self.start = start; self.resolve = resolve; self.keep = keep
     }
 
     public func start() async {
@@ -267,12 +277,22 @@ public actor PingStream {
         return pings.sorted { $0.at < $1.at }
     }
 
-    private func ingest(_ text: String) {
+    func ingest(_ text: String) {
         guard !stopped else { return }
         for line in text.split(separator: "\n").map(String.init) {
-            guard let seq = DiagnosticProbe.matches("icmp_seq[= ]([0-9]+)", in: line).first.flatMap(Double.init) else { continue }
-            if line.contains("Request timeout") { pings.append(.init(at: offset + seq, ms: nil)) }
-            else if let time = DiagnosticProbe.matches("time=([0-9.]+) ms", in: line).first.flatMap(Double.init) { pings.append(.init(at: offset + seq, ms: time)) }
+            guard let seq = DiagnosticProbe.matches("icmp_seq[= ]([0-9]+)", in: line).first.flatMap({ Int($0) }) else { continue }
+            if line.contains("Request timeout") { pings.append(.init(at: second(seq), ms: nil)) }
+            else if let time = DiagnosticProbe.matches("time=([0-9.]+) ms", in: line).first.flatMap(Double.init) { pings.append(.init(at: second(seq), ms: time)) }
         }
+        if let keep, pings.count > 2 * keep { pings.removeFirst(pings.count - keep) }
+    }
+
+    /// Replies carry the 16-bit ICMP sequence, which starts over every 65,536 pings.
+    private func second(_ sequence: Int) -> Double {
+        let raw = sequence % 65_536
+        if raw < newest - 32_768 { cycle += 1; newest = raw }
+        else if raw > newest + 32_768, cycle > 0 { return offset + Double((cycle - 1) * 65_536 + raw) }
+        else { newest = max(newest, raw) }
+        return offset + Double(cycle * 65_536 + raw)
     }
 }

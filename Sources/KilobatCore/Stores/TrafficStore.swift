@@ -469,8 +469,13 @@ public final class TrafficStore {
     public var countsInterfaces: Bool { readCounters != nil && counterFailures < 5 }
     private func startCollector(scope: String) {
         let generation = UUID(); sampleGeneration = generation
+        let mailbox = SampleMailbox()
         monitor.start(scope: scope, onSample: { [weak self] snapshot in
-            Task { @MainActor in guard let self, self.sampleGeneration == generation else { return }; self.consume(snapshot) }
+            guard mailbox.put(snapshot) else { return }
+            Task { @MainActor in
+                guard let snapshot = mailbox.take(), let self, self.sampleGeneration == generation else { return }
+                self.consume(snapshot)
+            }
         }, onError: { [weak self] error in
             Task { @MainActor in guard let self, self.sampleGeneration == generation else { return }; self.monitoringFailed(error) }
         })
@@ -583,9 +588,10 @@ public final class TrafficStore {
             // History counts helpers and services under the app that owns them, as the app list does; local bytes apart.
             let historyName = owner.flatMap { $0 == path ? nil : AppTrafficGroup.displayName($0) } ?? name
             let counted = carrier ? ByteCount() : flow.total - flow.local
-            pendingApps[historyName, default: 0] += counted.total
-            pendingAppsSent[historyName, default: 0] += counted.sent
-            if flow.local.total > 0 { pendingAppsLocal[historyName, default: 0] += flow.local.total }
+            // Into the backing storage: views are told once per sample below, and not at all while none can see.
+            _pendingApps[historyName, default: 0] += counted.total
+            _pendingAppsSent[historyName, default: 0] += counted.sent
+            if flow.local.total > 0 { _pendingAppsLocal[historyName, default: 0] += flow.local.total }
         }
         for (id, paths) in owners {
             index[id]?.ownerPath = paths.count == 1 ? paths.first.flatMap { $0.isEmpty ? nil : $0 } : nil
@@ -603,8 +609,8 @@ public final class TrafficStore {
         if quiet { _liveSeries = series } else { liveSeries = series }
         let counted = macInternet(counters, elapsed: elapsed, attributed: internet, physicalLocal: physicalLocal, physical: physical)
         if quiet { _received += counted.received; _sent += counted.sent } else { received += counted.received; sent += counted.sent }
-        pendingReceived += counted.received; pendingSent += counted.sent
-        pendingLocal += local.total
+        _pendingReceived += counted.received; _pendingSent += counted.sent
+        _pendingLocal += local.total
         if quiet { _local += local.total; _tunnel += tunnel.total } else { self.local += local.total; self.tunnel += tunnel.total }
         if quiet {
             _download = Double(all.received) / elapsed; _upload = Double(all.sent) / elapsed
@@ -615,14 +621,22 @@ public final class TrafficStore {
             download = Double(all.received) / elapsed; upload = Double(all.sent) / elapsed
             downloadHistory = Array((downloadHistory + [download]).suffix(60))
             uploadHistory = Array((uploadHistory + [upload]).suffix(60))
+            announcePending()
             // A figure that stopped moving wouldn't notify on its own, so views catch up on what they missed.
             if heldBack { heldBack = false; announceHeldBack() }
         }
-        if snapshot.timestamp.timeIntervalSince(lastFlush) >= 30 { flush() }
+        // A clock set back behind the last flush starts the half minute again from this sample.
+        let sinceFlush = snapshot.timestamp.timeIntervalSince(lastFlush)
+        if sinceFlush < 0 { lastFlush = snapshot.timestamp } else if sinceFlush >= 30 { flush() }
     }
     private func announceHeldBack() {
         withMutation(keyPath: \.apps) {}; withMutation(keyPath: \.liveSeries) {}
         withMutation(keyPath: \.received) {}; withMutation(keyPath: \.sent) {}; withMutation(keyPath: \.local) {}; withMutation(keyPath: \.tunnel) {}
+        announcePending()
+    }
+    private func announcePending() {
+        withMutation(keyPath: \.pendingReceived) {}; withMutation(keyPath: \.pendingSent) {}; withMutation(keyPath: \.pendingApps) {}
+        withMutation(keyPath: \.pendingAppsSent) {}; withMutation(keyPath: \.pendingAttributed) {}
     }
     /// What the Mac sent to and received from the Internet in a sample. Wi-Fi and Ethernet counters see everything
     /// the carrier bills, from processes nettop missed too, and a VPN's traffic once (its tunnel isn't counted); their
@@ -634,12 +648,12 @@ public final class TrafficStore {
             counterFailures += 1
             if counterFailures < 5 { localCarry += physicalLocal }
             if counterFailures == 5 { interfaces.reset(); localCarry = ByteCount() }
-            if counterFailures < 5 { pendingAttributed += attributed.total }
+            if counterFailures < 5 { _pendingAttributed += attributed.total }
             return counterFailures < 5 ? ByteCount() : attributed
         }
         if counterFailures >= 5 { interfaces.reset() }
         counterFailures = 0
-        pendingAttributed += attributed.total
+        _pendingAttributed += attributed.total
         // Local bytes nettop reported before the counters moved are taken from the next sample instead.
         let local = physicalLocal + localCarry, link = interfaces.advance(counters, elapsed: elapsed, include: physical)
         localCarry = (local - link).capped(physicalLocal)
@@ -716,6 +730,16 @@ public final class TrafficStore {
     /// allowance survive that cutoff, and they share the usage file's atomic rewrite.
     @discardableResult func retainUsage(at date: Date) -> Bool {
         let cutoff = date.addingTimeInterval(-Double(preferences.historyDays ?? 365) * 86_400)
+        // A finished pack's figure is kept before its rows can expire: it stays listed for a year.
+        if dataPacks.contains(where: { $0.finish <= date && $0.finalUsed == nil }) {
+            let usage = allowanceUsage
+            preferences.dataPacks = dataPacks.map { pack in
+                guard pack.finish <= date, pack.finalUsed == nil else { return pack }
+                var frozen = pack
+                frozen.finalUsed = DataPacks.status(pack, packs: dataPacks, usage: usage, names: { self.networkName(of: $0) }, now: pack.finish).used
+                return frozen
+            }
+        }
         let packs = dataPacks
         let active = packs.filter { $0.start <= date && date < $0.finish }
         let expiredDetail = usage.contains { $0.date < cutoff }
@@ -888,5 +912,20 @@ enum StoredJSON {
     static func read<T: Decodable>(_ url: URL, quarantine: Bool = LocalFiles.movesUnreadableAside) -> T? {
         if case .value(let value) = load(url, quarantine: quarantine) as Loaded<T> { return value }
         return nil
+    }
+}
+
+/// The newest nettop sample waiting for the main actor. One sample and one task at most: when the main actor is busy
+/// the older samples are dropped, and the next one covers their time, since nettop's counters are cumulative.
+final class SampleMailbox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: TrafficSnapshot?
+    private var scheduled = false
+    /// True when the caller must schedule a delivery.
+    func put(_ snapshot: TrafficSnapshot) -> Bool {
+        lock.withLock { latest = snapshot; if scheduled { return false }; scheduled = true; return true }
+    }
+    func take() -> TrafficSnapshot? {
+        lock.withLock { scheduled = false; let snapshot = latest; latest = nil; return snapshot }
     }
 }

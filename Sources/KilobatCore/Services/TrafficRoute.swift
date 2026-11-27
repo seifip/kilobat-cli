@@ -10,7 +10,7 @@ public enum TrafficRoute: String, Codable, Sendable {
 
     /// A connection from nettop's per-connection rows, such as `tcp4 192.168.1.20:5000<->17.1.2.3:443` on en0.
     public static func classify(_ connection: Substring, interface: Substring) -> TrafficRoute {
-        guard let arrow = connection.range(of: "<->"), let space = connection.firstIndex(of: " ") else { return .internet }
+        guard let arrow = connection.range(of: "<->"), let space = connection[..<arrow.lowerBound].firstIndex(of: " ") else { return .internet }
         let v6 = connection[..<space].hasSuffix("6")
         let local = endpoint(connection[connection.index(after: space)..<arrow.lowerBound], v6: v6)
         let remote = endpoint(connection[arrow.upperBound...], v6: v6)

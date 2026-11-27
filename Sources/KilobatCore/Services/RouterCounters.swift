@@ -74,15 +74,23 @@ public enum RouterCounters {
     /// The router's model, else the name it calls itself.
     public static func modelName(description data: Data) -> String? {
         let text = String(decoding: data, as: UTF8.self)
-        for pattern in [#"<modelName>\s*([^<]+?)\s*</modelName>"#, #"<friendlyName>\s*([^<]+?)\s*</friendlyName>"#] {
-            if let name = DiagnosticProbe.matches(pattern, in: text).first, !name.isEmpty { return name.replacingOccurrences(of: "&amp;", with: "&") }
+        for name in ["modelName", "friendlyName"] {
+            if let value = tag(name, in: text), !value.isEmpty { return value.replacingOccurrences(of: "&amp;", with: "&") }
         }
         return nil
     }
 
+    /// The first `<name>…</name>` holding plain text, trimmed. A scan and not a pattern: `\s*` on both sides of a lazy
+    /// group takes cubic time on a long run of spaces.
+    static func tag(_ name: String, in text: String) -> String? {
+        guard let open = text.range(of: "<\(name)>"), let close = text.range(of: "</\(name)>", range: open.upperBound..<text.endIndex) else { return nil }
+        let value = text[open.upperBound..<close.lowerBound]
+        return value.contains("<") ? nil : value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     public static func controlURL(description data: Data, base: URL) -> String? {
         let text = String(decoding: data, as: UTF8.self)
-        let declared = DiagnosticProbe.matches(#"<URLBase>\s*([^<]+?)\s*</URLBase>"#, in: text).first
+        let declared = tag("URLBase", in: text).flatMap { $0.isEmpty ? nil : $0 }
         let descriptionBase = declared.flatMap { URL(string: $0) } ?? base
         for service in text.components(separatedBy: "<service>").dropFirst() where service.contains("WANCommonInterfaceConfig") {
             guard let start = service.range(of: "<controlURL>"), let end = service.range(of: "</controlURL>", range: start.upperBound..<service.endIndex) else { continue }

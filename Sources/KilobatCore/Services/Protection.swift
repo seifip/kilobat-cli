@@ -593,10 +593,15 @@ public enum FlowSniffer {
     static func http(_ bytes: [UInt8]) -> Result {
         let head = String(decoding: bytes.prefix(8_192), as: UTF8.self)
         guard methods.contains(where: { head.hasPrefix($0) || $0.hasPrefix(head) }) else { return .unknown }
-        guard let end = head.range(of: "\r\n\r\n") else {
+        // The finished lines, split on the bytes because "\r\n" is one Character; servers accept a bare LF as well as CRLF.
+        let lines = bytes.prefix(8_192).split(separator: 10, omittingEmptySubsequences: false).dropLast()
+            .map { String(decoding: $0.last == 13 ? $0.dropLast() : $0, as: UTF8.self) }
+        guard let end = lines.firstIndex(of: "") else {
+            // A whole first line that isn't an HTTP/1 request line: another protocol, which no more bytes will turn into a header.
+            if let first = lines.first, !first.contains(" HTTP/1.") { return .unknown }
             return bytes.count >= 8_192 ? .tooLarge : .needMore(min(8_192, bytes.count + 1_024))
         }
-        for line in head[..<end.lowerBound].components(separatedBy: "\r\n").dropFirst() {
+        for line in lines.prefix(end).dropFirst() {
             guard line.lowercased().hasPrefix("host:") else { continue }
             var value = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("[") { value = String(value.dropFirst().prefix { $0 != "]" }) }

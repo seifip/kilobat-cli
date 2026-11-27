@@ -153,8 +153,10 @@ public struct PortalNetwork: Codable, Sendable, Identifiable, Equatable {
         if checkedAt.map({ now.timeIntervalSince($0) > 600 }) == true { interruptObservation() }
         checkedAt = now
         guard check.state != .offline, identified else {
-            interruptObservation()
-            if check.state == .portal { status = .signInNeeded }
+            observedSessionStart = nil
+            // Nothing is learned here, but what this check saw still stands until the next one.
+            lastCheck = check.state == .offline ? nil : check
+            if check.state == .portal { status = .signInNeeded } else if check.state == .open { status = .none }
             return nil
         }
         let wasIntercepted = lastCheck?.state == .portal

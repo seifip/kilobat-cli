@@ -79,13 +79,15 @@ public struct CommandLineTool: Equatable, Sendable {
         if fm.isWritableFile(atPath: folder) {
             for name in ["kilobat", "kb"] {
                 let path = folder + "/" + name
+                if name == "kb", !ours(path) { continue }
                 if (try? fm.attributesOfItem(atPath: path)) != nil || (try? fm.destinationOfSymbolicLink(atPath: path)) != nil {
                     try fm.removeItem(atPath: path)
                 }
                 try fm.createSymbolicLink(atPath: path, withDestinationPath: helper)
             }
         } else {
-            let command = "mkdir -p \(shellQuoted(folder)) && ln -sfn \(shellQuoted(helper)) \(shellQuoted(folder + "/kilobat")) && ln -sfn \(shellQuoted(helper)) \(shellQuoted(folder + "/kb"))"
+            let kb = ours(folder + "/kb") ? " && ln -sfn \(shellQuoted(helper)) \(shellQuoted(folder + "/kb"))" : ""
+            let command = "mkdir -p \(shellQuoted(folder)) && ln -sfn \(shellQuoted(helper)) \(shellQuoted(folder + "/kilobat"))" + kb
             let script = "do shell script \"\(appleScriptEscaped(command))\" with administrator privileges"
             let result = await CommandRunner.run("/usr/bin/osascript", ["-e", script], timeout: 300)
             guard result.status == 0 else {
@@ -93,6 +95,16 @@ public struct CommandLineTool: Equatable, Sendable {
             }
         }
         return folder
+    }
+
+    /// Nothing there, or a link to a kilobat (an app copy's helper, or Homebrew's `kb`): safe to point at this app's copy.
+    /// Another tool called `kb` is left alone; the alias is a convenience.
+    static func ours(_ path: String) -> Bool {
+        let fm = FileManager.default
+        if let target = try? fm.destinationOfSymbolicLink(atPath: path) {
+            return (target as NSString).lastPathComponent == "kilobat" || URL(fileURLWithPath: path).resolvingSymlinksInPath().lastPathComponent == "kilobat"
+        }
+        return (try? fm.attributesOfItem(atPath: path)) == nil
     }
 
     /// At launch of an installed app: when no kilobat is on the PATH, links the app's copy into a folder writable

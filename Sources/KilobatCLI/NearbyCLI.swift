@@ -23,12 +23,16 @@ import KilobatCore
 
     static func stutter(_ args: [String], json: Bool) async throws {
         try KilobatCLI.allow(["stutter"] + args, ["--seconds", "--target"], valued: ["--seconds", "--target"])
-        func value(_ flag: String) -> String? { args.firstIndex(of: flag).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
+        func value(_ flag: String) throws -> String? {
+            guard let index = args.firstIndex(of: flag) else { return nil }
+            guard index + 1 < args.count else { throw CLIError("\(flag) needs a value. Use stutter [--seconds 10…60] [--target router|internet|<host>] [--json].") }
+            return args[index + 1]
+        }
         let seconds = try value("--seconds").map { text -> Int in
             guard let seconds = Int(text), StutterTest.seconds.contains(seconds) else { throw CLIError("--seconds takes 10 to 60.") }
             return seconds
         } ?? 20
-        let target = value("--target") ?? "router"
+        let target = try value("--target") ?? "router"
         if !json { FileHandle.standardError.write(Data("Pinging \(target) every 50 ms for \(seconds) s…\n".utf8)) }
         let result = try await StutterTest.run(target: target, seconds: seconds)
         if json { try WiFiCLI.printObject(stutterJSON(result, samples: true)); return }

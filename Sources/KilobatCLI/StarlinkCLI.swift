@@ -78,7 +78,7 @@ import KilobatCore
             let latency = history.latencyMs.compactMap { $0 }.sorted()
             result["history"] = ["seconds": history.seconds,
                                  "popLatencyMs": ["median": round(latency.isEmpty ? nil : latency[latency.count / 2]), "p95": round(latency.isEmpty ? nil : latency[min(latency.count - 1, latency.count * 95 / 100)])],
-                                 "allDevicesBytes": ["download": Int(history.bytes.down), "upload": Int(history.bytes.up)]] as [String: Any]
+                                 "allDevicesBytes": ["download": whole(history.bytes.down), "upload": whole(history.bytes.up)]] as [String: Any]
         }
         return result
     }
@@ -94,18 +94,18 @@ import KilobatCore
         let state = status.online ? Terminal.blue(status.stateTitle) : Terminal.rose(status.stateTitle)
         var head = "Starlink · \(state)"
         if let software = status.software { head += " · software \(software)" }
-        if let uptime = status.uptimeSeconds { head += " · up \(Duration.seconds(uptime).formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated, maximumUnitCount: 2)))" }
+        if let uptime = status.uptimeSeconds, uptime.isFinite, uptime >= 0 { head += " · up \(Duration.seconds(min(uptime, 1e9)).formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated, maximumUnitCount: 2)))" }
         var lines = [head]
         lines.append(pad("Ground station") + "\(ms(status.popLatencyMs)) · drop \(String(format: "%.1f%%", (status.popDropRate ?? 0) * 100))")
         lines.append(pad("Live") + "↓ \(mbps(status.downlinkBps))  ↑ \(mbps(status.uplinkBps))  (every device on the dish)")
         if let fraction = status.fractionObstructed {
             var line = pad("Obstructed") + String(format: "%.1f%% of the time", fraction * 100)
-            if let valid = status.obstructionValidSeconds, valid > 0 { line += " over \(Duration.seconds(valid).formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated, maximumUnitCount: 1)))" }
+            if let valid = status.obstructionValidSeconds, valid.isFinite, valid > 0 { line += " over \(Duration.seconds(min(valid, 1e9)).formatted(.units(allowed: [.days, .hours, .minutes], width: .abbreviated, maximumUnitCount: 1)))" }
             line += status.currentlyObstructed == true ? " · " + Terminal.rose("blocked now") : " · clear now"
             lines.append(line)
         }
         if let every = status.obstructionIntervalSeconds, let duration = status.obstructionDurationSeconds {
-            lines.append(pad("Prolonged") + String(format: "%.1f s blocked every %@", duration, Duration.seconds(every).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 1))))
+            lines.append(pad("Prolonged") + String(format: "%.1f s blocked every %@", duration, Duration.seconds(min(every, 1e9)).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated, maximumUnitCount: 1))))
         }
         if status.alerts.isEmpty { lines.append(pad("Alerts") + "none") }
         for (index, alert) in status.alerts.enumerated() {
@@ -117,12 +117,14 @@ import KilobatCore
         }
         if let history = reading.history, history.seconds > 0 {
             let bytes = history.bytes
-            lines += ["", "Last \(history.seconds / 60) min through the dish (all devices): ↓ \(TrafficFormat.bytes(UInt64(bytes.down)))  ↑ \(TrafficFormat.bytes(UInt64(bytes.up)))"]
+            lines += ["", "Last \(history.seconds / 60) min through the dish (all devices): ↓ \(TrafficFormat.bytes(whole(bytes.down)))  ↑ \(TrafficFormat.bytes(whole(bytes.up)))"]
         }
         lines += ["", "Outages, last \(hours) h:"] + (reading.outages.isEmpty ? ["  none logged"] : outageLines(reading.outages, hours: hours))
         return lines.joined(separator: "\n")
     }
 
+    /// The dish's figures arrive unchecked; NaN, negative or huge ones would trap in the conversion.
+    static func whole(_ value: Double) -> UInt64 { value.isFinite && value > 0 ? UInt64(min(value, 9e18)) : 0 }
     static func pad(_ text: String) -> String { text.padding(toLength: 16, withPad: " ", startingAt: 0) }
 
     static func outageLines(_ outages: [StarlinkOutage], hours: Int) -> [String] {

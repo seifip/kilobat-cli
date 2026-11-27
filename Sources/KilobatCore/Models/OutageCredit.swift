@@ -204,7 +204,7 @@ public struct CreditTally: Codable, Sendable, Equatable {
         var pieces: [Piece] = []
         func awake(_ interval: DateInterval) -> [DateInterval] {
             var parts = [interval]
-            for sleep in sleeps {
+            for sleep in sleeps where sleep.end > interval.start && sleep.start < interval.end {
                 parts = parts.flatMap { part -> [DateInterval] in
                     guard let overlap = part.intersection(with: sleep), overlap.duration > 0 else { return [part] }
                     asleep += overlap.duration
@@ -216,7 +216,7 @@ public struct CreditTally: Codable, Sendable, Equatable {
         /// Like `awake`, but for the whole outage: out-of-period sleep is never added to the asleep total.
         func awakeOnly(_ interval: DateInterval) -> [DateInterval] {
             var parts = [interval]
-            for sleep in sleeps {
+            for sleep in sleeps where sleep.end > interval.start && sleep.start < interval.end {
                 parts = parts.flatMap { part -> [DateInterval] in
                     guard let overlap = part.intersection(with: sleep), overlap.duration > 0 else { return [part] }
                     return [DateInterval(start: part.start, end: overlap.start), DateInterval(start: overlap.end, end: part.end)].filter { $0.duration > 0 }
@@ -337,15 +337,26 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
 
         switch credit.kind {
         case .daily, .tiered:
+            // A rule in days counts calendar days from a local midnight, so a 23- or 25-hour day is still one.
+            let calendarDays = threshold.hours == nil && (threshold.days ?? 0) > 0
+            // A day is credited once, however many outages it held.
+            var credited = Set<Date>()
             for outage in qualifying {
                 let deadline = self.deadline(for: outage, threshold: threshold, calendar: calendar)
-                let all = Int(ceil(max(0, outage.judgedEnd.timeIntervalSince(deadline)) / 86_400 - 1e-9))
+                func start(_ block: Int) -> Date {
+                    calendarDays ? calendar.date(byAdding: .day, value: block, to: deadline) ?? deadline.addingTimeInterval(Double(block) * 86_400)
+                        : deadline.addingTimeInterval(Double(block) * 86_400)
+                }
+                var all = 0
+                if calendarDays { while start(all) < outage.judgedEnd { all += 1 } }
+                else { all = Int(ceil(max(0, outage.judgedEnd.timeIntervalSince(deadline)) / 86_400 - 1e-9)) }
                 let capped = capDays.map { min(all, $0) } ?? all
                 let first = (threshold.days ?? 0) + 1
                 var count = 0
                 for block in 0..<capped {
-                    let starts = deadline.addingTimeInterval(Double(block) * 86_400)
+                    let starts = start(block)
                     guard starts >= tally.from, starts < tally.to else { continue }
+                    guard credited.insert(calendar.startOfDay(for: starts)).inserted else { continue }
                     let day = first + block
                     count += 1
                     if credit.kind == .daily { amount = amount.map { $0 + (credit.amount ?? 0) } }
@@ -371,7 +382,7 @@ public struct CreditEstimate: Codable, Sendable, Equatable {
             amount = price.map { price in min(credit.capMonthly == true ? price : .infinity, price / daysInMonth * Double(days)) }
         }
         let needsPrice = price == nil && (credit.kind == .proRata || credit.kind == .fullDay)
-        let qualifies = !qualifying.isEmpty && (amount ?? 1) > 0
+        let qualifies = !qualifying.isEmpty && (amount ?? 1) > 0 && (credit.kind != .fullDay || days > 0)
         let askBy = policy.claim.windowDays.flatMap { window in qualifying.map(\.judgedEnd).min().map { $0.addingTimeInterval(Double(window) * 86_400) } }
         return CreditEstimate(policy: policy.id, qualifies: qualifies, amount: qualifies ? amount.map { ($0 * 100).rounded() / 100 } : nil, atLeast: atLeast && qualifies,
                               currency: credit.currency, days: credit.kind == .proRata ? nil : days, qualifying: qualifying.map(\.start), crossed: crossed,
@@ -570,11 +581,14 @@ public struct CreditClaim: Codable, Sendable, Equatable {
         var lines = [greeting, "",
                      String(localized: "I’m writing about my internet service, account number \(accountPlaceholder). The connection was down at these times in \(month):", comment: "Drafted outage credit claim; an account placeholder and a month"), ""]
         if tally.outages.isEmpty { lines.append(String(localized: "Kilobat recorded no outages beyond my router this month.", comment: "Drafted outage credit claim")) }
+        // The longest, in date order, so the rest really are the shorter ones.
         let long = tally.outages.filter { $0.seconds >= listed }
-        for outage in long.prefix(shown) { lines.append("• " + CreditText.span(outage)) }
-        let rest = tally.outages.count - min(long.count, shown)
+        let listedStarts = Set(long.sorted { $0.seconds != $1.seconds ? $0.seconds > $1.seconds : $0.start < $1.start }.prefix(shown).map(\.start))
+        let dated = long.filter { listedStarts.contains($0.start) }
+        for outage in dated { lines.append("• " + CreditText.span(outage)) }
+        let rest = tally.outages.count - dated.count
         if rest > 0 {
-            let seconds = tally.outages.filter { !long.prefix(shown).contains($0) }.reduce(0) { $0 + $1.seconds }
+            let seconds = tally.outages.filter { !listedStarts.contains($0.start) }.reduce(0) { $0 + $1.seconds }
             lines.append("• " + String(localized: "\(rest) shorter outages, \(CreditText.duration(seconds)) in all", comment: "Drafted outage credit claim; a count and a length"))
         }
         if let longest = tally.longest {
@@ -614,10 +628,11 @@ public enum CreditAlert {
     public static let lastKey = "credit.lastAlert"
     public static let spacing: TimeInterval = 86_400
 
-    public static func due(_ estimate: CreditEstimate, notified: Set<String>, last: Date?, now: Date = Date()) -> String? {
+    /// `outages` is the tally's, so an outage the month's edge cut keeps the key of its whole start.
+    public static func due(_ estimate: CreditEstimate, outages: [CreditOutage] = [], notified: Set<String>, last: Date?, now: Date = Date()) -> String? {
         if let last, now.timeIntervalSince(last) < spacing { return nil }
         for (start, crossed) in zip(estimate.qualifying, estimate.crossed) where crossed <= now && now.timeIntervalSince(crossed) < 2 * 86_400 {
-            let key = key(start)
+            let key = key(outages.first { $0.start == start }?.judgedStart ?? start)
             if !notified.contains(key) { return key }
         }
         return nil

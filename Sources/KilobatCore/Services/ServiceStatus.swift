@@ -377,7 +377,7 @@ public enum ServiceStatusParser {
     /// `names` match a service exactly, or by prefix when they end in "*", such as "iCloud*".
     static func apple(_ data: Data, names: [String], now: Date) throws -> Reading {
         // The file has been served both as plain JSON and wrapped in a callback; read what's between the outer braces.
-        guard let text = String(data: data, encoding: .utf8), let open = text.firstIndex(of: "{"), let close = text.lastIndex(of: "}") else {
+        guard let text = String(data: data, encoding: .utf8), let open = text.firstIndex(of: "{"), let close = text.lastIndex(of: "}"), open <= close else {
             throw Failure(message: "Apple’s status file isn’t JSON.")
         }
         let status = try JSONDecoder().decode(AppleStatus.self, from: Data(text[open...close].utf8))

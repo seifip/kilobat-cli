@@ -122,7 +122,7 @@ public struct SupportReport: Codable, Sendable {
         guard !cleaned.isEmpty else { return self }
         var copy = self
         copy.service = cleaned
-        let median = planCheck?.downloadMedianMbps ?? Self.median(speedTests.map(\.downloadMbps))
+        let median = planCheck?.downloadMedianMbps ?? PlanSummary.median(speedTests.map(\.downloadMbps))
         if let minimum = cleaned.minimumMbps, let median, median < minimum {
             copy.findings.append(String(localized: "The median download, \(Self.mbps(median)), was under the guaranteed minimum of \(Self.mbps(minimum)).", comment: "Provider report: the median measured download and the contract's minimum speed"))
         }
@@ -257,7 +257,7 @@ public struct SupportReport: Codable, Sendable {
         // A month against the plan says more than a day's tests, so it comes first.
         if let planCheck { lines.append(planCheck.sentence) }
         if !speeds.isEmpty {
-            let down = median(speeds.map(\.downloadMbps)) ?? 0, up = median(speeds.map(\.uploadMbps)) ?? 0
+            let down = PlanSummary.median(speeds.map(\.downloadMbps)) ?? 0, up = PlanSummary.median(speeds.map(\.uploadMbps)) ?? 0
             if let plan {
                 lines.append(String(localized: "\(speeds.count) speed tests: median \(mbps(down)) down, \(mbps(up)) up, \(String(format: "%.0f", locale: Locale.current, down / plan * 100))% of the \(mbps(plan)) plan.", comment: "A count of speed tests, the median download and upload speeds, and the download as a share of the internet plan’s speed"))
             } else {
@@ -299,7 +299,7 @@ public struct SupportReport: Codable, Sendable {
             // keeping standalone public IP measurements in DNS/route results.
             let urls = text.replacingOccurrences(of: #"\b(?:https?|wss?)://[^\s<>"']+"#, with: site,
                                                  options: [.regularExpression, .caseInsensitive])
-            let domains = urls.replacingOccurrences(of: #"(?<![\p{L}\p{N}_-])(?:[\p{L}\p{N}][\p{L}\p{N}_-]*\.)+\p{L}[\p{L}\p{N}_-]*(?![\p{L}\p{N}_-])(?::[0-9]+)?(?:/[^\s<>"']*)?"#,
+            let domains = urls.replacingOccurrences(of: #"(?<![\p{L}\p{N}_-])(?:[\p{L}\p{N}][\p{L}\p{N}_-]*\.)+\p{L}[\p{L}\p{N}_-]+(?![\p{L}\p{N}_-])(?::[0-9]+)?(?:/[^\s<>"']*)?"#,
                                                      with: site, options: [.regularExpression, .caseInsensitive])
             return names.reduce(domains) { $0.replacingOccurrences(of: $1.0, with: $1.1, options: [.caseInsensitive]) }
         }
@@ -486,7 +486,7 @@ public struct ComplaintEvidence: Codable, Sendable {
                             timeZone: TimeZone = .current, calendar: Calendar = .current) -> ComplaintEvidence {
         let from = report.created.addingTimeInterval(-Double(report.hours) * 3600), to = report.created
         let tests = speedTests
-            .filter { $0.networkKey == network && $0.networkChanged != true && $0.reservedAttempt != true && $0.result.date >= from && $0.result.date <= to }
+            .filter { $0.networkKey == network && $0.networkChanged != true && $0.result.date >= from && $0.result.date <= to }
             .sorted { $0.result.date < $1.result.date }
             .map { saved in
                 Test(date: saved.result.date, downloadMbps: saved.result.downloadMbps, uploadMbps: saved.result.uploadMbps, idleMs: saved.result.baseline.average,

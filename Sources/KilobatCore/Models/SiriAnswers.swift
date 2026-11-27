@@ -148,12 +148,11 @@ public enum SiriAnswers {
         // No reply at all, with no outage open: the target may just ignore ping.
         if internet == nil { return (fine(snapshot, input: input, facts: facts), .noReply) }
         let routerFine = (snapshot.router?.average ?? 0) <= 20
-        if routerFine, loss >= 3 || (internet ?? 0) > 120 {
-            let lossy = loss >= 3
-            let start = since { checks in
-                lossy ? checks.compactMap(\.measured.lossPercent).reduce(0, +) / Double(max(1, checks.count)) >= 2
-                      : median(checks.compactMap(\.measured.average)) > 100
-            }
+        let lossStart = loss >= 3 ? since { checks in checks.compactMap(\.measured.lossPercent).reduce(0, +) / Double(max(1, checks.count)) >= 2 } : nil
+        // With two targets, one lost reply is ordinary on Wi-Fi, as Health counts it, unless the loss has lasted.
+        let lossy = loss >= 3 && (snapshot.singleProbe || snapshot.heavyLoss || lossStart != nil)
+        if routerFine, lossy || (internet ?? 0) > 120 {
+            let start = lossy ? lossStart : since { checks in median(checks.compactMap(\.measured.average)) > 100 }
             let runLoss = start.map { start in
                 let run = input.history.filter { $0.date >= start && $0.networkKey == snapshot.networkKey }.compactMap { $0.measured.lossPercent }
                 return run.isEmpty ? loss : run.reduce(0, +) / Double(run.count)

@@ -26,13 +26,15 @@ struct KilobatCLI {
         let command = args.first ?? (Terminal.interactive ? "menu" : "status")
         // Flags after `--` belong to the command `awake` runs.
         if args.count >= 2, args.first == "help" || args.prefix(while: { $0 != "--" }).dropFirst().contains(where: { ["--help", "-h"].contains($0) }) {
-            print(try commandHelp(args.first == "help" ? args[1] : command)); return
+            let topic = args.first == "help" ? args[1] : command
+            print(["--help", "-h"].contains(topic) ? help : try commandHelp(topic)); return
         }
         // Like `mo status | jq`: piped output switches to JSON so scripts never parse the human layout.
-        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "wakes", "settings", "sessions", "agent-log", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "router", "service-speed", "week", "games", "starlink", "credit", "household", "down", "restrictions", "protect", "stream", "pack", "hotspot", "verdict", "local", "explain", "cloud-gaming", "smarthome", "wired", "shares", "macos", "path", "blocklists", "connections", "new-apps"].contains(command), !args.contains("--json") {
+        if Terminal.piped, ["status", "watch", "bandwidth", "access-policy", "approvals", "diagnose", "scan", "radar", "speedtest", "rules", "destinations", "devices", "interfaces", "http-check", "wifi", "channels", "networks", "health-history", "wakes", "settings", "sessions", "agent-log", "why", "conditions", "stutter", "airdrop", "bluetooth", "updaters", "uploads", "ip", "speed-compare", "lan-test", "plan", "router", "service-speed", "week", "games", "starlink", "credit", "household", "down", "restrictions", "protect", "stream", "pack", "hotspot", "verdict", "local", "explain", "cloud-gaming", "smarthome", "wired", "shares", "macos", "path", "blocklists", "connections", "new-apps", "calls", "remote"].contains(command), !args.contains("--json"), !args.contains("--csv") {
             if args.isEmpty { args = [command] }
             args.append("--json")
         }
+        if Terminal.piped, !args.contains("--json"), (command == "portal" && args.count == 1) || (command == "dns" && args.dropFirst().first == "fastest") { args.append("--json") }
         // A piped report gets the compact JSON summary unless a format was chosen; raw samples can run to megabytes.
         if Terminal.piped, command == "report", !args.contains("--json"), !args.contains("--csv") { args += args.dropFirst().first == "compare" ? ["--json"] : ["--summary", "--json"] }
         switch command {
@@ -226,7 +228,7 @@ struct KilobatCLI {
         }
     }
 
-    static let version = "0.49.0"
+    static let version = "0.49.1"
 
     /// Rejects arguments a command doesn't know instead of silently ignoring them. `valued` flags take the next argument.
     static func allow(_ args: [String], _ flags: Set<String>, valued: Set<String> = []) throws {
@@ -500,7 +502,7 @@ struct KilobatCLI {
             // Live screens return straight to the menu; one-shot output stays until a keypress.
             if !command.contains("--watch") {
                 print(Terminal.dim("\n  Press any key to return to the menu"))
-                Terminal.enter(); _ = await Terminal.waitForKey(3600); Terminal.leave()
+                Terminal.enter(screen: false); _ = await Terminal.waitForKey(3600); Terminal.leave()
             }
         }
     }
@@ -561,7 +563,7 @@ struct KilobatCLI {
         let names = commands.map(\.name).joined(separator: " ")
         switch shell {
         case "zsh":
-            let described = commands.map { "'\($0.name):\($0.detail)'" }.joined(separator: " ")
+            let described = commands.map { "'\($0.name):\($0.detail.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: " ")
             let cases = commandValues.sorted { $0.key < $1.key }.map { "    \($0.key)) _values '\($0.key)' \($0.value.joined(separator: " ")) ;;" }.joined(separator: "\n")
             return """
             #compdef kilobat
@@ -594,7 +596,7 @@ struct KilobatCLI {
             complete -F _kilobat kilobat kb
             """
         case "fish":
-            let top = commands.map { "complete -c kilobat -f -n __fish_use_subcommand -a \($0.name) -d '\($0.detail)'" }
+            let top = commands.map { "complete -c kilobat -f -n __fish_use_subcommand -a \($0.name) -d '\($0.detail.replacingOccurrences(of: "'", with: "\\'"))'" }
             let values = commandValues.sorted { $0.key < $1.key }.map { "complete -c kilobat -f -n '__fish_seen_subcommand_from \($0.key)' -a '\($0.value.joined(separator: " "))'" }
             return (top + values + ["complete -c kb -w kilobat"]).joined(separator: "\n")
         default: throw CLIError("Unsupported shell '\(shell)'. Use zsh, bash or fish.")
@@ -611,7 +613,7 @@ struct KilobatCLI {
             let heads = usage.components(separatedBy: " / ").compactMap { $0.split(separator: " ").first }.flatMap { $0.split(separator: "|") }
             if line.hasPrefix("  "), heads.contains(where: { $0 == topic }) {
                 matched.append(line); capturing = true
-            } else if capturing, trimmed.hasPrefix("[") { matched.append(line) }
+            } else if capturing, line.hasPrefix("    "), !trimmed.isEmpty { matched.append(line) }
             else { capturing = false }
         }
         guard !matched.isEmpty else { throw CLIError("No help for '\(topic)'. Run kilobat --help.") }
@@ -782,7 +784,7 @@ struct KilobatCLI {
         [--for 90m|2h]      End after a while, even with the app in front
         [--json]            JSON summary; switching away lets the Mac sleep, it ends when the app quits or at 20% battery
       settings awake-on-power on|off  The app stays awake while plugged in and lets go when unplugged
-        [--display]         Keep the screen on too; Turn Off in the app holds until the next plug-in
+      settings keep-screen-on on|off  Keep the screen on too, for everything the app keeps awake
       sessions [--days 1…365] [--json]  Awake sessions and AI agent runs the app recorded
       agent-log [--json]    Every host an AI agent and the commands it started (npm, pip, curl) contacted, with bytes; the latest session, or this agent's own
         [--all]             Every session in the log (kept 30 days; the app records it with Pro)

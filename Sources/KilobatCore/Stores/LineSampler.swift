@@ -68,6 +68,7 @@ import Foundation
             if samples.farNodes == nil { samples.farNodes = .init(node: stuck.node.name, better: stuck.better.name, rssi: stuck.rssi, betterRSSI: stuck.betterRSSI) }
         }
         if samples.loggedOut == nil, case .loggedOut(let since) = diagnostics.portal.status { samples.loggedOut = max(0, since.timeIntervalSince(start)) }
+        if samples.loggedOut != nil, samples.signedInAgain == nil, case .signedIn = diagnostics.portal.status { samples.signedInAgain = at }
         if let starlink, let status = starlink.status, status.date != lastDish, starlink.present {
             starlink.watch(for: consumer, active: true); lastDish = status.date
             if let sample = CallSamples.Dish(status: status, start: start) { samples.dish.append(sample) }

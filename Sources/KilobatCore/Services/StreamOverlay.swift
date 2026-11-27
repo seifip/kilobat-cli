@@ -34,11 +34,19 @@ public final class StreamOverlay: @unchecked Sendable {
 
     public func start() throws {
         guard listener == nil, let port = NWEndpoint.Port(rawValue: port) else { return }
+        // NWListener reports a port in use only later, as its failed state; a plain bind sees it now, so callers can say so.
+        try Self.checkFree(self.port)
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
         parameters.allowLocalEndpointReuse = true
         let listener = try NWListener(using: parameters)
         listener.newConnectionHandler = { [weak self] connection in self?.serve(connection) }
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard case .failed = state else { return }
+            // Nothing can load the page any more, so nothing needs the pings.
+            listener?.cancel()
+            if let pinger = self?.pinger { Task { await pinger.stop() } }
+        }
         listener.start(queue: queue)
         self.listener = listener
         Task { await pinger.start() }
@@ -47,6 +55,20 @@ public final class StreamOverlay: @unchecked Sendable {
     public func stop() {
         listener?.cancel(); listener = nil
         Task { await pinger.stop() }
+    }
+
+    private static func checkFree(_ port: UInt16) throws {
+        let probe = socket(AF_INET, SOCK_STREAM, 0)
+        guard probe >= 0 else { return }
+        defer { close(probe) }
+        // As the listener allows reuse, so a port only lingering from a closed connection still counts as free.
+        var reuse: Int32 = 1
+        setsockopt(probe, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian; address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(probe, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        if bound != 0 { throw NWError.posix(POSIXErrorCode(rawValue: errno) ?? .EADDRINUSE) }
     }
 
     /// Switches what the overlay pings without closing the page's port, so OBS keeps its source.
@@ -137,6 +159,10 @@ public actor LivePing {
     private var label: String?
     /// The match's server doesn't answer ping: its misses aren't loss.
     private var silentServer = false
+    /// Bumped by every start and stop, so a lookup that finishes after it was overtaken launches nothing.
+    private var generation = 0
+    /// Pinging is wanted: started and not stopped since.
+    private var active = false
     public init(target: String) { self.target = target }
 
     /// What a target pings and how it's named on the pill.
@@ -169,14 +195,18 @@ public actor LivePing {
     /// Pings another target from now on; the last minute starts over.
     public func retarget(_ target: String) async {
         guard target != self.target else { return }
-        let running = process != nil || loop != nil || watcher != nil
+        let running = active
         stop(); self.target = target
         if running { await start() }
     }
 
     public func start() async {
         guard process == nil, loop == nil else { return }
+        active = true; generation += 1
+        let mine = generation
         let (probe, label) = await Self.probe(for: target)
+        // Stopped, retargeted or started again while looking; or the match watcher launched first.
+        guard mine == generation, process == nil, loop == nil else { return }
         self.label = label
         if target == CurrentMatch.overlayTarget, watcher == nil { watch() }
         switch probe {
@@ -216,7 +246,9 @@ public actor LivePing {
         }
     }
     private func refreshMatch() async {
+        let mine = generation
         let (probe, label) = await Self.probe(for: CurrentMatch.overlayTarget)
+        guard mine == generation else { return }
         var address: String?
         if case let .icmp(found)? = probe { address = found }
         self.label = label
@@ -232,16 +264,37 @@ public actor LivePing {
         // -n numeric, 1 s apart, 1 s wait each: a reply later than that counts as lost, as a stream would feel it.
         process.arguments = ["-n", "-i", "1", "-W", "1000", host]
         let pipe = Pipe()
-        process.standardOutput = pipe; process.standardError = Pipe()
-        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
-            guard let self, !text.isEmpty else { return }
+        // Nothing reads ping's errors; a pipe for them would fill and stop ping for good.
+        process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+        pipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let data = handle.availableData
+            // An empty read is the end of ping's output: left installed, the handler would be called again without end.
+            guard !data.isEmpty else { handle.readabilityHandler = nil; Task { await self?.ended(process) }; return }
+            guard let self else { return }
+            let text = String(decoding: data, as: UTF8.self)
             Task { await self.ingest(text) }
         }
         do { try process.run(); self.process = process } catch { self.process = nil }
     }
 
+    /// Ping exited by itself (a name that doesn't resolve yet, no network): tries again in a while, while still wanted.
+    private func ended(_ finished: Process?) {
+        guard let finished, process === finished else { return }
+        process = nil
+        guard active else { return }
+        let mine = generation
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            await self?.restart(mine)
+        }
+    }
+    private func restart(_ expected: Int) async {
+        guard expected == generation, active, process == nil, loop == nil else { return }
+        await start()
+    }
+
     public func stop() {
+        active = false; generation += 1
         watcher?.cancel(); watcher = nil
         stopProbe(); samples = []; silentServer = false
     }

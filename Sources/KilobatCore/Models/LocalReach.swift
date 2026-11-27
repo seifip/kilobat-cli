@@ -297,7 +297,7 @@ public struct LocalReachCheck: Codable, Sendable, Equatable {
     public var short: String {
         switch verdict {
         case .works:
-            let count = targets.count
+            let count = devices.count
             if !casting.isEmpty && !printers.isEmpty { return String(localized: "Casting and printing should work · \(count) devices", comment: "Wi-Fi menu: local network check; the argument is a number") }
             return casting.isEmpty ? String(localized: "Printing should work · \(Self.list(printers.map(\.name), limit: 1))", comment: "Wi-Fi menu: local network check; the argument names a printer")
                                    : String(localized: "Casting should work · \(Self.list(casting.map(\.name), limit: 1))", comment: "Wi-Fi menu: local network check; the argument names a TV")

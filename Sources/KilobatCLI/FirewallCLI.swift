@@ -18,7 +18,7 @@ import KilobatCore
                     guard index + 1 < words.count, let value = Int(words[index + 1]), (0...400).contains(value) else { throw CLIError("Use --back 0…400.") }
                     back = value; index += 2
                 default:
-                    guard app == nil else { throw CLIError(bandwidthUsage) }
+                    guard app == nil, !words[index].hasPrefix("--") else { throw CLIError(bandwidthUsage) }
                     app = words[index]; index += 1
                 }
             }

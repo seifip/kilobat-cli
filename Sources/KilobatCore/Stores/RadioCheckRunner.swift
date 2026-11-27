@@ -57,6 +57,7 @@ import Observation
             case false?: skipped[radio] = .alreadyOff
             case nil: skipped[radio] = .unavailable
             }
+            if stopping { return await halt() }
         }
         guard !radios.isEmpty else { return end(RadioComparison(effects: [], skipped: skipped, channel: channel, band: band)) }
         phase = .measuring(.asIs)
@@ -65,15 +66,16 @@ import Observation
         var effects: [RadioEffect] = []
         var reference = first
         for radio in radios {
-            phase = .confirming(radio)
-            let yes = await personAnswers()
+            let yes = await personAnswers(for: radio)
             if stopping { return await halt() }
             guard yes else { skipped[radio] = .declined; continue }
             phase = .switching(radio, on: false)
             do { try await actions.set(radio, false); switchedOff.insert(radio) }
-            catch { skipped[radio] = .failed; self.error = error.localizedDescription; continue }
+            catch { skipped[radio] = .failed; self.error = error.localizedDescription }
             if stopping { return await halt() }
+            guard skipped[radio] != .failed else { continue }
             await actions.wait(radio.settle)
+            if stopping { return await halt() }
             phase = .measuring(.off(radio))
             let off = await actions.measure(.off(radio))
             if stopping { return await halt() }
@@ -108,8 +110,12 @@ import Observation
         answer?.resume(returning: false); answer = nil
     }
 
-    private func personAnswers() async -> Bool {
-        await withCheckedContinuation { continuation in answer = continuation }
+    private func personAnswers(for radio: RadioSwitch) async -> Bool {
+        await withCheckedContinuation { continuation in
+            guard !stopping else { return continuation.resume(returning: false) }
+            answer = continuation
+            phase = .confirming(radio)
+        }
     }
     private func restore(_ radio: RadioSwitch) async {
         guard switchedOff.contains(radio) else { return }

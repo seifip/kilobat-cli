@@ -184,8 +184,10 @@ public struct AlertLedger: Codable, Equatable, Sendable {
         for threshold in thresholds {
             let id = key + "|" + String(threshold)
             if fraction * 100 >= Double(threshold) {
-                if seen[id] == nil { fresh.append(threshold) }
-                seen[id] = now
+                if let last = seen[id] {
+                    // Kept fresh for `prune`, a day at a time: the ledger is saved whenever it changes.
+                    if now.timeIntervalSince(last) >= 86_400 { seen[id] = now }
+                } else { fresh.append(threshold); seen[id] = now }
             } else { seen[id] = nil }
         }
         return fresh

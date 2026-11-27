@@ -187,6 +187,8 @@ public struct ProtectionListState: Codable, Equatable, Sendable {
     public var error: String?
     /// Lines the last good copy held that Kilobat can't use (Adblock rules beyond `||domain^`, paths); subscriptions only.
     public var skipped: Int?
+    /// The last check got no list at all (offline, a timeout, an HTTP error), so it is worth asking again soon.
+    public var retrySoon: Bool?
     public init() {}
 }
 
@@ -203,6 +205,7 @@ public struct ProtectionUpdater: Sendable {
     public let directory: URL
     public let fetch: Fetch
     public static let interval: TimeInterval = 86_400
+    public static let retryAfterFailure: TimeInterval = 3_600
     public static let maximumBytes = 64 << 20
 
     public init(directory: URL = ProtectionUpdater.defaultDirectory, fetch: @escaping Fetch = { request in try await URLSession.shared.data(for: request) }) {
@@ -233,7 +236,8 @@ public struct ProtectionUpdater: Sendable {
         for list in lists {
             var entry = state.lists[list.id] ?? ProtectionListState()
             let present = FileManager.default.fileExists(atPath: fileURL(list).path)
-            if !force, present, let checked = entry.checked, now.timeIntervalSince(checked) < Self.interval - 600 { continue }
+            let wait = entry.retrySoon == true ? Self.retryAfterFailure - 600 : Self.interval - 600
+            if !force, present, let checked = entry.checked, now.timeIntervalSince(checked) < wait { continue }
             var request = URLRequest(url: list.url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
             request.setValue("Kilobat (+https://kilobat.app)", forHTTPHeaderField: "User-Agent")
             if present {
@@ -244,7 +248,7 @@ public struct ProtectionUpdater: Sendable {
             do {
                 let (data, response) = try await fetch(request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 304 && present { entry.error = nil; entry.verified = now }
+                if status == 304 && present { entry.error = nil; entry.verified = now; entry.retrySoon = nil }
                 else if status == 200 {
                     let parsed = try Self.validate(data, list: list, previous: present ? entry.entries : 0)
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -253,9 +257,10 @@ public struct ProtectionUpdater: Sendable {
                     entry.etag = http?.value(forHTTPHeaderField: "ETag"); entry.lastModified = http?.value(forHTTPHeaderField: "Last-Modified")
                     entry.verified = now; entry.updated = now; entry.entries = parsed.count; entry.bytes = data.count; entry.error = nil
                     entry.skipped = list.group == .subscriptions ? parsed.skipped : nil
-                } else { entry.error = "HTTP \(status)" }
-            } catch let failure as Failure { entry.error = failure.message }
-            catch { entry.error = error.localizedDescription }
+                    entry.retrySoon = nil
+                } else { entry.error = "HTTP \(status)"; entry.retrySoon = true }
+            } catch let failure as Failure { entry.error = failure.message; entry.retrySoon = nil }
+            catch { entry.error = error.localizedDescription; entry.retrySoon = true }
             state.lists[list.id] = entry
         }
         save(state)

@@ -51,7 +51,9 @@ import KilobatCore
             return value
         case .correct(let leftGB, let text):
             let pack = try target(text)
-            do { try store.correctPack(pack.id, leftBytes: UInt64((leftGB * 1_000_000_000).rounded()), now: now) }
+            // Past UInt64 the figure is still more than any pack holds, which `correctPack` answers.
+            let left = UInt64(exactly: (leftGB * 1_000_000_000).rounded()) ?? .max
+            do { try store.correctPack(pack.id, leftBytes: left, now: now) }
             catch let error as DataPackError { throw CLIError(error.message) }
             var value = report(store, network: network, name: name, now: now)
             value["corrected"] = object(store.packStatus(store.dataPacks.first { $0.id == pack.id } ?? pack, now: now))

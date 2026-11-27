@@ -245,7 +245,7 @@ public enum AgentCatalog {
     private var lidOwners: [Int32: (until: Date, reason: String)] = [:]
 
     /// `directory` nil keeps history in memory only, for the CLI.
-    public init(directory: URL? = nil, defaults: UserDefaults = .standard) {
+    public init(directory: URL? = nil, defaults: UserDefaults = .standard, bootTime: Double = KillSwitchState.bootTime()) {
         self.directory = directory; self.defaults = defaults
         keepAwakeForAgents = defaults.object(forKey: "awake.agents") as? Bool ?? true
         keepAwakeWhileWaiting = defaults.bool(forKey: "awake.waiting")
@@ -258,7 +258,7 @@ public enum AgentCatalog {
         quietMinutes = defaults.object(forKey: "awake.quietMinutes") as? Int ?? 3
         keepDisplayOn = defaults.bool(forKey: "awake.display")
         awakeOnPower = defaults.bool(forKey: "awake.power")
-        powerSuppressed = (defaults.object(forKey: "awake.powerOff") as? Date).map { $0 > Date() - ProcessInfo.processInfo.systemUptime } ?? false
+        powerSuppressed = (defaults.object(forKey: "awake.powerOff") as? Date).map { $0.timeIntervalSince1970 > bootTime } ?? false
         webhook = defaults.string(forKey: "awake.webhook") ?? ""
         if let directory { history = Self.loadHistory(directory) }
     }

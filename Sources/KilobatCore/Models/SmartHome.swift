@@ -295,7 +295,7 @@ public struct HomeKitSummary: Codable, Sendable, Equatable {
             let category = TXTRecord.text(record.txt["ci"]).flatMap { Int($0) } ?? 1
             if category == 2 { bridges += 1 }
             if let flags = TXTRecord.text(record.txt["sf"]).flatMap({ Int($0) }), flags & 1 != 0 { unpaired += 1 }
-            categories[categoryNames[category] ?? "Other", default: 0] += 1
+            categories[categoryNames[category] ?? categoryNames[1] ?? "Other", default: 0] += 1
         }
         return HomeKitSummary(accessories: unique.count, bridges: bridges, unpaired: unpaired, overThread: unique.filter { $0.type == SmartHomeServices.hapThread }.count, categories: categories)
     }

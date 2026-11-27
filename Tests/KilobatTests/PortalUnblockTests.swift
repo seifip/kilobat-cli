@@ -114,7 +114,7 @@ struct PortalUnblockTests {
         #expect(!cause.metric(FixReading(portal: false)).good)
         #expect(cause.metric(FixReading(portal: false)).text == "Signed out")
         #expect(cause.metric(FixReading(dnsMs: 30, portal: false)).good)
-        #expect(cause.metric(FixReading(internetMs: 40, portal: false)).text == "Signed in")
+        #expect(cause.metric(FixReading(dnsMs: 30, portal: false)).text == "Signed in")
     }
 
     // MARK: The run, on simulated readings

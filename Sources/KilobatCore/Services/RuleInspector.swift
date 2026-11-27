@@ -177,6 +177,11 @@ public struct RuleInspector: @unchecked Sendable {
             let rest = text[text.index(after: close)...]
             return (host, rest.hasPrefix(":") ? String(rest.dropFirst()) : nil)
         }
+        // Network.framework writes an IPv6 endpoint as address.port.
+        if text.filter({ $0 == ":" }).count > 1, let dot = text.lastIndex(of: "."), text.index(after: dot) < text.endIndex,
+           text[text.index(after: dot)...].allSatisfy(\.isNumber), HostName.isAddress(String(text[..<dot])) {
+            return (String(text[..<dot]), String(text[text.index(after: dot)...]))
+        }
         if text.filter({ $0 == ":" }).count == 1, let colon = text.lastIndex(of: ":") {
             return (String(text[..<colon]), String(text[text.index(after: colon)...]))
         }

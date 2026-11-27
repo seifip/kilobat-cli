@@ -206,6 +206,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     public var watchesWakes = true
     /// When the Mac went to sleep and the interface it was using, for the next wake's stage timing.
     private var sleptAt: Date?
+    /// Sleeps so far, so a check that a sleep caught can tell.
+    @ObservationIgnored private var sleepCount = 0
     private var sleptInterface: (name: String?, wired: Bool)?
     private var wakeTask: Task<Void, Never>?
 
@@ -271,6 +273,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         })
     }
     private func willSleep() {
+        sleepCount += 1
         wakeTask?.cancel(); wakeTask = nil
         sleptAt = Date()
         sleptInterface = snapshot.map { ($0.wiredInterface ?? $0.radio.interface, $0.wiredInterface != nil) }
@@ -365,7 +368,9 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         diagnosticTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let wait = self.nextCheckDelay() - Date().timeIntervalSince(self.lastCheck)
+                // A clock set back since the last check doesn't put the next one off by as much: it checks now.
+                let since = Date().timeIntervalSince(self.lastCheck)
+                let wait = since < 0 ? 0 : self.nextCheckDelay() - since
                 if wait > 0 { await self.pauseChecks(seconds: wait); continue }
                 self.promptCheck = false
                 if !self.sleeping { await self.diagnose() }
@@ -428,8 +433,10 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         let gap = Self.expectedGap(offlineChecks: offline ? offlineChecks + 1 : offlineChecks, interval: checkInterval)
         offlineChecks = offline ? offlineChecks + 1 : 0
         if offline { IdleCounters.bump("check offline") }
-        let before = Self.portBytes(), started = Date()
+        let before = Self.portBytes(), started = Date(), slept = sleepCount
         var sample = await probe.snapshot(checkPortal: false, offline: offline)
+        // A check the Mac slept through timed out on the frozen probes: it is dropped, and the woken network checked at once.
+        guard slept == sleepCount else { diagnosing = false; promptCheck = true; lastCheck = .distantPast; checkPause?.cancel(); return }
         let after = Self.portBytes(), finished = Date()
         let other = sample.secondary ?? PingResult(host: "8.8.8.8", samples: [], lossPercent: nil)
         let fallback = sample.httpReachable
@@ -558,12 +565,13 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             if self?.deviceNetworks.enabled == true { await self?.deviceNetworks.priority.refresh() }
         }
     }
-    public func scan() async {
+    /// `save: false` for a scan Kilobat takes on its own, which shouldn't push the person's saved scans out.
+    public func scan(save: Bool = true) async {
         guard !scanning else { return }
         guard locationAllowed else { error = String(localized: "Enable Location access to scan nearby Wi-Fi networks. macOS uses this permission for Wi-Fi names and scanning."); return }
         scanning = true
         defer { scanning = false }
-        do { networks = try await probe.scan(); scannedAt = Date(); survey.saveScan(networks) }
+        do { networks = try await probe.scan(); scannedAt = Date(); if save { survey.saveScan(networks) } }
         catch { self.error = error.localizedDescription }
     }
     /// `streams` overrides the Single or Parallel choice; `scheduled` marks a test Kilobat started on its own.

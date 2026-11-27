@@ -386,11 +386,14 @@ public enum DeviceClassifier {
     /// Product and brand words in a model or hostname, most specific first. `generic` words ("tv", "printer") say the
     /// type but not much else, so a hostname with only one counts as a weak hint.
     static let products: [(pattern: String, type: DeviceType, brand: String?, generic: Bool)] = [
+        // A name that says iPhone, iPad or MacBook is that, whatever else its owner's name spells ("Charlottes-iPhone").
+        (#"iphone"#, .phone, "Apple", false), (#"ipad"#, .phone, "Apple", false),
+        (#"macbook|imac|mac-?mini|mac-?studio|mac-?pro|(^|[^a-z])mbp([^a-z]|$)"#, .computer, "Apple", false),
         (#"ring.?(video.?)?doorbell|doorbell|video.?door"#, .doorbell, nil, false),
         (#"nest.?(doorbell|hello)"#, .doorbell, "Google Nest", false),
         (#"wyze|hl_cam|hl_pan"#, .camera, "Wyze", false),
         (#"^ring-|ring.?(stick.?up|spotlight|floodlight|indoor|outdoor)"#, .camera, "Ring", false),
-        (#"arlo|^vmc\d{4}|^vmb\d{4}"#, .camera, "Arlo", false),
+        (#"(^|[^a-z])arlo|^vmc\d{4}|^vmb\d{4}"#, .camera, "Arlo", false),
         (#"eufy"#, .camera, "eufy", false), (#"blink"#, .camera, "Blink", false), (#"reolink"#, .camera, "Reolink", false),
         (#"hikvision|ezviz"#, .camera, "Hikvision", false), (#"amcrest"#, .camera, "Amcrest", false), (#"foscam"#, .camera, "Foscam", false),
         (#"tapo.?c\d{3}"#, .camera, "TP-Link Tapo", false), (#"nest.?cam|dropcam"#, .camera, "Google Nest", false),
@@ -414,9 +417,7 @@ public enum DeviceClassifier {
         (#"dirigera|tradfri"#, .hub, "IKEA", false), (#"lutron|caseta"#, .hub, "Lutron", false), (#"(^|[^a-z])(hub|bridge)([^a-z]|$)"#, .hub, nil, true),
         (#"playstation|(^|[^a-z])ps[345]([^a-z0-9]|$)"#, .console, "PlayStation", false), (#"xbox"#, .console, "Xbox", false),
         (#"nintendo"#, .console, "Nintendo", false), (#"steam.?deck"#, .console, "Steam Deck", false), (#"oculus|meta.?quest"#, .console, "Meta Quest", false),
-        (#"iphone"#, .phone, "Apple", false), (#"ipad"#, .phone, "Apple", false),
         (#"android|galaxy|pixel|oneplus|redmi|huawei|oppo|moto-"#, .phone, nil, false),
-        (#"macbook|imac|mac-?mini|mac-?studio|mac-?pro|(^|[^a-z])mbp([^a-z]|$)"#, .computer, "Apple", false),
         (#"^(desktop|laptop)-[a-z0-9]{7}$"#, .computer, "Windows", false),
         (#"thinkpad|surface|raspberrypi|ubuntu|debian|fedora|(^|[^a-z])pc([^a-z]|$)|desktop|laptop|workstation"#, .computer, nil, true),
         (#"synology|diskstation|rackstation|(^|[^a-z])ds\d{3,4}"#, .nas, "Synology", false), (#"qnap|(^|[^a-z])ts-\d{3}"#, .nas, "QNAP", false),

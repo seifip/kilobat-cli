@@ -499,6 +499,8 @@ import KilobatCore
     /// Sets the data cost of `network` (a key or name), or of the network the app is on.
     static func setCost(_ cost: NetworkCost, network: String?, store: TrafficStore) async throws -> [String: Any] {
         let app = network == nil ? await connection() : nil
+        // Another change may have been saved while the app answered.
+        store.reloadPreferences()
         let current = network == nil ? currentNetwork(store, app: app) : nil
         if network == nil && current == nil { throw CLIError("Kilobat hasn’t recorded a network yet. Open the app, or name one from kilobat networks.") }
         let key = try current?.key ?? Self.network(network ?? "", store: store)
@@ -729,8 +731,6 @@ import KilobatCore
 
     static func settings(_ args: [String], json: Bool) async throws {
         let store = TrafficStore(startMonitoring: false)
-        // A flag belongs to the value: settings awake-on-power on --display.
-        var args = args
         switch args.count {
         case 0:
             if json { try printObject(Dictionary(uniqueKeysWithValues: settingsList.map { ($0.key, $0.read(store)) })); return }
@@ -766,7 +766,7 @@ import KilobatCore
             return
         }
         guard args.first == "on" else { throw CLIError(usage) }
-        try KilobatCLI.allow(args, ["--for", "--until-quit"], valued: ["--for", "--until-quit"])
+        try KilobatCLI.allow(["low-latency"] + args.dropFirst(), ["--for", "--until-quit"], valued: ["--for", "--until-quit"])
         func value(_ flag: String) throws -> String? {
             guard let index = args.firstIndex(of: flag) else { return nil }
             guard index + 1 < args.count else { throw CLIError(usage) }
@@ -820,7 +820,7 @@ import KilobatCore
     }
 
     /// Rounded to 0.1 as a decimal, so JSON shows 6.9 rather than 6.9000000000000004.
-    static func tenths(_ value: Double) -> Any { value.isFinite ? NSDecimalNumber(value: Int((value * 10).rounded())).multiplying(byPowerOf10: -1) : NSNull() }
+    static func tenths(_ value: Double) -> Any { value.isFinite && abs(value) < 1e15 ? NSDecimalNumber(value: Int((value * 10).rounded())).multiplying(byPowerOf10: -1) : NSNull() }
     static func printObject(_ value: Any) throws {
         print(String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self))
     }

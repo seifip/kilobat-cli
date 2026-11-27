@@ -161,21 +161,23 @@ public enum BonjourBrowse {
             guard !finished, services[key] == nil, services.count < limit else { return }
             services[key] = BonjourService(type: type, name: name)
             var ref: DNSServiceRef?
-            let error = DNSServiceResolve(&ref, 0, interface, name, type, domain, { _, _, interface, error, _, host, port, length, record, context in
+            let error = DNSServiceResolve(&ref, 0, interface, name, type, domain, { ref, _, interface, error, _, host, port, length, record, context in
                 guard error == kDNSServiceErr_NoError, let context, let host else { return }
                 let box = Unmanaged<Context>.fromOpaque(context).takeUnretainedValue()
                 let txt = record.map { Data(bytes: $0, count: Int(length)) } ?? Data()
-                box.session.resolved(key: box.key ?? "", host: String(cString: host), port: UInt16(bigEndian: port), txt: txt, interface: interface)
+                box.session.resolved(key: box.key ?? "", host: String(cString: host), port: UInt16(bigEndian: port), txt: txt, interface: interface, ref: ref)
             }, context(key))
             keep(ref, error)
         }
 
-        private func resolved(key: String, host: String, port: UInt16, txt: Data, interface: UInt32) {
+        private func resolved(key: String, host: String, port: UInt16, txt: Data, interface: UInt32, ref resolve: DNSServiceRef?) {
             guard !finished, var service = services[key] else { return }
             let first = service.host == nil
             service.host = host; service.port = port; service.txt = BonjourTXT.parse(txt)
             services[key] = service
             guard first else { return }
+            // Done after its first answer; each open ref is a socket, and a large network would use up the app's.
+            if let resolve, let index = refs.firstIndex(of: resolve) { refs.remove(at: index); DNSServiceRefDeallocate(resolve) }
             var ref: DNSServiceRef?
             let error = DNSServiceGetAddrInfo(&ref, 0, interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4), host, { _, _, _, error, _, address, _, context in
                 guard error == kDNSServiceErr_NoError, let context, let address, address.pointee.sa_family == sa_family_t(AF_INET) else { return }

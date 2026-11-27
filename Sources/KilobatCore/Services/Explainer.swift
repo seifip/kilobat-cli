@@ -219,7 +219,8 @@ public final class Explainer: @unchecked Sendable {
               let dictionary = info as? [String: Any] else { return String(localized: "Unsigned", comment: "Explainer fact: code without a signature") }
         var requirement: SecRequirement?
         if SecRequirementCreateWithString("anchor apple" as CFString, [], &requirement) == errSecSuccess, let requirement,
-           SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess { return "Apple" }
+           // Not the sealed resources: for an app's executable that would hash the whole bundle (15 s for Xcode) to pick a label.
+           SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSDoNotValidateResources), requirement) == errSecSuccess { return "Apple" }
         guard dictionary[kSecCodeInfoIdentifier as String] != nil else { return String(localized: "Unsigned", comment: "Explainer fact: code without a signature") }
         if let team = dictionary[kSecCodeInfoTeamIdentifier as String] as? String {
             let certificates = dictionary[kSecCodeInfoCertificates as String] as? [SecCertificate]

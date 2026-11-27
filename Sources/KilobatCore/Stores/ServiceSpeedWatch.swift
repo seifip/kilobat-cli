@@ -104,7 +104,8 @@ import Observation
 
     /// Reverse DNS for an address a download comes from, once; a name can tell the network when the table can't.
     private func resolve(_ address: String) {
-        guard !resolving.contains(address), reverse.count < 4_000 else { return }
+        guard !resolving.contains(address) else { return }
+        if reverse.count >= 4_000 { reverse = [:] }
         resolving.insert(address)
         let lookup = self.lookup
         Task { [weak self] in

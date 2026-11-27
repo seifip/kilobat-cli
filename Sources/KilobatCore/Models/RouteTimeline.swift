@@ -54,7 +54,8 @@ public struct RouteTimeline: Sendable {
     public let ceilingMs: Double
 
     public init(watch: WatchedRoute) {
-        let rounds = watch.rounds.map { (watch.date($0), watch.hops($0), watch.destinationMs($0) == nil && watch.destinationAnswers) }
+        let answers = watch.destinationAnswers
+        let rounds = watch.rounds.map { (watch.date($0), watch.hops($0), answers && watch.destinationMs($0) == nil) }
         self.init(host: watch.host, rounds: rounds, destination: watch.address, history: RouteHistory(watch: watch), changes: Self.changes(in: watch), end: watch.ended ?? watch.lastDate)
     }
 

@@ -351,6 +351,7 @@ public enum GamePing {
     /// The game that was in front last, so the check still finds it while Kilobat is in front.
     @ObservationIgnored private var lastGame: Int32?
     @ObservationIgnored private var observer: NSObjectProtocol?
+    @ObservationIgnored private var runningCheck: (at: TimeInterval, value: Bool)?
     public init(table: GameServerTable = .bundled) {
         self.table = table
         let saved = UserDefaults.standard.string(forKey: "games.game")
@@ -364,7 +365,14 @@ public enum GamePing {
         }
     }
     /// A game is open, so checking the match can find something.
-    public var gameRunning: Bool { !CurrentMatch.candidates(preferring: lastGame).isEmpty }
+    /// Read from view bodies, so the walk through the running apps is kept for a few seconds.
+    public var gameRunning: Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let runningCheck, now - runningCheck.at < 3 { return runningCheck.value }
+        let value = !CurrentMatch.candidates(preferring: lastGame).isEmpty
+        runningCheck = (now, value)
+        return value
+    }
     public var current: GameServerTable.Game? { table.game(game) }
     public var report: GamePingReport? { reports[game] }
     public func run() async {

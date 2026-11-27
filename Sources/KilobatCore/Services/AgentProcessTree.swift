@@ -88,7 +88,7 @@ public final class AgentProcessTree: @unchecked Sendable {
     private var members: [Int32: (member: Member, seen: Date)] = [:]
     /// Processes known not to be agents, by pid and start, so a full scan reads each one's path and arguments once.
     private var notAgents: [String: Date] = [:]
-    /// Pids an ancestor walk found outside every agent, until the roots change.
+    /// Pids an ancestor walk found outside every agent, until the roots change or the process exits.
     private var outside: Set<String> = []
     private var lastDiscovery = Date.distantPast
     /// Agents whose process, or a process it started, ran at the last walk.
@@ -124,6 +124,7 @@ public final class AgentProcessTree: @unchecked Sendable {
     }
 
     public var liveRoots: [Root] { lock.withLock { Array(roots.values) } }
+    var outsideCount: Int { lock.withLock { outside.count } }
     /// Whether a full scan has run, so an agent missing from the roots has really exited.
     public var discovered: Bool { lock.withLock { scanned } }
     private var scanned = false
@@ -145,10 +146,11 @@ public final class AgentProcessTree: @unchecked Sendable {
         lastDiscovery = now
         var found: [Int32: Root] = [:]
         let previous = lock.withLock { roots }
-        var seen: [String: Date] = [:]
+        var seen: [String: Date] = [:], alive = Set<String>()
         for pid in source.all() {
             guard let entry = source.entry(pid) else { continue }
             let key = Self.key(pid, entry.start)
+            alive.insert(key)
             if let root = previous[pid], root.start == entry.start { found[pid] = root; continue }
             if notAgents[key] != nil { seen[key] = now; continue }
             let path = source.path(pid)
@@ -164,7 +166,7 @@ public final class AgentProcessTree: @unchecked Sendable {
         }
         notAgents = seen
         lock.withLock {
-            if Set(found.keys) != Set(roots.keys) { outside = [] }
+            if Set(found.keys) != Set(roots.keys) { outside = [] } else { outside.formIntersection(alive) }
             roots = found; scanned = true
         }
     }

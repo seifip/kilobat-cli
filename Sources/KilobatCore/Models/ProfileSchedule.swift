@@ -32,15 +32,15 @@ public struct ProfileSchedule: Codable, Equatable, Identifiable, Sendable {
         let minute = calendar.component(.hour, from: date) * 60 + calendar.component(.minute, from: date)
         let weekday = calendar.component(.weekday, from: date)
         if overnight {
-            if days.contains(weekday), minute >= start { return calendar.date(byAdding: .minute, value: start, to: day) }
+            if days.contains(weekday), minute >= start { return calendar.date(bySettingHour: start / 60, minute: start % 60, second: 0, of: day) }
             let yesterday = weekday == 1 ? 7 : weekday - 1
             if days.contains(yesterday), minute < end, let previous = calendar.date(byAdding: .day, value: -1, to: day) {
-                return calendar.date(byAdding: .minute, value: start, to: previous)
+                return calendar.date(bySettingHour: start / 60, minute: start % 60, second: 0, of: previous)
             }
             return nil
         }
         guard days.contains(weekday), minute >= start, minute < end else { return nil }
-        return calendar.date(byAdding: .minute, value: start, to: day)
+        return calendar.date(bySettingHour: start / 60, minute: start % 60, second: 0, of: day)
     }
 
     /// "Weekdays, 09:00–18:00", in the person's own time format.
@@ -121,7 +121,8 @@ public enum ProfileScheduler {
             guard let date = calendar.date(byAdding: .day, value: offset, to: day) else { continue }
             for schedule in usable {
                 for minute in [schedule.start, schedule.end] {
-                    if let moment = calendar.date(byAdding: .minute, value: minute, to: date), moment > now { moments.append(moment) }
+                    // The wall-clock time, which minutes after midnight aren't on a clock-change day.
+                    if let moment = calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: date), moment > now { moments.append(moment) }
                 }
             }
         }

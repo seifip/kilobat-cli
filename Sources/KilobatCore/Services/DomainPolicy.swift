@@ -5,7 +5,9 @@ public enum DomainPolicy {
         func invalid(_ message: String) -> NSError { NSError(domain: "Kilobat", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         guard data.count <= 5_000_000 else { throw invalid(String(localized: "List is larger than 5 MB.")) }
         var domains = Set<String>()
-        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+        var text = String(decoding: data, as: UTF8.self)
+        if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
+        for line in text.split(whereSeparator: \.isNewline) {
             let clean = (line.split(separator: "#", omittingEmptySubsequences: false).first ?? "").trimmingCharacters(in: .whitespaces)
             if clean.isEmpty { continue }
             if clean.contains("|") || clean.hasPrefix("!") || clean.hasPrefix("[") { throw invalid(String(localized: "Use a plain domains or hosts list; Adblock syntax is not supported.")) }
@@ -66,7 +68,7 @@ public enum DomainPolicy {
     /// A blocklist parsed once: each entry is an address range or a normalised domain. `first` gives what
     /// `blocked(_:address:app:domains:exceptions:)` gives for the same lists, without parsing every entry per flow.
     public struct Compiled: Sendable {
-        enum Entry: Sendable { case range(AddressRange), domain(String) }
+        enum Entry: Sendable { case range(AddressRange), domain(String, suffix: String) }
         let domains: [(text: String, entry: Entry)]
         let exceptions: [String: [Entry]]
         public init(domains: [String] = [], exceptions: [String: [String]] = [:]) {
@@ -77,7 +79,8 @@ public enum DomainPolicy {
             if let range = AddressRange(text) { return .range(range) }
             var domain = text.lowercased()
             if domain.hasPrefix("*.") { domain.removeFirst(2) }
-            return .domain(domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+            let name = domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            return .domain(name, suffix: "." + name)
         }
         public func first(_ host: String?, address: String? = nil, app: String) -> String? {
             let ip = address.flatMap(AddressRange.parse) ?? host.flatMap(AddressRange.parse)
@@ -85,7 +88,7 @@ public enum DomainPolicy {
             func hit(_ entry: Entry) -> Bool {
                 switch entry {
                 case .range(let range): return ip.map(range.contains) ?? false
-                case .domain(let domain): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix("." + domain)) } ?? false
+                case .domain(let domain, let suffix): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix(suffix)) } ?? false
                 }
             }
             guard !(exceptions[app] ?? []).contains(where: hit) else { return nil }
@@ -99,7 +102,7 @@ public enum DomainPolicy {
             return list.contains { entry in
                 switch entry {
                 case .range(let range): return ip.map(range.contains) ?? false
-                case .domain(let domain): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix("." + domain)) } ?? false
+                case .domain(let domain, let suffix): return name.map { !domain.isEmpty && ($0 == domain || $0.hasSuffix(suffix)) } ?? false
                 }
             }
         }

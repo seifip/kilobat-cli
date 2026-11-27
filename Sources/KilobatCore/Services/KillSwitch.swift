@@ -157,6 +157,7 @@ public struct KillSwitchPolicy: Sendable, Equatable {
         let count = UInt32(mib.count)
         var size = 0
         guard sysctl(&mib, count, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        size += 4096
         var table = Data(count: size)
         guard table.withUnsafeMutableBytes({ sysctl(&mib, count, $0.baseAddress, &size, nil, 0) }) == 0 else { return nil }
         return table.withUnsafeBytes { bytes -> [(destination: UInt32, mask: UInt32, interface: UInt32)]? in
@@ -229,6 +230,7 @@ public struct KillSwitchPolicy: Sendable, Equatable {
         var size = 0
         guard sysctl(&mib, mibCount, nil, &size, nil, 0) == 0 else { return false }
         if size == 0 { return true }
+        size += 4096
         var table = Data(count: size)
         guard table.withUnsafeMutableBytes({ sysctl(&mib, mibCount, $0.baseAddress, &size, nil, 0) }) == 0 else { return false }
         return table.withUnsafeBytes { bytes in

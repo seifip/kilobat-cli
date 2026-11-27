@@ -1,14 +1,21 @@
 import Foundation
+import os
 
 public struct AppTrafficGroup: Identifiable {
     public let id: String
     public var members: [AppTraffic]
     public var summary: AppTraffic
 
+    /// Names read from disk, by path: traffic asks for them every second. An app renamed in place keeps its old name
+    /// here until Kilobat relaunches.
+    private static let names = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
     /// The name people know an app by, for the bundle that owns a helper or service.
     public static func displayName(_ path: String) -> String {
+        if let known = names.withLock({ $0[path] }) { return known }
         let name = FileManager.default.displayName(atPath: path)
-        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+        let short = name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+        names.withLock { if $0.count >= 1_024 { $0.removeAll() }; $0[path] = short }
+        return short
     }
 
     /// "Claude Code" for the `claude` command-line tool, as the agent log names it, so it doesn't read as a lowercase twin
