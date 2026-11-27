@@ -50,13 +50,32 @@ public actor WiFiConnection {
         return WiFiChoices(powered: true, current: interface.ssid(), networks: choices)
     }
     public func join(_ id: String, password: String?) throws {
-        guard let interface = CWWiFiClient.shared().interface(), let network = scanned[id] else { throw WiFiError.rescan }
+        guard let interface = CWWiFiClient.shared().interface(), let selected = scanned[id] else { throw WiFiError.rescan }
+        let ssid = selected.ssidData ?? Data(id.utf8)
+        let security = Self.securityModes(selected)
+        // The menu scan can be old by the time the password is entered. Keep candidates with the selected security.
+        let candidates = try interface.scanForNetworks(withSSID: ssid)
+            .filter { $0.ssid == id && Self.securityModes($0) == security }
+            .sorted { $0.rssiValue > $1.rssiValue }
+        guard let network = candidates.first else { throw WiFiError.rescan }
         var credential = password
-        if credential == nil, let ssid = network.ssidData {
+        if credential == nil {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        try associate(interface, to: network, password: credential, typed: password != nil)
+        do {
+            try associate(interface, to: network, password: credential, typed: password != nil)
+        } catch let error as WiFiJoinError where error.transient {
+            guard let bssid = network.bssid, let alternate = candidates.dropFirst().first(where: {
+                $0.bssid.map { $0 != bssid } == true
+            }) else { throw error }
+            try Task.checkCancellation()
+            try associate(interface, to: alternate, password: credential, typed: password != nil)
+        }
+    }
+
+    private static func securityModes(_ network: CWNetwork) -> [Int] {
+        WiFiLink.securityValues.filter { CWSecurity(rawValue: $0).map(network.supportsSecurity) ?? false }
     }
     /// Joins `name` on `band`, the strongest access point there, with the password macOS saved: for moving a Mac
     /// from 2.4 GHz to the same router's 5 GHz, under the same name or another. macOS may roam back if 5 GHz is weak.
@@ -138,7 +157,7 @@ public struct WiFiJoinError: LocalizedError {
     /// CoreWLAN's timeouts and its `tmpErr`: the network or macOS didn't answer in time, which a retry usually fixes.
     var transient: Bool {
         let text = underlying.localizedDescription + " " + underlying.debugDescription
-        return text.contains("tmpErr") || [-3905, -3925, -3931].contains(underlying.code)
+        return text.contains("tmpErr") || [-3905, -3925, -3931, -3958].contains(underlying.code)
     }
     /// A secured network with no saved password Kilobat could read, or a saved or typed password that was refused.
     public var needsPassword: Bool { secured && !transient }

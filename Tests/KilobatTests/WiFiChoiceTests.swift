@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import KilobatCore
 
@@ -12,5 +13,12 @@ struct WiFiChoiceTests {
         #expect(network(secured: true, known: true).joinsOnClick)
         #expect(!network(secured: true, known: false).joinsOnClick)
         #expect(!network(secured: true, known: true, enterprise: true).joinsOnClick)
+    }
+
+    @Test func temporaryAssociationFailureDoesNotRequestAnotherPassword() {
+        let error = NSError(domain: "com.apple.wifi.apple80211API.error", code: -3958)
+        let join = WiFiJoinError(name: "Hotel", underlying: error, secured: true, hadPassword: true, typed: true)
+        #expect(join.transient)
+        #expect(!join.needsPassword)
     }
 }
