@@ -82,9 +82,12 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     @ObservationIgnored private var wifiEvents: WiFiEventWatch?
     @ObservationIgnored private var wifiEventRead: Task<Void, Never>?
+    /// Increment on the notification itself, before the debounced radio and route reads.
+    @ObservationIgnored private var pathRevision: UInt64 = 0
     /// Wi-Fi switched on or off, joined or left a network: read the radio now, as macOS's own icon changes now, and
     /// once more shortly after for the address, which arrives a moment later without an event of its own.
     private func wifiDidChange() {
+        pathRevision &+= 1
         wifiEventRead?.cancel()
         wifiEventRead = Task { [weak self] in
             for delay in [0.15, 1.5] {
@@ -434,6 +437,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         offlineChecks = offline ? offlineChecks + 1 : 0
         if offline { IdleCounters.bump("check offline") }
         let before = Self.portBytes(), started = Date(), slept = sleepCount
+        let beforePath = pathRevision
         var sample = await probe.snapshot(checkPortal: false, offline: offline)
         // A check the Mac slept through timed out on the frozen probes: it is dropped, and the woken network checked at once.
         guard slept == sleepCount else { diagnosing = false; promptCheck = true; lastCheck = .distantPast; checkPause?.cancel(); return }
@@ -445,6 +449,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             let reachable = sample.internet.average != nil || other.average != nil || fallback == true
             sample.setupNetwork = SetupNetworks.judge(ssid: sample.radio.ssid, gateway: sample.gateway, internetReachable: reachable, saved: DeviceNotesStore.networks())
         }
+        if pathRevision == beforePath, sleepCount == slept { journal.observeJoin(sample, startedAt: started, probesRan: !offline) }
         snapshot = sample; onSnapshot?(sample)
         localReach.observe(sample, portal: portal.record != nil)
         let onPortal = portal.record != nil
@@ -551,6 +556,7 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
     }
     /// A route change arrives as a burst of notifications: one read, shortly after the last of them.
     private func routeDidChange() {
+        pathRevision &+= 1
         routeRefresh?.cancel()
         routeRefresh = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
@@ -574,6 +580,19 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
         do { networks = try await probe.scan(); scannedAt = Date(); if save { survey.saveScan(networks) } }
         catch { self.error = error.localizedDescription }
     }
+    /// Both IP families must use this radio. Split IPv4/IPv6, tunnels and missing identity cannot certify a test.
+    private func speedPath(on sample: DiagnosticSnapshot?) async -> WiFiSpeedPath? {
+        guard let sample, sample.networkIdentified, sample.wiredInterface == nil, sample.tunneledRoute != true,
+              routeWatch?.monitoring == true, wifiEvents?.monitoring == true else { return nil }
+        let revision = pathRevision
+        let live = await probe.radio()
+        guard revision == pathRevision, let device = live.interface, let ssid = live.ssid, ssid == sample.radio.ssid,
+              let point = WiFiJoinAttempt.accessPoint(live.bssid) else { return nil }
+        let local = IPv6Probe.readLocal()
+        let paths = [local.ipv4Interface, local.ipv6Interface].compactMap { $0 }
+        guard local.readable, !paths.isEmpty, paths.allSatisfy({ $0 == device }) else { return nil }
+        return WiFiSpeedPath(name: ssid, accessPoint: point, revision: revision)
+    }
     /// `streams` overrides the Single or Parallel choice; `scheduled` marks a test Kilobat started on its own.
     public func runSpeedTest(maximumBytes: Int = 80_000_000, streams: Int? = nil, scheduled: Bool = false, planCheck: Bool = false) {
         guard !speedRunning else { return }
@@ -590,6 +609,8 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
             guard let self else { return }
             defer { self.speedRunning = false }
             do {
+                let revision = self.networkRevision, slept = self.sleepCount, began = Date()
+                let startPath = await self.speedPath(on: testedNetwork)
                 let result = try await SpeedTest.run(maximumBytes: maximumBytes, streams: streams ?? self.speedStreams, updates: { [weak self] update in
                     Task { @MainActor in
                         guard let self, self.speedRunning else { return }
@@ -601,7 +622,11 @@ public final class DiagnosticStore: NSObject, @preconcurrency CLLocationManagerD
                     }
                 }, progress: { [weak self] text in Task { @MainActor in self?.speedProgress = text } })
                 self.lastSpeed = result
-                self.journal.add(result, network: testedNetwork, networkChanged: testedNetwork?.networkKey != self.snapshot?.networkKey, scheduled: scheduled, reservedAttempt: planCheck ? true : nil)
+                let endPath = await self.speedPath(on: testedNetwork)
+                let changed = revision != self.networkRevision || testedNetwork?.networkKey != self.snapshot?.networkKey
+                let verified = changed || slept != self.sleepCount ? nil : startPath?.verified(endingOn: endPath, context: result.context)
+                self.journal.add(result, network: testedNetwork, networkChanged: changed, scheduled: scheduled, reservedAttempt: planCheck ? true : nil,
+                                 verifiedAccessPoint: verified, verifiedStart: verified == nil ? nil : began)
                 if self.scheduleHours > 0 { self.nextScheduledTest = Date().addingTimeInterval(Double(self.scheduleHours) * 3600) }
                 self.speedProgress = String(localized: "Test complete.")
             } catch is CancellationError {

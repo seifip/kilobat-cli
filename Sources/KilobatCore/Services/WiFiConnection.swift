@@ -10,7 +10,9 @@ public struct WiFiChoice: Identifiable, Sendable {
     public let enterprise: Bool
     public let weakSecurity: Bool
     public let known: Bool
-    public init(id: String, name: String, signal: Int, band: String, secured: Bool, enterprise: Bool, weakSecurity: Bool, known: Bool) {
+    var accessPoint: String?
+    public init(id: String, name: String, signal: Int, band: String, secured: Bool, enterprise: Bool, weakSecurity: Bool, known: Bool, bssid: String? = nil) {
+        accessPoint = WiFiJoinAttempt.accessPoint(bssid)
         self.id = id; self.name = name; self.signal = signal; self.band = band
         self.secured = secured; self.enterprise = enterprise; self.weakSecurity = weakSecurity; self.known = known
     }
@@ -45,33 +47,71 @@ public actor WiFiConnection {
             WiFiChoice(id: name, name: name, signal: network.rssiValue,
                        band: network.wlanChannel?.channelBand == .band2GHz ? "2.4 GHz" : network.wlanChannel?.channelBand == .band5GHz ? "5 GHz" : "6 GHz",
                        secured: !network.supportsSecurity(.none), enterprise: network.supportsSecurity(.enterprise),
-                       weakSecurity: (network.supportsSecurity(.WEP) || network.supportsSecurity(.wpaPersonal)) && !network.supportsSecurity(.wpa2Personal) && !network.supportsSecurity(.wpa3Personal), known: known.contains(name))
+                       weakSecurity: (network.supportsSecurity(.WEP) || network.supportsSecurity(.wpaPersonal)) && !network.supportsSecurity(.wpa2Personal) && !network.supportsSecurity(.wpa3Personal), known: known.contains(name), bssid: network.bssid)
         }.sorted { $0.signal != $1.signal ? $0.signal > $1.signal : $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         return WiFiChoices(powered: true, current: interface.ssid(), networks: choices)
     }
     public func join(_ id: String, password: String?) throws {
-        guard let interface = CWWiFiClient.shared().interface(), let selected = scanned[id] else { throw WiFiError.rescan }
+        let (_, error) = joinRecording(id, password: password)
+        if let error { throw error }
+    }
+    /// Capture the evidence at the CoreWLAN call site, even when the first access point fails and the retry succeeds.
+    public func joinRecording(_ id: String, password: String?) -> (WiFiJoinAttempt, (any Error)?) {
+        var attempt = WiFiJoinAttempt(name: id)
+        func mark(_ stage: WiFiJoinAttempt.Stage, _ network: CWNetwork? = nil, error: NSError? = nil, actualBSSID: String? = nil) {
+            let address = actualBSSID ?? network?.bssid
+            let key = WiFiJoinAttempt.accessPoint(address)
+            attempt.steps.append(.init(date: Date(), stage: stage, ap: key, suffix: key.flatMap { _ in address.map { String($0.suffix(5)) } },
+                                       signal: network.map(\.rssiValue), channel: network?.wlanChannel?.channelNumber,
+                                       domain: error?.domain, code: error?.code))
+        }
+        let selected = scanned[id]
+        mark(.seen, selected)
+        guard let interface = CWWiFiClient.shared().interface(), let selected else {
+            mark(.unavailable)
+            return (attempt, WiFiError.rescan)
+        }
         let ssid = selected.ssidData ?? Data(id.utf8)
         let security = Self.securityModes(selected)
-        // The menu scan can be old by the time the password is entered. Keep candidates with the selected security.
-        let candidates = try interface.scanForNetworks(withSSID: ssid)
-            .filter { $0.ssid == id && Self.securityModes($0) == security }
-            .sorted { $0.rssiValue > $1.rssiValue }
-        guard let network = candidates.first else { throw WiFiError.rescan }
+        let candidates: [CWNetwork]
+        do {
+            candidates = try interface.scanForNetworks(withSSID: ssid)
+                .filter { $0.ssid == id && Self.securityModes($0) == security }
+                .sorted { $0.rssiValue > $1.rssiValue }
+        } catch {
+            mark(.scanFailed, error: error as NSError)
+            return (attempt, error)
+        }
+        guard let network = candidates.first else {
+            mark(.unavailable)
+            return (attempt, WiFiError.rescan)
+        }
         var credential = password
         if credential == nil {
             var saved: NSString?
             if CWKeychainFindWiFiPassword(.user, ssid, &saved) == 0 { credential = saved as String? }
         }
-        do {
-            try associate(interface, to: network, password: credential, typed: password != nil)
-        } catch let error as WiFiJoinError where error.transient {
-            guard let bssid = network.bssid, let alternate = candidates.dropFirst().first(where: {
-                $0.bssid.map { $0 != bssid } == true
-            }) else { throw error }
-            try Task.checkCancellation()
-            try associate(interface, to: alternate, password: credential, typed: password != nil)
+        func tryCandidate(_ candidate: CWNetwork) -> (any Error)? {
+            mark(.joining, candidate)
+            do {
+                try associate(interface, to: candidate, password: credential, typed: password != nil)
+                // macOS can finish the join on another radio advertising this name.
+                mark(.joined, actualBSSID: interface.bssid())
+                return nil
+            } catch let failure as WiFiJoinError {
+                mark(.joinFailed, candidate, error: failure.underlying)
+                return failure
+            } catch {
+                mark(.unconfirmed, candidate)
+                return error
+            }
         }
+        var failure = tryCandidate(network)
+        if (failure as? WiFiJoinError)?.transient == true, !Task.isCancelled, let address = network.bssid,
+           let alternate = candidates.dropFirst().first(where: { $0.bssid.map { $0 != address } == true }) {
+            failure = tryCandidate(alternate)
+        }
+        return (attempt, failure)
     }
 
     private static func securityModes(_ network: CWNetwork) -> [Int] {

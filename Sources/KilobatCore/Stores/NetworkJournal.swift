@@ -53,6 +53,9 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public let networkKey: String
     public let networkName: String
     public var networkChanged: Bool? = nil
+    /// Present only when both live Wi-Fi readings and the route monitors covered the whole transfer.
+    var verifiedAccessPoint: String? = nil
+    var verifiedStart: Date? = nil
     public var reservedAttempt: Bool? = nil
     public let result: SpeedTestResult
     /// Started by Kilobat on a schedule (a plan check or Scheduled speed tests), not by you. Nil for tests you ran.
@@ -65,6 +68,21 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
     public private(set) var samples: [DiagnosticSnapshot] = []
     public private(set) var persistenceError: String?
     public var speedTests: [SavedSpeedTest] = []
+    public private(set) var joinAttempts: [WiFiJoinAttempt] = []
+
+    public func record(_ attempt: WiFiJoinAttempt) {
+        joinAttempts = Array((joinAttempts + [attempt]).suffix(48))
+        save(joinAttempts, "wifi-join-attempts.json")
+    }
+
+    func observeJoin(_ sample: DiagnosticSnapshot, startedAt: Date, probesRan: Bool) {
+        guard let last = joinAttempts.indices.last, joinAttempts[last].observe(sample, startedAt: startedAt, probesRan: probesRan) else { return }
+        save(joinAttempts, "wifi-join-attempts.json")
+    }
+
+    public func joinReport(_ attempt: WiFiJoinAttempt) -> WiFiJoinReport {
+        WiFiJoinReport(attempt: attempt, history: joinAttempts, tests: speedTests)
+    }
     /// Each hour's checks per network, kept 120 days: the record a macOS upgrade is compared against.
     public private(set) var hourly: [HourlyCheck] = []
     /// Each macOS version Kilobat has run on, and when it first did.
@@ -95,6 +113,7 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         samples = HealthSampleFile.read(self.directory); events = read("events.json") ?? []; speedTests = read("speed-tests.json") ?? []
         planAttempts = read("plan-attempts.json") ?? []
         hourly = read("hourly-checks.json") ?? []; macOSSeen = read("macos-versions.json") ?? []
+        joinAttempts = read("wifi-join-attempts.json") ?? []
         wakes = read("wakes.json") ?? []
         alerts = UserDefaults.standard.object(forKey: "networkAlerts") as? Bool ?? true
         // A previous process may have stopped mid-incident. Do not count unobserved time.
@@ -256,8 +275,8 @@ public struct SavedSpeedTest: Codable, Identifiable, Sendable {
         events.append(NetworkEvent(start: date, end: date, network: network, kind: kind, detail: detail))
         events = Array(events.suffix(500)); save(events, "events.json")
     }
-    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false, scheduled: Bool = false, reservedAttempt: Bool? = nil) {
-        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, reservedAttempt: reservedAttempt, result: test, scheduled: scheduled ? true : nil, macOS: MacOSVersion.current))
+    public func add(_ test: SpeedTestResult, network: DiagnosticSnapshot?, networkChanged: Bool = false, scheduled: Bool = false, reservedAttempt: Bool? = nil, verifiedAccessPoint: String? = nil, verifiedStart: Date? = nil) {
+        speedTests.append(SavedSpeedTest(networkKey: network?.networkKey ?? "unknown", networkName: network?.networkName ?? String(localized: "Unknown network"), networkChanged: networkChanged, verifiedAccessPoint: verifiedAccessPoint, verifiedStart: verifiedStart, reservedAttempt: reservedAttempt, result: test, scheduled: scheduled ? true : nil, macOS: MacOSVersion.current))
         speedTests = Array(speedTests.suffix(200)); save(speedTests, "speed-tests.json")
     }
     /// Reserve the full transfer allowance before starting. A failure or cancellation may have spent it.

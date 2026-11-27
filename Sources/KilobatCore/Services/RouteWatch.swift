@@ -14,6 +14,7 @@ public final class RouteWatch: @unchecked Sendable {
                 patterns: [String] = ["State:/Network/Interface/(utun|ipsec|ppp)[0-9]+/IPv4"],
                 onChange: @escaping @Sendable () -> Void) { self.keys = keys; self.patterns = patterns; self.onChange = onChange }
 
+    var monitoring: Bool { store != nil }
     public func start() {
         guard store == nil else { return }
         var context = SCDynamicStoreContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)

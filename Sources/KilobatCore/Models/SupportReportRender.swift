@@ -162,7 +162,7 @@ public extension SupportReport {
         func esc(_ s: String) -> String { s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;") }
         func when(_ d: Date) -> String { esc(d.formatted(.dateTime.weekday(.abbreviated).hour().minute())) }
         var body = """
-        <header><div class="brand">\(batSVG)<span>kilobat</span></div><div class="meta">\(esc(String(localized: "Network report", comment: "The provider report’s title")))<br><span>\(esc(dateLine))</span></div></header>
+        <header><div class="brand">\(Self.batSVG)<span>kilobat</span></div><div class="meta">\(esc(String(localized: "Network report", comment: "The provider report’s title")))<br><span>\(esc(dateLine))</span></div></header>
         <p class="device">\(esc(mac)) · \(esc(connection))\(serviceLine.map { "<br>" + esc($0) } ?? "")</p>
         \(observedLine.map { "<p>\(esc($0))</p>" } ?? "")
         \(placeURL.map { "<p>\(esc(String(localized: "Place: \($0)")))</p>" } ?? "")
@@ -221,11 +221,11 @@ public extension SupportReport {
         let title = String(localized: "Network report · \(created.formatted(date: .abbreviated, time: .omitted))", comment: "The provider report’s page title and the day it was made")
         return """
         <!doctype html><html lang="\(Bundle.main.preferredLocalizations.first ?? "en")"><head><meta charset="utf-8"><title>\(esc(title))</title>
-        <style>\(css)</style></head><body><main>\(body)</main></body></html>
+        <style>\(Self.css)</style></head><body><main>\(body)</main></body></html>
         """
     }
 
-    private var batSVG: String {
+    internal static var batSVG: String {
         ##"<svg viewBox="0 0 26 22" width="22" height="19" aria-hidden="true"><path fill="#7a5cf0" d="M2 5 Q6 10 10 8 V2 L13 6 L16 2 V8 Q20 10 24 5 L25 17 Q22 13 20 16 Q17 13 16 18 L13 21 L10 18 Q9 13 6 16 Q4 13 1 17Z"/></svg>"##
     }
 
@@ -258,7 +258,7 @@ public extension SupportReport {
         """
     }
 
-    private var css: String {
+    internal static var css: String {
         """
         @page { margin: 16mm; }
         * { box-sizing: border-box; }
